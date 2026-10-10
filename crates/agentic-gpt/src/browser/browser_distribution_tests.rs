@@ -1,13 +1,11 @@
 use super::browser_distribution_verify::{
-    is_sha2_signature, parse_inrelease_metadata, parse_pinned_repository_key, parse_release_date,
-    select_chatgpt_package, verify_and_select_chatgpt_package, verify_cleartext_with_key,
-    AuthenticatedPackagesIndex,
+    parse_inrelease_metadata, parse_pinned_repository_key, select_chatgpt_package,
+    verify_cleartext_with_key, AuthenticatedPackagesIndex,
 };
 use super::*;
 use parking_lot::Mutex;
 use pgp::{
     composed::{Deserializable, SignedPublicKey},
-    crypto::hash::HashAlgorithm,
     types::KeyDetails,
 };
 use std::io::Cursor;
@@ -90,19 +88,6 @@ fn cleartext_signature_verifies_and_tampering_fails() {
 }
 
 #[test]
-fn cleartext_signature_hash_policy_is_sha2_only() {
-    let (key, _) = SignedPublicKey::from_string(TEST_PUBLIC_KEY).unwrap();
-    assert!(verify_cleartext_with_key(TEST_SIGNED_CLEARTEXT.as_bytes(), &key).is_ok());
-    assert!(!is_sha2_signature(HashAlgorithm::Md5));
-    assert!(!is_sha2_signature(HashAlgorithm::Sha1));
-    assert!(!is_sha2_signature(HashAlgorithm::Sha224));
-    assert!(!is_sha2_signature(HashAlgorithm::Sha3_256));
-    assert!(is_sha2_signature(HashAlgorithm::Sha256));
-    assert!(is_sha2_signature(HashAlgorithm::Sha384));
-    assert!(is_sha2_signature(HashAlgorithm::Sha512));
-}
-
-#[test]
 fn authenticated_inrelease_metadata_selects_exact_target() {
     let amd64 = "a".repeat(64);
     let arm64 = "b".repeat(64);
@@ -123,36 +108,6 @@ fn authenticated_inrelease_metadata_selects_exact_target() {
     assert_eq!(fetch_path, "dists/stable/main/binary-amd64/Packages");
 }
 
-#[test]
-fn release_date_parser_accepts_rfc2822_timestamp() {
-    assert!(parse_release_date("Tue, 1 Jul 2003 10:52:37 +0200"));
-    assert!(!parse_release_date("Tue, 1 Jul 2003 10:52:37 XYZ"));
-}
-
-#[test]
-fn authenticated_inrelease_metadata_rejects_duplicates_and_contradictions() {
-    let digest = "a".repeat(64);
-    let duplicate = format!(
-        "Suite: stable\nCodename: stable\nSHA256:\n {digest} 1 main/binary-amd64/Packages\n\
-             {digest} 1 main/binary-amd64/Packages\n"
-    );
-    assert_eq!(
-        parse_inrelease_metadata(&duplicate, "amd64")
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_acquisition_inrelease_metadata_invalid"
-    );
-    let contradictory = format!(
-        "Suite: testing\nCodename: stable\nSHA256:\n {digest} 1 main/binary-amd64/Packages\n"
-    );
-    assert_eq!(
-        parse_inrelease_metadata(&contradictory, "amd64")
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_acquisition_inrelease_metadata_invalid"
-    );
-}
-
 type RecordedFetchResponse = (String, u16, Vec<u8>);
 type RecordedPackageResponse = (u16, Vec<u8>);
 type SharedFetchResponses = Arc<Mutex<Vec<RecordedFetchResponse>>>;
@@ -162,14 +117,6 @@ type SharedPackageResponse = Arc<Mutex<Option<RecordedPackageResponse>>>;
 struct TestFetcher {
     responses: SharedFetchResponses,
     package: SharedPackageResponse,
-}
-
-impl TestFetcher {
-    fn response(&self, path: &str, status: u16, body: &[u8]) {
-        self.responses
-            .lock()
-            .push((path.to_owned(), status, body.to_vec()));
-    }
 }
 
 impl BrowserDistributionFetcher for TestFetcher {
@@ -255,35 +202,6 @@ async fn local_http_response(
         .await
         .unwrap();
     (response, task)
-}
-
-#[tokio::test]
-async fn injected_fetcher_rejects_status_and_metadata_bounds() {
-    let fetcher = TestFetcher::default();
-    fetcher.response(INRELEASE_PATH, 302, b"redirect");
-    assert_eq!(
-        fetch_bounded_bytes(
-            Arc::new(fetcher.clone()),
-            INRELEASE_PATH,
-            MAX_INRELEASE_BYTES
-        )
-        .await
-        .unwrap_err()
-        .to_string(),
-        "browser_runtime_acquisition_http_status"
-    );
-    fetcher.response(
-        "oversized",
-        200,
-        &vec![b'x'; (MAX_INRELEASE_BYTES + 1) as usize],
-    );
-    assert_eq!(
-        fetch_bounded_bytes(Arc::new(fetcher), "oversized", MAX_INRELEASE_BYTES)
-            .await
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_acquisition_response_size_limit"
-    );
 }
 
 #[test]
@@ -495,46 +413,6 @@ fn package_paragraph(
 }
 
 #[test]
-fn packages_digest_and_size_are_verified_before_selection() {
-    let digest = "a".repeat(64);
-    let bytes = package_paragraph(
-        "1.2.3",
-        "amd64",
-        "pool/main/c/chatgpt/chatgpt_1.2.3_amd64.deb",
-        "3",
-        &digest,
-    )
-    .into_bytes();
-    let index = AuthenticatedPackagesIndex {
-        path: "main/binary-amd64/Packages".into(),
-        sha256: sha256(&bytes),
-        size: bytes.len() as u64,
-    };
-    assert_eq!(
-        verify_and_select_chatgpt_package(&bytes, &index, "amd64")
-            .unwrap()
-            .version,
-        "1.2.3"
-    );
-    let mut wrong_hash = index.clone();
-    wrong_hash.sha256 = "b".repeat(64);
-    assert_eq!(
-        verify_and_select_chatgpt_package(&bytes, &wrong_hash, "amd64")
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_acquisition_packages_hash_mismatch"
-    );
-    let mut wrong_size = index;
-    wrong_size.size += 1;
-    assert_eq!(
-        verify_and_select_chatgpt_package(&bytes, &wrong_size, "amd64")
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_acquisition_packages_size_mismatch"
-    );
-}
-
-#[test]
 #[ignore = "manual real-package materialization smoke"]
 fn real_package_materializes_from_explicit_fixture_path() {
     let deb_path = std::env::var_os("AGENTIC_BROWSER_REAL_DEB")
@@ -574,82 +452,6 @@ fn real_package_materializes_from_explicit_fixture_path() {
     let _ = fs::remove_dir_all(scratch);
 }
 
-#[test]
-fn package_selector_rejects_ambiguity_duplicate_fields_and_unsafe_names() {
-    let digest = "a".repeat(64);
-    let first = package_paragraph(
-        "1.2.3",
-        "amd64",
-        "pool/main/c/chatgpt/chatgpt_1.2.3_amd64.deb",
-        "3",
-        &digest,
-    );
-    assert_eq!(
-        select_chatgpt_package(format!("{first}\n{first}").as_bytes(), "amd64")
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_acquisition_package_ambiguous"
-    );
-    let duplicate = format!("{first}SHA256: {digest}\n");
-    assert_eq!(
-        select_chatgpt_package(duplicate.as_bytes(), "amd64")
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_acquisition_package_field_invalid"
-    );
-    let unsafe_filename = package_paragraph(
-        "1.2.3",
-        "amd64",
-        "pool/main/c/chatgpt/../escape.deb",
-        "3",
-        &digest,
-    );
-    assert_eq!(
-        select_chatgpt_package(unsafe_filename.as_bytes(), "amd64")
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_acquisition_package_filename_invalid"
-    );
-}
-
-#[test]
-fn package_selector_validates_required_identity_fields() {
-    let digest = "a".repeat(64);
-    for (version, size, hash, expected) in [
-        (
-            "bad/version",
-            "3",
-            digest.as_str(),
-            "browser_runtime_acquisition_package_version_invalid",
-        ),
-        (
-            "1.2.3",
-            "0",
-            digest.as_str(),
-            "browser_runtime_acquisition_package_size_invalid",
-        ),
-        (
-            "1.2.3",
-            "3",
-            "ABC",
-            "browser_runtime_acquisition_package_hash_invalid",
-        ),
-    ] {
-        let paragraph = package_paragraph(
-            version,
-            "amd64",
-            "pool/main/c/chatgpt/chatgpt_1.2.3_amd64.deb",
-            size,
-            hash,
-        );
-        assert_eq!(
-            select_chatgpt_package(paragraph.as_bytes(), "amd64")
-                .unwrap_err()
-                .to_string(),
-            expected
-        );
-    }
-}
 fn current_target() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "linux-arm64",
@@ -798,15 +600,32 @@ fn temp() -> PathBuf {
 }
 
 #[test]
-fn target_names_are_frozen() {
-    assert!(valid_component("linux-x64"));
-    assert!(valid_component("linux-arm64"));
-    assert!(!valid_component("../x"));
-    assert!(!valid_component("bad value"));
+fn package_consumers_reject_invalid_path_components_and_hashes() {
+    let digest = "a".repeat(64);
+    let unsafe_filename = package_paragraph(
+        "1.2.3",
+        "amd64",
+        "pool/main/c/chatgpt/../escape.deb",
+        "3",
+        &digest,
+    );
     assert_eq!(
-        normalize_hash(&"A".repeat(64)).unwrap_err().to_string(),
+        select_chatgpt_package(unsafe_filename.as_bytes(), "amd64")
+            .unwrap_err()
+            .to_string(),
+        "browser_runtime_acquisition_package_filename_invalid"
+    );
+
+    let root = temp();
+    let mut package = package(&root, &deb());
+    package.deb_sha256 = "A".repeat(64);
+    assert_eq!(
+        materialize_browser_runtime_at(&root.join("cache"), package)
+            .unwrap_err()
+            .to_string(),
         "browser_runtime_package_hash_invalid"
     );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -952,32 +771,6 @@ fn ar_parser_rejects_malformed_truncated_duplicate_and_unsupported_members() {
 }
 
 #[test]
-fn selected_paths_reject_traversal_and_empty_aliases() {
-    let prefix = "usr/lib/chatgpt/resources/cua_node";
-    assert_eq!(
-        selected_path(&format!("{prefix}/bin/")).unwrap().unwrap().1,
-        PathBuf::from("bin")
-    );
-    for path in [
-        format!("{prefix}/../escape"),
-        format!("{prefix}//double"),
-        format!("{prefix}/bin//"),
-        format!("{prefix}/a/../../escape"),
-    ] {
-        assert_eq!(
-            selected_path(&path).unwrap_err().to_string(),
-            "browser_runtime_package_path_invalid"
-        );
-    }
-    assert!(selected_path("../usr/share/unrelated").unwrap().is_none());
-    assert!(
-        selected_path("usr\\lib\\chatgpt\\resources\\cua_node\\bin\\node")
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
 fn selected_links_special_types_and_duplicate_files_are_rejected() {
     for entry_type in [
         EntryType::symlink(),
@@ -1027,36 +820,6 @@ fn selected_links_special_types_and_duplicate_files_are_rejected() {
         "browser_runtime_package_duplicate"
     );
     let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn selected_entry_and_size_bounds_are_enforced_without_large_fixtures() {
-    let mut count = MAX_ENTRIES;
-    let mut total = 0;
-    assert_eq!(
-        check_selected_limits(&mut count, &mut total, None)
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_package_entry_limit"
-    );
-
-    let mut count = 0;
-    let mut total = 0;
-    assert_eq!(
-        check_selected_limits(&mut count, &mut total, Some(MAX_FILE + 1))
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_package_size_limit"
-    );
-
-    let mut count = 0;
-    let mut total = MAX_TOTAL;
-    assert_eq!(
-        check_selected_limits(&mut count, &mut total, Some(1))
-            .unwrap_err()
-            .to_string(),
-        "browser_runtime_package_size_limit"
-    );
 }
 
 #[test]

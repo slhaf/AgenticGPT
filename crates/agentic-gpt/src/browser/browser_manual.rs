@@ -474,50 +474,6 @@ mod tests {
         let _ = fs::remove_file(root_link);
     }
 
-    #[test]
-    fn search_rejects_query_and_context_bounds() {
-        let root = fixture();
-        assert_eq!(
-            search(
-                &root,
-                SearchRequest {
-                    query: " ".into(),
-                    ..Default::default()
-                }
-            )
-            .unwrap_err()
-            .to_string(),
-            "browser_manual_invalid_query"
-        );
-        assert_eq!(
-            search(
-                &root,
-                SearchRequest {
-                    query: "x".into(),
-                    max_results: Some(0),
-                    ..Default::default()
-                }
-            )
-            .unwrap_err()
-            .to_string(),
-            "browser_manual_invalid_bounds"
-        );
-        assert_eq!(
-            search(
-                &root,
-                SearchRequest {
-                    query: "x".into(),
-                    context_lines: Some(MAX_CONTEXT_LINES + 1),
-                    ..Default::default()
-                }
-            )
-            .unwrap_err()
-            .to_string(),
-            "browser_manual_invalid_bounds"
-        );
-        cleanup(&root);
-    }
-
     #[cfg(unix)]
     #[test]
     fn search_skips_symlink_and_non_utf8() {

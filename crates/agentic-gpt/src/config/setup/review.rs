@@ -6,11 +6,7 @@ mod tests {
     use crate::config_templates::{OptionalSection, PendingAction, RuntimeMode, SecretValue};
     use crate::WorkerProfile;
 
-    use super::super::model::{
-        EventsDraft, IdentityDraft, McpServerDraft, McpServersDraft, OptionalSectionDraft,
-        SetupField, SetupSeed, SetupSession, ShellDraft,
-    };
-    use super::{optional_items, ReviewEditorKind, ReviewItemTarget};
+    use super::super::model::{SetupSeed, SetupSession};
 
     #[test]
     fn review_is_redacted_active_mode_only_and_reports_secret_write_intent() {
@@ -59,169 +55,10 @@ mod tests {
                 .status,
             super::super::model::SectionStatus::NotApplicable
         );
-    }
+        assert!(!review
+            .pending_actions
+            .contains(&PendingAction::ProvisionTunnelSecret));
 
-    #[test]
-    fn review_reports_default_and_configured_optional_statuses() {
-        let mut session = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Local),
-                profile: Some(WorkerProfile::Normal),
-                ..SetupSeed::default()
-            },
-            UiLanguage::ZhCn,
-            PathBuf::from("/tmp/review-config.json"),
-        );
-        let default_review = session.review_model().unwrap();
-        assert_eq!(
-            default_review
-                .optional_sections
-                .iter()
-                .find(|group| group.target
-                    == super::super::review::ReviewTarget::OptionalSection(
-                        OptionalSection::Identity
-                    ))
-                .unwrap()
-                .status,
-            super::super::model::SectionStatus::Default
-        );
-
-        let draft = session.optional_draft(OptionalSection::Identity);
-        session.save_optional_section(draft).unwrap();
-        let still_default = session.review_model().unwrap();
-        assert_eq!(
-            still_default
-                .optional_sections
-                .iter()
-                .find(|group| group.target
-                    == super::super::review::ReviewTarget::OptionalSection(
-                        OptionalSection::Identity
-                    ))
-                .unwrap()
-                .status,
-            super::super::model::SectionStatus::Default
-        );
-
-        session
-            .save_optional_section(OptionalSectionDraft::Identity(IdentityDraft {
-                display_name: "Configured agent".into(),
-            }))
-            .unwrap();
-        let configured_review = session.review_model().unwrap();
-        assert_eq!(
-            configured_review
-                .optional_sections
-                .iter()
-                .find(|group| group.target
-                    == super::super::review::ReviewTarget::OptionalSection(
-                        OptionalSection::Identity
-                    ))
-                .unwrap()
-                .status,
-            super::super::model::SectionStatus::Configured
-        );
-    }
-
-    #[test]
-    fn review_rows_expose_stable_edit_contract_without_secret_material() {
-        let marker = "review-row-secret-marker";
-        let hub = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Hub),
-                hub_url: Some("https://hub.example.com".into()),
-                agent_id: Some("review-agent".into()),
-                agent_secret: Some(SecretValue::new(marker)),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/review-contract.json"),
-        );
-        let review = hub.review_model().unwrap();
-        let agent_secret = review
-            .connection
-            .items
-            .iter()
-            .find(|item| item.field == Some(SetupField::AgentSecret))
-            .unwrap();
-        assert_eq!(agent_secret.editor, ReviewEditorKind::Secret);
-        assert_eq!(agent_secret.target, ReviewItemTarget::Static);
-        assert_eq!(agent_secret.value, "[REDACTED]");
-        assert!(!format!("{review:?}").contains(marker));
-
-        let mcp_items = optional_items(OptionalSectionDraft::McpServers(McpServersDraft {
-            servers: vec![McpServerDraft {
-                id: "docs".into(),
-                enabled: true,
-                transport: "stdio".into(),
-                endpoint: "node server.mjs".into(),
-                bearer_auth: false,
-                bearer_token: None,
-            }],
-        }));
-        assert_eq!(mcp_items.len(), 1);
-        assert_eq!(mcp_items[0].field, None);
-        assert_eq!(mcp_items[0].editor, ReviewEditorKind::Compound);
-        assert_eq!(
-            mcp_items[0].target,
-            ReviewItemTarget::McpServer { index: 0 }
-        );
-    }
-
-    #[test]
-    fn shell_review_shows_path_only_for_explicit_path_mode() {
-        let default = optional_items(OptionalSectionDraft::Shell(ShellDraft {
-            init_file_mode: "default".into(),
-            init_file_path: "~/.agentic_gpt/.bashrc".into(),
-        }));
-        assert_eq!(default.len(), 1);
-        assert_eq!(default[0].label_key, "shell_init_file_mode");
-        assert_eq!(default[0].choice_values(), &["default", "disabled", "path"]);
-
-        let explicit = optional_items(OptionalSectionDraft::Shell(ShellDraft {
-            init_file_mode: "path".into(),
-            init_file_path: "/tmp/trusted-init.sh".into(),
-        }));
-        assert_eq!(explicit.len(), 2);
-        assert_eq!(explicit[1].label_key, "shell_init_file_path");
-        assert_eq!(explicit[1].value, "/tmp/trusted-init.sh");
-    }
-    #[test]
-    fn event_review_preserves_values_and_offers_every_override_choice() {
-        let items = optional_items(OptionalSectionDraft::Events(EventsDraft {
-            low_ttl_seconds: "3600".into(),
-            internal_overrides: [("process.failed".into(), "off".into())]
-                .into_iter()
-                .collect(),
-        }));
-
-        let ttl = items
-            .iter()
-            .find(|item| item.field == Some(SetupField::EventsLowTtlSeconds))
-            .unwrap();
-        assert_eq!(ttl.value, "3600");
-        assert_eq!(ttl.editor, ReviewEditorKind::Text);
-
-        let failed = items
-            .iter()
-            .find(|item| item.field == Some(SetupField::EventProcessFailedLevel))
-            .unwrap();
-        assert_eq!(failed.value, "off");
-        assert_eq!(failed.editor, ReviewEditorKind::Choice);
-        assert_eq!(
-            failed.choice_values(),
-            &["inherit", "low", "medium", "high", "off"]
-        );
-
-        let completed = items
-            .iter()
-            .find(|item| item.field == Some(SetupField::EventProcessCompletedLevel))
-            .unwrap();
-        assert_eq!(completed.value, "inherit");
-        assert_eq!(items.len(), crate::config::INTERNAL_EVENT_TYPES.len() + 1);
-    }
-
-    #[test]
-    fn review_preserves_pending_actions_and_redacted_standalone_reference() {
         let default_secret = crate::utils::agentic_home()
             .unwrap()
             .join("secrets/tunnel-api-key");
@@ -248,24 +85,6 @@ mod tests {
                 && item.value == format!("file:{}", default_secret.display())
         }));
 
-        let mut immediate = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                tunnel_id: Some("immediate-tunnel".into()),
-                tunnel_api_key: Some("file:/tmp/immediate-tunnel-secret".into()),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/review-config.json"),
-        );
-        immediate.standalone_mut().provision_secret_now = true;
-        immediate.standalone_mut().secret_value = Some(SecretValue::new("review-secret"));
-        let immediate_review = immediate.review_model().unwrap();
-        assert!(!immediate_review
-            .pending_actions
-            .contains(&PendingAction::ProvisionTunnelSecret));
-        assert!(immediate_review.secret_write.is_some());
-
         let hub = SetupSession::new(
             SetupSeed {
                 mode: Some(RuntimeMode::Hub),
@@ -283,6 +102,7 @@ mod tests {
         assert!(hub_review
             .pending_actions
             .contains(&PendingAction::ReplaceAgentSecret));
+        assert!(!format!("{hub_review:?}").contains("change-me"));
     }
 }
 

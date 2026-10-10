@@ -9,12 +9,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use agentic_gpt_protocol::ProcessDetail;
 use agentic_gpt_protocol::{
     normalize_process_group, HubCommand, ProcessBatchExecRequest, ProcessCancelRequest,
     ProcessExecElement, ProcessExecRequest, ProcessInfo, ProcessListRequest, ProcessReadRequest,
 };
-#[cfg(test)]
-use agentic_gpt_protocol::{McpBatchResponse, ProcessDetail};
 use anyhow::Result;
 use base64::Engine;
 use chrono::Utc;

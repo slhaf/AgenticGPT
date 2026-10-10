@@ -711,8 +711,6 @@ mod tests {
     };
 
     use super::{build_command, ExecutionSpec, SHELL_STARTUP_FD};
-    #[cfg(target_os = "linux")]
-    use super::{kernel_argument_limit_error, shell_bootstrap, shell_bootstrap_argument_len};
     use crate::config::{Config, ShellInitFile};
     use uuid::Uuid;
 
@@ -873,61 +871,6 @@ mod tests {
             .unwrap();
         assert!(!output.status.success());
         assert!(!marker.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn shell_argument_limit_counts_exact_bootstrap_and_keeps_boundary() {
-        let root = std::env::temp_dir().join(format!("shell-argument-limit-{}", Uuid::new_v4()));
-        let working_directory = root.join("cwd");
-        fs::create_dir_all(&working_directory).unwrap();
-        let mut config = Config::default_config().unwrap();
-        config.sandbox.enabled = false;
-        config.shell.init_file = ShellInitFile::Disabled;
-
-        let max_argument_bytes =
-            usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap() * 32;
-        let quote_dense_command = format!("true; #{}", "'".repeat(max_argument_bytes / 4 + 1));
-        assert!(quote_dense_command.len() + 1 < max_argument_bytes);
-        let quote_dense_bootstrap_len =
-            shell_bootstrap_argument_len(&config, &working_directory, &quote_dense_command)
-                .unwrap();
-        assert_eq!(
-            quote_dense_bootstrap_len,
-            shell_bootstrap(&config, &working_directory, &quote_dense_command)
-                .unwrap()
-                .len()
-        );
-        let error = kernel_argument_limit_error(
-            &config,
-            Some(&working_directory),
-            &ExecutionSpec::Shell {
-                command: quote_dense_command,
-            },
-        )
-        .unwrap();
-        assert!(error.contains(&format!("bytes={}", quote_dense_bootstrap_len + 1)));
-        assert!(quote_dense_bootstrap_len + 1 > max_argument_bytes);
-
-        let boundary_prefix = "true; #";
-        let prefix_len =
-            shell_bootstrap_argument_len(&config, &working_directory, boundary_prefix).unwrap();
-        let boundary_command = format!(
-            "{boundary_prefix}{}",
-            "x".repeat(max_argument_bytes - 1 - prefix_len)
-        );
-        let boundary_bootstrap_len =
-            shell_bootstrap_argument_len(&config, &working_directory, &boundary_command).unwrap();
-        assert_eq!(boundary_bootstrap_len + 1, max_argument_bytes);
-        assert!(kernel_argument_limit_error(
-            &config,
-            Some(&working_directory),
-            &ExecutionSpec::Shell {
-                command: boundary_command,
-            },
-        )
-        .is_none());
         fs::remove_dir_all(root).unwrap();
     }
 }

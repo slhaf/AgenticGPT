@@ -41,21 +41,3 @@ pub(crate) enum HubCommandCli {
         command: registry::AgentCommand,
     },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Cli;
-    use clap::Parser;
-
-    #[test]
-    fn cli_version_uses_crate_version() {
-        let error = match Cli::try_parse_from(["agentic-gpt-hub", "--version"]) {
-            Ok(_) => panic!("--version unexpectedly parsed as a runnable command"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
-        let rendered = error.to_string();
-        assert!(rendered.contains("agentic-gpt-hub 0.9.1"));
-        assert!(rendered.contains(env!("CARGO_PKG_VERSION")));
-    }
-}

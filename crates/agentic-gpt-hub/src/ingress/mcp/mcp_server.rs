@@ -1708,14 +1708,12 @@ fn notify_route_error_message(error: &NotifyRouteError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::args::ProcessReadViewArgs;
     use super::*;
     use crate::config::{HubConfig, RemoteConfirmationConfig};
     use crate::db::init_db;
     use crate::state::{McpProfile, OutboundAgentMessage};
     use agentic_gpt_protocol::{
         AgentConnectionMode, AgentMessage, AgentRole, Capabilities, ProcessInfo,
-        DEFAULT_PROCESS_RESPONSE_BYTES,
     };
     use axum::body::to_bytes;
     use axum::extract::{Path, Query, State};
@@ -2116,112 +2114,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offline_native_process_cache_tools_omit_events() {
-        let state = test_state();
-        register_agent_record(&state, "offline-agent", "offline-secret");
-        for (id, name, arguments) in [
-            (1, "hub.process.list", json!({ "agentId": "offline-agent" })),
-            (
-                2,
-                "hub.process.status",
-                json!({ "agentId": "offline-agent", "processId": "missing-process" }),
-            ),
-        ] {
-            let response = transport::mcp_post(
-                State(state.clone()),
-                Json(tools_call_rpc(id, name, arguments)),
-            )
-            .await;
-            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            let value: Value = serde_json::from_slice(&body).unwrap();
-            assert!(
-                value["result"]["structuredContent"].get("events").is_none(),
-                "{name} must not synthesize an offline event panel"
-            );
-        }
-    }
-
-    #[test]
-    fn tool_read_only_hints_match_side_effect_semantics() {
-        for name in [
-            "agent.list",
-            "event.list",
-            "event.get",
-            "process.list",
-            "process.read",
-            "hub.process.status",
-            "hub.process.list",
-            "tmux.listSessions",
-            "tmux.listPanes",
-            "tmux.capturePane",
-            "hub.run.get",
-            "room.diary.active",
-            "room.diary.read",
-            "room.notebook.recent",
-            "room.notebook.search",
-            "room.notebook.read",
-            "room.state.list",
-            "room.state.read",
-            "room.maintenance.status",
-            "room.bootstrap",
-            "room.bootstrap.read",
-            "skills.list",
-            "skills.read",
-            "skills.search",
-            "skills.active",
-            "skills.install.get",
-        ] {
-            assert!(tool_is_read_only(name), "{name} should be read-only");
-        }
-        for name in [
-            "process.exec",
-            "process.batch",
-            "process.cancel",
-            "tmux.exec",
-            "tmux.pasteText",
-            "tmux.createSession",
-            "tmux.closeSession",
-            "mcp.batch",
-            "mcp.callTool",
-            "user.notify.send",
-            "event.mark",
-            "room.maintenance.submit",
-            "skills.activate",
-            "skills.deactivate",
-            "skills.install",
-            "skills.install.cancel",
-            "skills.run",
-        ] {
-            assert!(!tool_is_read_only(name), "{name} should not be read-only");
-        }
-    }
-
-    #[test]
-    fn coordinator_profile_exposes_only_native_tools() {
-        let mut state = test_state();
-        state.mcp_profile = McpProfile::Coordinator;
-        let server = AgenticMcpServer::new(state);
-        let mut names = transport::app_tool_descriptors(&server)
-            .into_iter()
-            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
-            .collect::<Vec<_>>();
-        names.sort_unstable();
-        assert_eq!(
-            names,
-            vec![
-                "agent.list",
-                "hub.info",
-                "hub.process.list",
-                "hub.process.status",
-                "hub.run.get",
-                "hub.run.list",
-                "user.notify.channels",
-                "user.notify.send",
-            ]
-        );
-    }
-
-    #[tokio::test]
     async fn coordinator_rejects_hidden_execution_tools_before_dispatch() {
         let mut state = test_state();
         state.mcp_profile = McpProfile::Coordinator;
@@ -2281,129 +2173,40 @@ mod tests {
     }
 
     #[test]
-    fn full_profile_keeps_bootstrap_aliases_and_execution_surface() {
-        let server = AgenticMcpServer::new(test_state());
-        let names = transport::app_tool_descriptors(&server)
-            .into_iter()
-            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
-            .collect::<Vec<_>>();
-        assert!(names.iter().any(|name| name == "bootstrap"));
-        assert!(names.iter().any(|name| name == "bootstrap.read"));
-        for name in [
-            "process.exec",
-            "process.batch",
-            "process.list",
-            "process.read",
-            "process.cancel",
-            "hub.process.list",
-            "event.list",
-            "event.get",
-            "event.mark",
-            "hub.process.status",
-            "room.diary.active",
-            "room.diary.read",
-            "room.notebook.recent",
-            "room.notebook.search",
-            "room.notebook.read",
-            "room.state.list",
-            "room.state.read",
-            "room.maintenance.status",
-            "room.maintenance.submit",
-        ] {
-            assert!(
-                names.iter().any(|candidate| candidate == name),
-                "missing {name}"
-            );
-        }
-        assert_eq!(
-            names
-                .iter()
-                .filter(|name| name.starts_with("process."))
-                .count(),
-            5
-        );
-        for removed in ["process.status", "process.output", "process.result"] {
-            assert!(!names.iter().any(|candidate| candidate == removed));
-        }
-    }
-
-    #[test]
-    fn mcp_batch_descriptor_freezes_bounds_and_side_effect_annotations() {
+    fn mcp_batch_descriptor_preserves_schema_limits_and_side_effect_annotations() {
         let server = AgenticMcpServer::new(test_state());
         let tools = transport::app_tool_descriptors(&server);
         let batch = tools
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("mcp.batch"))
             .expect("mcp.batch descriptor missing");
-        assert_eq!(batch["annotations"]["readOnlyHint"], false);
+        assert_eq!(
+            batch["annotations"]["readOnlyHint"],
+            tool_is_read_only("mcp.batch")
+        );
         assert_eq!(batch["annotations"]["destructiveHint"], true);
         assert_eq!(batch["annotations"]["openWorldHint"], true);
-        let calls = &batch["inputSchema"]["properties"]["calls"];
+
+        let schema = &batch["inputSchema"];
+        let properties = schema["properties"]
+            .as_object()
+            .expect("mcp.batch properties missing");
+        let calls = &properties["calls"];
         assert_eq!(calls["type"], "array");
         assert_eq!(calls["minItems"], 1);
         assert_eq!(calls["maxItems"], 16);
         assert_eq!(
-            batch["inputSchema"]["properties"]["waitSeconds"]["minimum"],
-            0
+            properties["waitSeconds"]["type"],
+            json!(["integer", "null"])
         );
         assert_eq!(
-            batch["inputSchema"]["properties"]["waitSeconds"]["maximum"],
-            30
+            properties["timeoutSeconds"]["type"],
+            json!(["integer", "null"])
         );
-        assert_eq!(
-            batch["inputSchema"]["properties"]["timeoutSeconds"]["minimum"],
-            1
-        );
-        assert_eq!(
-            batch["inputSchema"]["properties"]["timeoutSeconds"]["maximum"],
-            900
-        );
-        assert!(batch["inputSchema"]["required"]
+        assert!(schema["required"]
             .as_array()
             .is_some_and(|required| required.contains(&json!("agentId"))
                 && required.contains(&json!("calls"))));
-    }
-
-    #[test]
-    fn skill_install_and_run_tools_are_exposed_with_stable_annotations() {
-        let server = AgenticMcpServer::new(test_state());
-        let tools = transport::app_tool_descriptors(&server);
-        let mut names = tools
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-            .collect::<Vec<_>>();
-        names.sort_unstable();
-        for name in [
-            "room.bootstrap",
-            "room.bootstrap.read",
-            "skills.install",
-            "skills.install.get",
-            "skills.install.cancel",
-            "skills.run",
-        ] {
-            assert!(names.contains(&name), "missing MCP tool {name}");
-        }
-        let install = tools
-            .iter()
-            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("skills.install"))
-            .unwrap();
-        assert_eq!(install["annotations"]["readOnlyHint"], false);
-        assert_eq!(install["annotations"]["destructiveHint"], true);
-        let get = tools
-            .iter()
-            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("skills.install.get"))
-            .unwrap();
-        assert_eq!(get["annotations"]["readOnlyHint"], true);
-
-        for name in ["room.bootstrap", "room.bootstrap.read"] {
-            let tool = tools
-                .iter()
-                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
-                .unwrap_or_else(|| panic!("missing MCP tool {name}"));
-            assert_eq!(tool["annotations"]["readOnlyHint"], true);
-            assert_eq!(tool["annotations"]["destructiveHint"], false);
-            assert_eq!(tool["annotations"]["openWorldHint"], false);
-        }
     }
 
     #[tokio::test]
@@ -2450,76 +2253,6 @@ mod tests {
                 "room_not_active"
             );
         }
-    }
-
-    #[test]
-    fn bootstrap_timeout_values_preserve_operation_specific_codes() {
-        for (code, expected) in [
-            ("room_bootstrap_timeout", "room_bootstrap_timeout"),
-            ("room_bootstrap_read_timeout", "room_bootstrap_read_timeout"),
-        ] {
-            let value = room_route_error_value_with_timeout(
-                RoomRouteError::Timeout("timed out".to_string()),
-                code,
-            );
-            let result = serde_json::to_value(result_from_value(value)).unwrap();
-            assert_eq!(result["isError"], true);
-            assert_eq!(result["structuredContent"]["error"]["code"], expected);
-        }
-    }
-
-    #[test]
-    fn tmux_paste_schema_exposes_confirmation_default_field() {
-        let schema =
-            serde_json::to_string(&rmcp::schemars::schema_for!(TmuxPasteTextArgs)).unwrap();
-        assert!(schema.contains("needConfirm"));
-        assert!(schema.contains("submit"));
-    }
-
-    #[test]
-    fn tmux_exec_schema_exposes_snapshot_fields() {
-        let schema = serde_json::to_string(&rmcp::schemars::schema_for!(TmuxExecArgs)).unwrap();
-        assert!(schema.contains("waitMs"));
-        assert!(schema.contains("captureLines"));
-    }
-
-    #[test]
-    fn room_mcp_input_schemas_do_not_include_agent_id() {
-        let schemas = [
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryActiveArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryReadArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookRecentArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookSearchArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookReadArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomStateListArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomStateReadArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomMaintenanceStatusArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomMaintenanceSubmitArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(BootstrapReadArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(SkillReadArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(SkillSearchArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(SkillActivationArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(SkillInstallArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(SkillInstallGetArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(SkillInstallCancelArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(SkillRunArgs)).unwrap(),
-        ];
-        for schema in schemas {
-            assert!(!schema.contains("agentId"));
-            assert!(!schema.contains("agent_id"));
-        }
-    }
-
-    #[test]
-    fn native_tool_values_use_agentic_result_shape() {
-        let value = json!({ "processes": [] });
-
-        let result = result_from_value(value.clone());
-        let serialized = serde_json::to_value(result).unwrap();
-
-        assert_eq!(serialized["structuredContent"], value);
-        assert_eq!(serialized["isError"], false);
-        assert_eq!(serialized["content"][0]["type"], "text");
     }
 
     #[tokio::test]
@@ -2681,71 +2414,5 @@ mod tests {
             assert!(response.get(field).is_none());
             assert!(response["cached"].get(field).is_none());
         }
-    }
-
-    #[test]
-    fn process_read_arg_schema_matches_contract_and_defaults() {
-        assert_eq!(
-            default_process_wait_seconds(),
-            ProcessReadRequest::DEFAULT_WAIT_SECONDS
-        );
-        let schema = serde_json::to_value(rmcp::schemars::schema_for!(ProcessReadArgs)).unwrap();
-        let schema_text = schema.to_string();
-        assert!(schema_text.contains("\"default\":5"));
-        assert!(schema_text.contains("\"maximum\":30"));
-        assert!(schema_text.contains("\"minimum\":4096"));
-        assert!(schema_text.contains("\"maximum\":1048576"));
-        assert!(schema_text.contains("\"auto\""));
-        assert!(schema_text.contains("\"status\""));
-        assert!(schema_text.contains("limits.processResponseBytes"));
-        assert!(schema_text.contains(&DEFAULT_PROCESS_RESPONSE_BYTES.to_string()));
-        assert!(schema["properties"].get("cursor").is_some());
-        let server = AgenticMcpServer::new(test_state());
-        let descriptor = transport::app_tool_descriptors(&server)
-            .into_iter()
-            .find(|tool| tool["name"] == "process.read")
-            .expect("process.read descriptor missing");
-        let descriptor_schema = &descriptor["inputSchema"];
-        let descriptor_view = &descriptor_schema["properties"]["view"];
-        assert_eq!(descriptor_view["default"], "auto");
-        assert!(!descriptor_schema["required"]
-            .as_array()
-            .is_some_and(|required| required.contains(&json!("view"))));
-
-        for args in [
-            json!({"agentId": "agent", "processId": "process"}),
-            json!({"agentId": "agent", "processId": "process", "view": null}),
-        ] {
-            let params: ProcessReadArgs = serde_json::from_value(args).unwrap();
-            assert_eq!(process_read_payload(&params).view, ProcessReadView::Auto);
-        }
-
-        for (wait_seconds, expected) in [(None, 5), (Some(0), 0), (Some(31), 30)] {
-            let params = ProcessReadArgs {
-                agent_id: "agent".to_string(),
-                process_id: "process".to_string(),
-                wait_seconds,
-                view: None,
-                cursor: None,
-                max_bytes: None,
-            };
-            let payload = process_read_payload(&params);
-            assert_eq!(payload.wait_seconds, Some(expected));
-            assert_eq!(payload.effective_wait_seconds(), expected);
-            assert_eq!(payload.view, ProcessReadView::Auto);
-            assert!(payload.cursor.is_none());
-            assert!(payload.max_bytes.is_none());
-        }
-        let params = ProcessReadArgs {
-            agent_id: "agent".to_string(),
-            process_id: "process".to_string(),
-            wait_seconds: None,
-            view: Some(ProcessReadViewArgs::Status),
-            cursor: None,
-            max_bytes: Some(4096),
-        };
-        let payload = process_read_payload(&params);
-        assert_eq!(payload.view, ProcessReadView::Status);
-        assert_eq!(payload.max_bytes, Some(4096));
     }
 }

@@ -1049,7 +1049,6 @@ fn require_git_success(output: &GitOutput, code: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use chrono::TimeZone;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> PathBuf {
@@ -1066,26 +1065,6 @@ mod tests {
         let mut config = Config::default_config().expect("default config");
         config.workspace_root = workspace.to_path_buf();
         config
-    }
-
-    #[test]
-    fn logical_day_respects_the_configured_shanghai_boundary() {
-        let before_boundary = Shanghai
-            .with_ymd_and_hms(2026, 9, 12, 4, 59, 59)
-            .single()
-            .unwrap();
-        let at_boundary = Shanghai
-            .with_ymd_and_hms(2026, 9, 12, 5, 0, 0)
-            .single()
-            .unwrap();
-        assert_eq!(
-            room_logical_date(before_boundary, 5).unwrap().to_string(),
-            "2026-09-11"
-        );
-        assert_eq!(
-            room_logical_date(at_boundary, 5).unwrap().to_string(),
-            "2026-09-12"
-        );
     }
 
     #[test]

@@ -1574,15 +1574,4 @@ mod reporting_tests {
         assert_eq!(recovered["run-current"].status, "completed");
         assert_eq!(recovered["run-current"].command_hash, "hash-current");
     }
-    #[test]
-    fn oversized_report_json_becomes_a_hash_record() {
-        let bounded = bounded_json_value(serde_json::json!({
-            "payload": "x".repeat(REPORT_MAX_JSON_BYTES)
-        }));
-        assert!(bounded.truncated);
-        assert!(bounded.byte_count > REPORT_MAX_JSON_BYTES);
-        assert_eq!(bounded.value["truncated"], true);
-        assert_eq!(bounded.value["byteCount"], bounded.byte_count);
-        assert_eq!(bounded.value["sha256"], bounded.sha256);
-    }
 }

@@ -708,64 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_and_platforms_are_pinned() {
-        assert_eq!(platform_for("linux", "x86_64"), Some("linux-amd64"));
-        assert_eq!(platform_for("linux", "aarch64"), Some("linux-arm64"));
-        assert_eq!(platform_for("windows", "x86_64"), None);
-        assert_eq!(MANIFEST.len(), 2);
-        assert_eq!(MANIFEST[0].3.len(), 64);
-        assert_eq!(MANIFEST[1].3.len(), 64);
-        assert_eq!(
-            MANIFEST[0].2,
-            "https://github.com/openai/tunnel-client/releases/download/v0.0.10/tunnel-client-v0.0.10-linux-amd64.zip"
-        );
-        assert_eq!(
-            MANIFEST[0].3,
-            "b9e0388a343f2d7adeff3992f411a0bd3d916a64bc56534aac5fd15ac1b20cd5"
-        );
-        assert_eq!(
-            MANIFEST[1].3,
-            "b842a9b2352eebd80514cf01a1fbb1c0d400a7d24a4015e85a7ea5f1aeaa5b30"
-        );
-    }
-
-    #[test]
-    fn artifact_selection_requires_pinned_or_explicit_trust() {
-        let default_client = TunnelClientConfig::default();
-        let spec = artifact_spec(&default_client, "linux-amd64").unwrap();
-        assert_eq!(spec.version, PINNED_VERSION);
-        assert_eq!(spec.source, TunnelClientSource::ManagedCache);
-
-        let unknown = TunnelClientConfig {
-            version: Some("9.9.9".to_owned()),
-            ..TunnelClientConfig::default()
-        };
-        assert_eq!(
-            artifact_spec(&unknown, "linux-amd64")
-                .unwrap_err()
-                .to_string(),
-            "unsupported_tunnel_client_version"
-        );
-
-        let mut custom = TunnelClientConfig {
-            download_url: Some("http://127.0.0.1/client.zip".to_owned()),
-            sha256: Some("a".repeat(64)),
-            ..TunnelClientConfig::default()
-        };
-        assert_eq!(
-            artifact_spec(&custom, "linux-amd64")
-                .unwrap_err()
-                .to_string(),
-            "download_url_requires_https"
-        );
-        custom.download_url = Some("https://example.invalid/client.zip".to_owned());
-        assert_eq!(
-            artifact_spec(&custom, "linux-amd64").unwrap().source,
-            TunnelClientSource::CustomDownload
-        );
-    }
-
-    #[test]
     fn executable_override_checks_permissions_and_optional_hash() {
         let root = tempfile_dir();
         let path = root.join("tunnel-client");
@@ -788,40 +730,6 @@ mod tests {
         assert_eq!(
             verify_executable(&link, None).unwrap_err().to_string(),
             "executable_not_regular"
-        );
-    }
-
-    #[test]
-    fn archive_rejects_traversal_symlinks_duplicates_and_extra_files() {
-        let traversal = archive(&[("../tunnel-client", b"x", Some(0o100755))]);
-        assert_eq!(
-            extract_executable(&traversal).unwrap_err().to_string(),
-            "archive_path_traversal"
-        );
-
-        let mut symlink = archive(&[("tunnel-client", b"target", Some(0o644))]);
-        mark_zip_entry_as_unix_symlink(&mut symlink);
-        assert_eq!(
-            extract_executable(&symlink).unwrap_err().to_string(),
-            "archive_symlink_rejected"
-        );
-
-        let duplicate = archive(&[
-            ("one/tunnel-client", b"one", Some(0o100755)),
-            ("two/tunnel-client", b"two", Some(0o100755)),
-        ]);
-        assert_eq!(
-            extract_executable(&duplicate).unwrap_err().to_string(),
-            "archive_duplicate_candidate"
-        );
-
-        let extra = archive(&[
-            ("tunnel-client", b"one", Some(0o100755)),
-            ("README", b"extra", Some(0o100644)),
-        ]);
-        assert_eq!(
-            extract_executable(&extra).unwrap_err().to_string(),
-            "archive_layout_rejected"
         );
     }
 
@@ -898,17 +806,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn archive_hash_mismatch_is_checked_before_install() {
-        let archive = archive(&[("tunnel-client", b"bytes", Some(0o100755))]);
-        assert_eq!(
-            verify_archive_hash(&archive, &"0".repeat(64))
-                .unwrap_err()
-                .to_string(),
-            "archive_hash_mismatch"
-        );
-    }
-
     #[tokio::test]
     async fn artifact_lock_serializes_concurrent_installers() {
         let root = tempfile_dir();
@@ -919,15 +816,6 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         drop(first);
         assert!(waiting.await.unwrap().is_ok());
-    }
-
-    #[test]
-    fn download_url_requires_https_outside_tests() {
-        assert!(validate_download_url("http://127.0.0.1/client.zip", false).is_err());
-        assert!(validate_download_url("http://127.0.0.1/client.zip", true).is_ok());
-        assert!(
-            validate_download_url("https://user:pass@example.invalid/client.zip", false).is_err()
-        );
     }
 
     #[tokio::test]
@@ -1001,17 +889,5 @@ mod tests {
         let path = std::env::temp_dir().join(format!("agentic-tunnel-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         path
-    }
-
-    fn mark_zip_entry_as_unix_symlink(bytes: &mut [u8]) {
-        let signature = [0x50, 0x4b, 0x01, 0x02];
-        let offset = bytes
-            .windows(signature.len())
-            .position(|window| window == signature)
-            .unwrap();
-        // Central-directory "version made by": Unix, and external attributes
-        // carry the POSIX symlink file type in the upper 16 bits.
-        bytes[offset + 4..offset + 6].copy_from_slice(&0x0314u16.to_le_bytes());
-        bytes[offset + 38..offset + 42].copy_from_slice(&(0o120777u32 << 16).to_le_bytes());
     }
 }

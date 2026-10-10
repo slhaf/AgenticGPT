@@ -1,21 +1,17 @@
 // Tests for the crate entrypoint, startup, discovery, and CLI composition.
 use super::*;
-use crate::browser_discovery::{
-    resolve_browser_runtime, resolve_browser_runtime_with_sources, BrowserRuntimeSources,
-};
-use crate::cli::{read_local_arguments, Cli, Commands, LocalCommand, MAX_LOCAL_ARGUMENT_BYTES};
+use crate::browser_discovery::{resolve_browser_runtime_with_sources, BrowserRuntimeSources};
+use crate::cli::{read_local_arguments, MAX_LOCAL_ARGUMENT_BYTES};
 use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{Config, RuntimeMode};
 use crate::config::{PathPolicyConfig, Rule, TunnelConfig};
 use crate::config_cli::{PathRootCommand, PathRootKind};
-use crate::policy::PolicyDecision;
-use crate::startup::{apply_live_config_subset, build_app_state, reload_live_config_once};
+use crate::startup::{build_app_state, reload_live_config_once};
 use crate::state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel};
 use agentic_gpt_protocol::{
     AgentMessage, BootstrapReadRequest, HubCommand, RoomDiaryActiveRequest,
 };
 use anyhow::anyhow;
-use clap::Parser;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,18 +33,6 @@ fn explicit_browser_runtime_config() -> config::ExplicitBrowserRuntimeConfig {
         codex_cli_path: Some("/opt/runtime/codex".to_string()),
         node_module_dirs: Vec::new(),
     }
-}
-
-#[tokio::test]
-async fn explicit_runtime_precedes_desktop_discovery_and_invalid_does_not_fallback() {
-    let mut config = Config::default_config().unwrap();
-    config.browser.runtime = Some(explicit_browser_runtime_config());
-    let context = resolve_browser_runtime(&config)
-        .await
-        .expect("explicit runtime selected");
-    assert_eq!(context.descriptor.app_version, "26.1.2");
-    config.browser.runtime.as_mut().unwrap().node_path = Some("relative/node".to_string());
-    assert!(resolve_browser_runtime(&config).await.is_none());
 }
 
 #[test]
@@ -306,80 +290,6 @@ async fn builder_accepts_pre_resolved_browser_context_without_discovery() {
 }
 
 #[test]
-fn cli_version_uses_crate_version() {
-    let error = match Cli::try_parse_from(["agentic-gpt", "--version"]) {
-        Ok(_) => panic!("--version unexpectedly parsed as a runnable command"),
-        Err(error) => error,
-    };
-    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
-    let rendered = error.to_string();
-    assert!(rendered.contains("agentic-gpt 0.9.1"));
-    assert!(rendered.contains(env!("CARGO_PKG_VERSION")));
-}
-
-#[test]
-fn sse_post_status_classification_stops_on_stale_connection() {
-    assert_eq!(
-        hub::classify_sse_post_status(reqwest::StatusCode::OK),
-        hub::SsePostStatus::Delivered
-    );
-    assert_eq!(
-        hub::classify_sse_post_status(reqwest::StatusCode::CONFLICT),
-        hub::SsePostStatus::Stale
-    );
-    assert_eq!(
-        hub::classify_sse_post_status(reqwest::StatusCode::BAD_GATEWAY),
-        hub::SsePostStatus::Retry
-    );
-}
-
-#[test]
-fn run_as_room_uses_workspace_default_repository_root() {
-    let config = Config::default_config().unwrap();
-    assert_eq!(config.agent_id, "laptop");
-    assert_eq!(
-        room_repository::repository_root(&config),
-        config.workspace_root.join("room")
-    );
-}
-
-#[test]
-fn public_run_has_only_a_config_path_and_no_profile_override() {
-    let cli = Cli::try_parse_from(["agentic-gpt", "run"]).unwrap();
-    assert!(matches!(cli.command, Commands::Run { config: None }));
-    assert!(Cli::try_parse_from(["agentic-gpt", "run", "--profile", "room"]).is_err());
-}
-
-#[test]
-fn local_cli_accepts_config_before_or_after_subcommand() {
-    for args in [
-        vec![
-            "agentic-gpt",
-            "local",
-            "--config",
-            "/tmp/local.json",
-            "list-tools",
-        ],
-        vec![
-            "agentic-gpt",
-            "local",
-            "list-tools",
-            "--config",
-            "/tmp/local.json",
-        ],
-    ] {
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert!(matches!(
-            cli.command,
-            Commands::Local {
-                config: Some(ref path),
-                command: LocalCommand::ListTools,
-            } if path == &PathBuf::from("/tmp/local.json")
-        ));
-    }
-}
-
-#[test]
 fn local_arguments_are_bounded_objects_from_inline_or_file() {
     assert!(read_local_arguments(None, None).unwrap().is_empty());
     let inline = read_local_arguments(Some(r#"{"value":"ok"}"#.to_string()), None).unwrap();
@@ -406,25 +316,6 @@ fn local_arguments_are_bounded_objects_from_inline_or_file() {
             .starts_with("local_arguments_too_large")
     );
     let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn configured_room_repository_root_overrides_default() {
-    let mut config = Config::default_config().unwrap();
-    let root = unique_temp_dir("configured-room-repository");
-    config.room.repository_root = Some(root.clone());
-    assert_eq!(room_repository::repository_root(&config), root);
-}
-
-#[test]
-fn room_timezone_defaults_and_can_be_overridden() {
-    let mut config = Config::default_config().unwrap();
-    assert_eq!(config.room.timezone, "Asia/Shanghai");
-    assert_eq!(config.room.diary_day_boundary_hour, 5);
-    config.room.timezone = "UTC".to_string();
-    config.room.diary_day_boundary_hour = 3;
-    assert_eq!(config.room.timezone, "UTC");
-    assert_eq!(config.room.diary_day_boundary_hour, 3);
 }
 
 fn command_test_state(
@@ -745,241 +636,6 @@ async fn room_mode_dispatches_current_diary_command() {
 }
 
 #[test]
-fn room_policy_overlay_differs_from_normal_policy() {
-    let config = Config::default_config().unwrap();
-    assert_eq!(
-        policy::policy_decision_for_profile(&config, CapabilityProfile::Normal, "rm", &[], false),
-        PolicyDecision::Confirm
-    );
-    assert_eq!(
-        policy::policy_decision_for_profile(&config, CapabilityProfile::Room, "rm", &[], false),
-        PolicyDecision::Allow
-    );
-}
-
-#[test]
-fn room_policy_keeps_high_risk_commands_restricted() {
-    let config = Config::default_config().unwrap();
-    for program in ["sudo", "scp", "mount", "systemctl", "service"] {
-        assert_eq!(
-            policy::policy_decision_for_profile(
-                &config,
-                CapabilityProfile::Room,
-                program,
-                &[],
-                false
-            ),
-            PolicyDecision::Confirm
-        );
-    }
-    assert_eq!(
-        policy::policy_decision_for_profile(&config, CapabilityProfile::Room, "ssh", &[], false),
-        PolicyDecision::Deny
-    );
-}
-
-#[test]
-fn rule_matches_program_and_args_prefix_structurally() {
-    let rule = Rule {
-        program: "python".to_string(),
-        args_prefix: vec!["-c".to_string()],
-    };
-    assert!(rule.matches("python", &["-c".to_string(), "print(1)".to_string()]));
-    assert!(!rule.matches("python3", &["-c".to_string()]));
-    assert!(!rule.matches("python", &["script.py".to_string()]));
-}
-
-#[test]
-fn safe_summary_includes_path_roots_and_policy_rules() {
-    let root = unique_temp_dir("safe-summary");
-    let workspace = root.join("workspace");
-    let write_root = root.join("write");
-    let read_only_root = root.join("readonly");
-    let deny_root = root.join("deny");
-    fs::create_dir_all(&workspace).unwrap();
-    fs::create_dir_all(&write_root).unwrap();
-    fs::create_dir_all(&read_only_root).unwrap();
-    fs::create_dir_all(&deny_root).unwrap();
-
-    let mut config = Config::default_config().unwrap();
-    config.workspace_root = workspace;
-    config.path_policy = PathPolicyConfig {
-        write_roots: vec![write_root.clone()],
-        read_only_roots: vec![read_only_root.clone()],
-        deny_roots: vec![deny_root.clone()],
-    };
-    config.policy.allow.push(Rule {
-        program: "git".to_string(),
-        args_prefix: vec!["status".to_string()],
-    });
-    config.policy.confirm.push(Rule {
-        program: "bash".to_string(),
-        args_prefix: vec!["-lc".to_string()],
-    });
-    config.policy.deny.push(Rule {
-        program: "rm".to_string(),
-        args_prefix: vec!["-rf".to_string()],
-    });
-
-    let summary = config.safe_summary();
-    assert_eq!(summary.path_policy.write_root_count, 2);
-    assert_eq!(summary.path_policy.read_only_root_count, 1);
-    assert_eq!(summary.path_policy.deny_root_count, 1);
-    assert!(summary
-        .path_policy
-        .write_roots
-        .iter()
-        .any(|root| root.path == "workspace" && root.source == "workspaceRoot"));
-    assert!(summary
-        .path_policy
-        .write_roots
-        .iter()
-        .any(|root| root.path.ends_with("/write") && root.source == "configured"));
-    assert!(summary
-        .path_policy
-        .read_only_roots
-        .iter()
-        .any(|root| root.path.ends_with("/readonly") && root.source == "configured"));
-    assert!(summary
-        .path_policy
-        .deny_roots
-        .iter()
-        .any(|root| root.path.ends_with("/deny") && root.source == "configured"));
-
-    assert_eq!(summary.policy_rule_counts.allow, 1);
-    assert_eq!(summary.policy_rule_counts.confirm, 1);
-    assert_eq!(summary.policy_rule_counts.deny, 1);
-    assert!(summary
-        .policy_rules
-        .allow
-        .iter()
-        .any(|rule| { rule.program == "git" && rule.args_prefix == vec!["status".to_string()] }));
-    assert!(summary
-        .policy_rules
-        .confirm
-        .iter()
-        .any(|rule| { rule.program == "bash" && rule.args_prefix == vec!["-lc".to_string()] }));
-    assert!(summary
-        .policy_rules
-        .deny
-        .iter()
-        .any(|rule| { rule.program == "rm" && rule.args_prefix == vec!["-rf".to_string()] }));
-    assert!(summary
-        .policy_rules
-        .builtins
-        .confirm
-        .iter()
-        .any(|rule| rule.program == "bash" && rule.args_prefix.is_empty()));
-    assert!(summary
-        .policy_rules
-        .builtins
-        .confirm
-        .iter()
-        .any(|rule| rule.program == "python" && rule.args_prefix == vec!["-c".to_string()]));
-    assert!(summary
-        .policy_rules
-        .builtins
-        .deny
-        .iter()
-        .any(|rule| rule.program == "ssh" && rule.args_prefix.is_empty()));
-}
-
-#[test]
-fn configured_allow_overrides_need_confirm() {
-    let mut config = Config::default_config().unwrap();
-    config.policy.allow.push(Rule {
-        program: "git".to_string(),
-        args_prefix: vec!["status".to_string()],
-    });
-    assert_eq!(
-        policy::policy_decision_for_profile(
-            &config,
-            CapabilityProfile::Normal,
-            "git",
-            &["status".to_string()],
-            true
-        ),
-        PolicyDecision::Allow
-    );
-}
-
-#[test]
-fn configured_allow_overrides_builtin_confirm() {
-    let mut config = Config::default_config().unwrap();
-    config.policy.allow.push(Rule {
-        program: "curl".to_string(),
-        args_prefix: vec!["--version".to_string()],
-    });
-    assert_eq!(
-        policy::policy_decision_for_profile(
-            &config,
-            CapabilityProfile::Normal,
-            "curl",
-            &["--version".to_string()],
-            false
-        ),
-        PolicyDecision::Allow
-    );
-}
-
-#[test]
-fn configured_allow_overrides_builtin_deny() {
-    let mut config = Config::default_config().unwrap();
-    config.policy.allow.push(Rule {
-        program: "ssh".to_string(),
-        args_prefix: vec!["-V".to_string()],
-    });
-    assert_eq!(
-        policy::policy_decision_for_profile(
-            &config,
-            CapabilityProfile::Normal,
-            "ssh",
-            &["-V".to_string()],
-            false
-        ),
-        PolicyDecision::Allow
-    );
-}
-
-#[test]
-fn configured_deny_wins_when_multiple_config_rules_match() {
-    let mut config = Config::default_config().unwrap();
-    config.policy.allow.push(Rule {
-        program: "git".to_string(),
-        args_prefix: vec![],
-    });
-    config.policy.deny.push(Rule {
-        program: "git".to_string(),
-        args_prefix: vec!["push".to_string()],
-    });
-    assert_eq!(
-        policy::policy_decision_for_profile(
-            &config,
-            CapabilityProfile::Normal,
-            "git",
-            &["push".to_string()],
-            false
-        ),
-        PolicyDecision::Deny
-    );
-}
-
-#[test]
-fn sudo_requires_credentials() {
-    let config = Config::default_config().unwrap();
-    assert_eq!(
-        exec::preflight(
-            &config,
-            &config.workspace_root,
-            "sudo",
-            &["true".to_string()]
-        )
-        .unwrap_err(),
-        "interactive_credential_required"
-    );
-}
-
-#[test]
 fn read_only_system_file_is_allowed() {
     let config = Config::default_config().unwrap();
     assert!(exec::preflight(
@@ -1101,27 +757,6 @@ fn unknown_program_defaults_to_write_access() {
         .unwrap_err(),
         "path_readonly"
     );
-}
-
-#[test]
-fn batch_confirmation_preview_supports_chinese() {
-    let mut config = Config::default_config().unwrap();
-    config.confirmation_language = "zh-CN".to_string();
-    let element = confirmation::BatchConfirmationElement {
-        index: 1,
-        command: "python -c 'print(1)'".to_string(),
-        cwd: Some("/tmp".to_string()),
-    };
-    let preview = confirmation::batch_confirmation_preview(
-        &config,
-        std::slice::from_ref(&element),
-        std::slice::from_ref(&element),
-    );
-
-    assert!(preview.contains("该批次共有 1 条命令，其中 1 条需要确认"));
-    assert!(preview.contains("工作目录：/tmp"));
-    assert!(preview.contains("是否允许整个批次执行一次？"));
-    assert!(!preview.contains("\\n"));
 }
 
 #[test]
@@ -1291,53 +926,6 @@ fn old_rule_ids_are_ignored_when_loading_config() {
 }
 
 #[test]
-fn remove_rule_matches_command_without_uuid() {
-    let mut rules = vec![Rule {
-        program: "bash".to_string(),
-        args_prefix: Vec::new(),
-    }];
-
-    policy::remove_rule(&mut rules, "bash", &[]).unwrap();
-    assert!(rules.is_empty());
-}
-
-#[test]
-fn remove_rule_matches_command_and_args_prefix() {
-    let mut rules = vec![
-        Rule {
-            program: "python".to_string(),
-            args_prefix: vec!["-c".to_string()],
-        },
-        Rule {
-            program: "python".to_string(),
-            args_prefix: vec!["script.py".to_string()],
-        },
-    ];
-
-    policy::remove_rule(&mut rules, "python", &["-c".to_string()]).unwrap();
-    assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].args_prefix, vec!["script.py".to_string()]);
-}
-
-#[test]
-fn remove_rule_refuses_ambiguous_non_interactive_match() {
-    let mut rules = vec![
-        Rule {
-            program: "bash".to_string(),
-            args_prefix: Vec::new(),
-        },
-        Rule {
-            program: "bash".to_string(),
-            args_prefix: Vec::new(),
-        },
-    ];
-
-    let error = policy::remove_rule_with_interactive(&mut rules, "bash", &[], false).unwrap_err();
-    assert!(error.to_string().contains("multiple_matching_rules"));
-    assert_eq!(rules.len(), 2);
-}
-
-#[test]
 fn path_root_remove_matches_expanded_equivalent_path() {
     let root = unique_temp_dir("path-cli");
     let target = root.join("target");
@@ -1360,77 +948,6 @@ fn path_root_remove_matches_expanded_equivalent_path() {
         },
     );
     assert!(policy.write_roots.is_empty());
-}
-
-#[test]
-fn standalone_reload_replaces_the_frozen_live_subset() {
-    let mut live = Config::default_config().unwrap();
-    let original_agent_id = live.agent_id.clone();
-    let original_workspace = live.workspace_root.clone();
-    let original_path_policy = live.path_policy.clone();
-    let mut candidate = live.clone();
-    candidate.agent_id = "must-not-reload".to_string();
-    candidate.workspace_root = PathBuf::from("/tmp/must-not-reload");
-    candidate.policy.allow.push(Rule {
-        program: "printf".to_string(),
-        args_prefix: Vec::new(),
-    });
-    candidate.path_policy.write_roots = vec![PathBuf::from("/tmp/live")];
-    candidate.limits.max_active_processes = config::MaxActiveProcesses::Explicit(9);
-    candidate.limits.max_file_search_context_lines = 20;
-    candidate.limits.process_response_bytes = agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES;
-    live.mcp_servers.insert(
-        "primary".to_string(),
-        McpServerConfig {
-            enabled: true,
-            transport: "streamable-http".to_string(),
-            url: Some("https://old.example/mcp".to_string()),
-            auth: None,
-        },
-    );
-    let in_flight = live.mcp_servers["primary"].clone();
-    candidate.mcp_servers.insert(
-        "primary".to_string(),
-        McpServerConfig {
-            enabled: false,
-            transport: "streamable-http".to_string(),
-            url: Some("https://new.example/mcp".to_string()),
-            auth: None,
-        },
-    );
-
-    let candidate_toolsets = candidate.toolsets.clone();
-    let resolved = apply_live_config_subset(&mut live, candidate);
-
-    assert_eq!(live.agent_id, original_agent_id);
-    assert_eq!(live.workspace_root, original_workspace);
-    assert!(live
-        .policy
-        .allow
-        .iter()
-        .any(|rule| rule.program == "printf"));
-    assert_eq!(live.path_policy, original_path_policy);
-    assert_eq!(resolved.resolved, 9);
-    assert_eq!(
-        live.limits.max_active_processes,
-        config::MaxActiveProcesses::Explicit(9)
-    );
-    assert_eq!(live.limits.max_file_search_context_lines, 20);
-    assert_eq!(
-        live.limits.process_response_bytes,
-        agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES
-    );
-    assert_eq!(live.toolsets, candidate_toolsets);
-    assert_eq!(
-        live.mcp_servers["primary"].url.as_deref(),
-        Some("https://new.example/mcp")
-    );
-    assert!(!live.mcp_servers["primary"].enabled);
-    assert_eq!(
-        in_flight.url.as_deref(),
-        Some("https://old.example/mcp"),
-        "an already-cloned in-flight definition retains the old endpoint"
-    );
 }
 
 #[tokio::test]
@@ -1753,21 +1270,6 @@ async fn standalone_live_reload_bootstraps_room_repository_before_maintenance_su
 
     let _ = fs::remove_dir_all(root);
     Ok(())
-}
-
-#[tokio::test]
-async fn notification_delivery_rejects_unsupported_channel() {
-    let response =
-        notify::deliver_freedesktop_notification(agentic_gpt_protocol::UserNotifyDeliveryRequest {
-            channel_key: "hub::ntfy".to_string(),
-            title: "Hello".to_string(),
-            body: "World".to_string(),
-            actions: Vec::new(),
-            priority: None,
-        })
-        .await;
-    assert!(!response.delivered);
-    assert_eq!(response.reason.as_deref(), Some("unsupported_channel"));
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {

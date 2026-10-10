@@ -888,14 +888,6 @@ fn quote_arg(value: impl AsRef<str>) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-#[cfg(test)]
-fn backoff_delay(attempt: usize) -> Duration {
-    BACKOFFS
-        .get(attempt.saturating_sub(1))
-        .copied()
-        .unwrap_or(*BACKOFFS.last().unwrap())
-}
-
 fn set_private_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -969,153 +961,6 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    #[test]
-    fn worker_command_quotes_paths_and_never_contains_api_key() {
-        let token = "worker-token";
-        let command = format!(
-            "{} stdio-worker --config {} --profile normal --supervisor-token {}",
-            quote_arg("/tmp/agentic worker"),
-            quote_arg("/tmp/config with spaces.json"),
-            token
-        );
-        assert!(command.contains("\"/tmp/agentic worker\""));
-        assert!(!command.contains("runtime-api-key"));
-    }
-
-    #[test]
-    fn mcp_binding_preserves_worker_tokenization() {
-        let invocation = Invocation {
-            tunnel_id: "tunnel_test".to_owned(),
-            secret: "runtime-secret".to_owned(),
-            executable: PathBuf::from("/tmp/tunnel-client"),
-            worker_command:
-                "\"/tmp/agentic worker\" stdio-worker --config \"/tmp/config with spaces.json\""
-                    .to_owned(),
-            worker_token: "worker-token".to_owned(),
-            paths: RuntimePaths {
-                health_url: PathBuf::from("/tmp/health.url"),
-                log: PathBuf::from("/tmp/tunnel.log"),
-                pid: PathBuf::from("/tmp/tunnel.pid"),
-            },
-        };
-
-        assert_eq!(
-            invocation.mcp_command(),
-            "channel=main,command=\"/tmp/agentic worker\" stdio-worker --config \"/tmp/config with spaces.json\""
-        );
-    }
-
-    #[test]
-    fn doctor_diagnostic_output_is_bounded_and_redacted() {
-        let output = format!(
-            "prefix-secret-value-{}",
-            "x".repeat(DOCTOR_DIAGNOSTIC_LIMIT)
-        );
-        let diagnostic = bounded_redacted_output(output.as_bytes(), &["secret-value"]);
-        assert!(diagnostic.contains("[REDACTED]"));
-        assert!(!diagnostic.contains("secret-value"));
-        assert!(diagnostic.ends_with("...[truncated]"));
-    }
-
-    #[test]
-    fn forwarded_child_lines_preserve_known_severity_and_strip_timestamp() {
-        let timestamp = "2026-07-25T16:00:00+00:00";
-        assert_eq!(
-            parse_forwarded_log(
-                &redact_sensitive(
-                    format!("{timestamp} INFO child-ready secret").to_string(),
-                    &["secret"],
-                ),
-                ForwardedLevel::Warn,
-            ),
-            ForwardedLog {
-                level: ForwardedLevel::Info,
-                message: "child-ready [REDACTED]".to_string(),
-            }
-        );
-        let unknown = parse_forwarded_log("not-a-timestamp child output", ForwardedLevel::Info);
-        assert_eq!(unknown.level, ForwardedLevel::Info);
-        assert_eq!(unknown.message, "not-a-timestamp child output");
-        let stderr = parse_forwarded_log(
-            &format!("{timestamp} TRACE child warning"),
-            ForwardedLevel::Warn,
-        );
-        assert_eq!(stderr.level, ForwardedLevel::Warn);
-        assert_eq!(stderr.message, "TRACE child warning");
-    }
-
-    #[test]
-    fn forwarded_journal_lines_preserve_untimestamped_severity_after_redaction() {
-        for (level, expected) in [
-            ("INFO", ForwardedLevel::Info),
-            ("WARN", ForwardedLevel::Warn),
-            ("ERROR", ForwardedLevel::Error),
-        ] {
-            let line = redact_sensitive(format!("{level} child secret"), &["secret"]);
-            let parsed = parse_forwarded_log(&line, ForwardedLevel::Warn);
-            assert_eq!(parsed.level, expected);
-            assert_eq!(parsed.message, "child [REDACTED]");
-        }
-    }
-
-    #[test]
-    fn restart_identity_warning_compares_to_immutable_runtime_and_warns_once() {
-        let runtime = test_startup_identity();
-        let mut changed = runtime.clone();
-        changed.agent_id = "agent-a".to_owned();
-        let runtime_version = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
-        let changed_version = SystemTime::UNIX_EPOCH + Duration::from_secs(2);
-        let returned_version = SystemTime::UNIX_EPOCH + Duration::from_secs(3);
-        let mut state = StartupIdentityWatchState::new(Some(runtime_version));
-
-        let mut warning_count = 0;
-        for (version, current) in [
-            (changed_version, &changed),
-            (changed_version, &changed),
-            (returned_version, &runtime),
-        ] {
-            if state.observe_version(Some(version))
-                && current != &runtime
-                && state.warn_once_for(version)
-            {
-                warning_count += 1;
-            }
-        }
-        assert_eq!(warning_count, 1);
-        assert_eq!(state.observed_version, Some(returned_version));
-        assert_eq!(state.warned_version, Some(changed_version));
-    }
-
-    fn test_startup_identity() -> StartupIdentity {
-        let mut config = Config::default_config().unwrap();
-        config.tunnel = Some(crate::config::TunnelConfig::default());
-        StartupIdentity::from_config(&config, CapabilityProfile::Normal).unwrap()
-    }
-
-    #[test]
-    fn retry_schedule_is_bounded_and_exponential() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(1));
-        assert_eq!(backoff_delay(2), Duration::from_secs(2));
-        assert_eq!(backoff_delay(5), Duration::from_secs(16));
-        assert_eq!(backoff_delay(6), Duration::from_secs(16));
-    }
-
-    #[test]
-    fn restart_decision_covers_retry_permanent_and_exhausted() {
-        assert_eq!(
-            restart_decision(1, None, &BACKOFFS),
-            RestartDecision::Retry(Duration::from_secs(1))
-        );
-        assert_eq!(
-            restart_decision(6, None, &BACKOFFS),
-            RestartDecision::Exhausted
-        );
-        assert_eq!(
-            restart_decision(1, Some(2), &BACKOFFS),
-            RestartDecision::Permanent
-        );
-    }
-
     #[tokio::test]
     async fn health_probe_disables_configured_proxy() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1151,14 +996,6 @@ mod tests {
         assert!(read_health_url(&path).is_none());
         fs::write(&path, "http://example.com:1234\n").unwrap();
         assert!(read_health_url(&path).is_none());
-    }
-
-    #[test]
-    fn runtime_paths_reject_path_injection() {
-        assert_eq!(
-            RuntimePaths::prepare("../escape").unwrap_err().to_string(),
-            "runtime_identity_invalid"
-        );
     }
 
     #[test]

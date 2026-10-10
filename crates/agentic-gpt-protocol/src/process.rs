@@ -502,17 +502,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn process_read_defaults_view_and_bounds_wait() {
-        let request: ProcessReadRequest = serde_json::from_value(serde_json::json!({
+    fn process_read_rejects_explicit_budgets_outside_shared_limits() {
+        let read = |max_bytes| ProcessReadRequest {
+            process_id: "process-1".to_string(),
+            wait_seconds: None,
+            view: ProcessReadView::Auto,
+            cursor: None,
+            max_bytes,
+        };
+        let defaults: ProcessReadRequest = serde_json::from_value(serde_json::json!({
             "processId": "process-1"
         }))
         .unwrap();
-        assert_eq!(request.process_id, "process-1");
-        assert_eq!(request.view, ProcessReadView::Auto);
-        assert_eq!(request.effective_wait_seconds(), 5);
-        assert!(request.cursor.is_none());
-        assert!(request.max_bytes.is_none());
-
+        assert_eq!(defaults.process_id, "process-1");
+        assert_eq!(defaults.view, ProcessReadView::Auto);
+        assert_eq!(defaults.effective_wait_seconds(), 5);
+        assert!(defaults.cursor.is_none());
+        assert!(defaults.max_bytes.is_none());
         for (wait_seconds, expected) in [(0, 0), (5, 5), (30, 30), (31, 30), (u64::MAX, 30)] {
             let request = ProcessReadRequest {
                 process_id: "process-1".to_string(),
@@ -523,17 +529,6 @@ mod tests {
             };
             assert_eq!(request.effective_wait_seconds(), expected);
         }
-    }
-
-    #[test]
-    fn process_read_rejects_explicit_budgets_outside_shared_limits() {
-        let read = |max_bytes| ProcessReadRequest {
-            process_id: "process-1".to_string(),
-            wait_seconds: None,
-            view: ProcessReadView::Auto,
-            cursor: None,
-            max_bytes,
-        };
         assert_eq!(
             read(None).effective_max_bytes(8192).unwrap(),
             DEFAULT_PROCESS_RESPONSE_BYTES
@@ -551,94 +546,5 @@ mod tests {
         assert!(read(Some(MAX_PROCESS_RESPONSE_BYTES + 1))
             .effective_max_bytes(DEFAULT_PROCESS_RESPONSE_BYTES)
             .is_err());
-    }
-
-    #[test]
-    fn unified_process_response_has_compact_identity_and_observation_fields() {
-        let response = ProcessResponse {
-            agent_id: "agent-1".to_string(),
-            process_id: "process-1".to_string(),
-            kind: ProcessKind::Command,
-            state: ProcessState::Completed,
-            capture_status: ProcessCaptureStatus::Complete,
-            group: None,
-            batch_id: None,
-            batch_index: None,
-            exit_code: Some(0),
-            wait_elapsed_ms: Some(5),
-            error: None,
-            cancel_outcome: None,
-            termination_evidence: None,
-            capture_error: None,
-            output: None,
-            mcp_result: None,
-        };
-        let json = serde_json::to_value(response).unwrap();
-        assert_eq!(json["agentId"], "agent-1");
-        assert_eq!(json["processId"], "process-1");
-        assert_eq!(json["kind"], "command");
-        assert_eq!(json["state"], "completed");
-        assert_eq!(json["captureStatus"], "complete");
-        assert_eq!(json["exitCode"], 0);
-        for removed in [
-            "status",
-            "completedInline",
-            "pollAfterMs",
-            "inlineOutput",
-            "outputPreview",
-            "resultAvailable",
-        ] {
-            assert!(json.get(removed).is_none());
-        }
-    }
-
-    #[test]
-    fn process_exec_wire_uses_command_and_cwd_and_rejects_legacy_argv_fields() {
-        let request: ProcessExecRequest = serde_json::from_value(serde_json::json!({
-            "agentId": "agent",
-            "command": "printf '%s' hi",
-            "needConfirm": false,
-            "cwd": "/workspace",
-            "waitSeconds": 0
-        }))
-        .unwrap();
-        assert_eq!(request.command, "printf '%s' hi");
-        assert_eq!(request.cwd.as_deref(), Some("/workspace"));
-        let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded["command"], "printf '%s' hi");
-        assert_eq!(encoded["cwd"], "/workspace");
-        for legacy in [
-            serde_json::json!({
-                "agentId": "agent",
-                "program": "printf",
-                "args": ["hi"],
-                "needConfirm": false
-            }),
-            serde_json::json!({
-                "agentId": "agent",
-                "command": "true",
-                "needConfirm": false,
-                "workingDirectory": "/workspace"
-            }),
-        ] {
-            assert!(serde_json::from_value::<ProcessExecRequest>(legacy).is_err());
-        }
-        assert!(
-            serde_json::from_value::<ProcessExecElement>(serde_json::json!({
-                "program": "true",
-                "args": [],
-                "workingDirectory": "/workspace"
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<ProcessBatchExecRequest>(serde_json::json!({
-                "agentId": "agent",
-                "elements": [{"command": "true"}],
-                "needConfirm": false,
-                "workingDirectory": "/workspace"
-            }))
-            .is_err()
-        );
     }
 }

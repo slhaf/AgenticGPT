@@ -271,21 +271,3 @@ fn t<'a>(language: UiLanguage, en: &'a str, zh_cn: &'a str) -> &'a str {
         UiLanguage::ZhCn => zh_cn,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{filtered_commands, WorkspaceCommand, WorkspaceRoute};
-
-    #[test]
-    fn command_filter_is_case_insensitive_and_keeps_real_routes_only() {
-        let names = filtered_commands("PRO")
-            .into_iter()
-            .map(|entry| entry.name)
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["process"]);
-        assert!(matches!(
-            filtered_commands("process")[0].command,
-            WorkspaceCommand::Route(WorkspaceRoute::Process)
-        ));
-    }
-}

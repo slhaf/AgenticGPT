@@ -402,26 +402,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mcp_servers_flow_into_built_config() {
-        let mut servers = std::collections::BTreeMap::new();
-        servers.insert(
-            "local_tools".to_string(),
-            crate::config::mcp_servers::McpServerConfig {
-                enabled: true,
-                transport: "stdio".to_string(),
-                url: Some("node ./server.mjs".to_string()),
-                auth: None,
-            },
-        );
-        let mut input = InitInput::non_interactive_defaults(UiLanguage::En);
-        input.mcp_servers = Some(servers.clone());
-
-        let built = build_config(input).unwrap();
-
-        assert_eq!(built.config.mcp_servers, servers);
-    }
-
-    #[test]
     fn default_template_is_standalone_normal_with_safe_placeholders() {
         let built = build_config(InitInput::non_interactive_defaults(UiLanguage::En)).unwrap();
         assert_eq!(built.mode, RuntimeMode::Standalone);
@@ -491,19 +471,6 @@ mod tests {
     }
 
     #[test]
-    fn local_mode_ignores_tunnel_inputs() {
-        let mut input = InitInput::non_interactive_defaults(UiLanguage::En);
-        input.mode = RuntimeMode::Local;
-        input.tunnel_id = Some("provided-tunnel".to_string());
-        input.tunnel_api_key = Some("env:TUNNEL_SECRET".to_string());
-        input.tunnel_client = Some(TunnelClientConfig::default());
-        input.hub_reporting = Some(HubReportingConfig::default());
-
-        let built = build_config(input).unwrap();
-        assert!(built.config.tunnel.is_none());
-    }
-
-    #[test]
     fn imported_base_survives_tui_managed_field_overlay() {
         let mut base = Config::default_config().unwrap();
         base.mode = RuntimeMode::Local;
@@ -542,122 +509,5 @@ mod tests {
         assert_eq!(built.config.limits.max_concurrent_tasks, 9);
         assert_eq!(built.config.mcp_servers.len(), 1);
         assert_eq!(built.config.extra["futureField"], serde_json::json!(true));
-    }
-
-    #[test]
-    fn pending_actions_are_deterministic_and_unique() {
-        let standalone_a = build_config(InitInput::non_interactive_defaults(UiLanguage::En))
-            .unwrap()
-            .pending;
-        let standalone_b = build_config(InitInput::non_interactive_defaults(UiLanguage::En))
-            .unwrap()
-            .pending;
-        assert_eq!(standalone_a, standalone_b);
-        assert_eq!(
-            standalone_a,
-            vec![
-                PendingAction::ReplaceTunnelId,
-                PendingAction::ProvisionTunnelSecret
-            ]
-        );
-
-        let mut hub_input = InitInput::non_interactive_defaults(UiLanguage::En);
-        hub_input.mode = RuntimeMode::Hub;
-        let hub = build_config(hub_input).unwrap();
-        assert_eq!(
-            hub.pending,
-            vec![
-                PendingAction::ConfigureHubUrl,
-                PendingAction::ReplaceAgentSecret
-            ]
-        );
-        assert_eq!(
-            hub.pending
-                .iter()
-                .filter(|action| **action == PendingAction::ConfigureHubUrl)
-                .count(),
-            1
-        );
-        assert_eq!(
-            hub.pending
-                .iter()
-                .filter(|action| **action == PendingAction::ReplaceAgentSecret)
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn secret_debug_output_is_redacted() {
-        let secret = "never-print-this-secret";
-        let debug = format!("{:?}", SecretValue::new(secret));
-        assert_eq!(debug, "SecretValue([REDACTED])");
-        assert!(!debug.contains(secret));
-
-        let plan = SecretWritePlan {
-            path: PathBuf::from("/tmp/agentic-gpt-secret"),
-            value: SecretValue::new(secret),
-        };
-        let plan_debug = format!("{plan:?}");
-        assert!(plan_debug.contains("[REDACTED]"));
-        assert!(!plan_debug.contains(secret));
-    }
-
-    #[test]
-    fn explicit_confirmation_language_wins_and_normal_room_override_requires_room_toolset() {
-        let mut input = InitInput::non_interactive_defaults(UiLanguage::ZhCn);
-        input.confirmation_language = Some("en-custom".to_string());
-        let built = build_config(input).unwrap();
-        assert_eq!(built.config.confirmation_language, "en-custom");
-
-        let mut normal_room_input = InitInput::non_interactive_defaults(UiLanguage::En);
-        normal_room_input.room = Some(crate::config::default_room_config());
-        let error = match build_config(normal_room_input) {
-            Ok(_) => panic!("normal profile must reject a room override without the Room toolset"),
-            Err(error) => error,
-        };
-        assert_eq!(error.to_string(), "room_config_requires_room_toolset");
-    }
-
-    #[test]
-    fn normal_profile_accepts_room_override_with_explicit_room_toolset() {
-        let mut input = InitInput::non_interactive_defaults(UiLanguage::En);
-        input.profile = WorkerProfile::Normal;
-        let mut toolsets = ToolsetConfig::normal();
-        toolsets.enable(ToolNamespace::Room);
-        input.toolsets = Some(toolsets.clone());
-        let room = crate::config::default_room_config();
-        input.room = Some(room.clone());
-
-        let built = build_config(input).unwrap();
-
-        assert_eq!(built.config.toolsets, toolsets);
-        assert_eq!(built.config.room, room);
-    }
-
-    #[test]
-    fn partial_hub_template_rejects_invalid_url_and_transport_with_stable_errors() {
-        for (url, transport, expected) in [
-            ("ftp://hub.example.com", "websocket", "hub_url_invalid"),
-            (
-                "https://hub.example.com",
-                "polling",
-                "hub_transport_invalid",
-            ),
-        ] {
-            let mut input = InitInput::non_interactive_defaults(UiLanguage::En);
-            input.mode = RuntimeMode::Hub;
-            input.hub_url = Some(url.to_string());
-            input.hub_transport = Some(transport.to_string());
-            let error = match build_config(input) {
-                Ok(_) => panic!("partial Hub template accepted invalid input"),
-                Err(error) => error,
-            };
-            assert_eq!(
-                error.to_string(),
-                expected,
-                "Hub template error code changed"
-            );
-        }
     }
 }

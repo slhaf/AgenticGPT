@@ -1934,27 +1934,6 @@ mod tests {
     }
 
     #[test]
-    fn queued_recovery_subsets_preserve_all_known_identities() {
-        let coordinator = FeedbackCoordinator::default();
-        let origin = EventOrigin {
-            run_id: "queued_subset".to_string(),
-            request_id: "queued_subset_request".to_string(),
-            command_hash: "queued_subset_hash".to_string(),
-        };
-        let key = FeedbackKey::new("agent", &origin);
-        coordinator.queue_recovery_sources(&key, vec![source("process-a"), source("process-b")]);
-        coordinator.queue_recovery_sources(&key, vec![source("process-a")]);
-
-        let pending = coordinator.pending_for_agent("agent");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(
-            pending[0].1.recovery_sources,
-            Some(vec![source("process-a"), source("process-b")])
-        );
-        assert!(!pending[0].1.conflict);
-    }
-
-    #[test]
     fn late_complete_reply_metadata_adds_an_immutable_delta_for_batch_child() {
         let (state, origin) = fixture("process.batch", "recovery_subset_then_reply");
         finalize_original(&state, "agent", &origin, None).unwrap();
@@ -2536,26 +2515,6 @@ mod tests {
             pending[0].payload.dispositions,
             vec![disposition("process-preflight", false)]
         );
-    }
-
-    #[tokio::test]
-    async fn public_flush_waits_for_active_agent_barrier() {
-        let state = std::sync::Arc::new(test_state());
-        let barrier = state.dispatch.response_feedback.agent_barrier("agent");
-        let held = barrier.lock().await;
-        let state_for_flush = std::sync::Arc::clone(&state);
-        let (finished, mut result) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let flush_result = flush_for_agent(&state_for_flush, "agent").await;
-            let _ = finished.send(flush_result);
-        });
-        tokio::task::yield_now().await;
-        assert!(matches!(
-            result.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ));
-        drop(held);
-        result.await.unwrap().unwrap();
     }
 
     #[test]

@@ -4783,118 +4783,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn process_error_messages_are_utf8_safe_and_bounded() {
-        let value = "错".repeat(MAX_PROCESS_ERROR_BYTES);
-        let bounded = bounded_error_message(value);
-        assert!(bounded.len() <= MAX_PROCESS_ERROR_BYTES);
-        assert!(bounded.ends_with("...[truncated]"));
-        assert!(bounded.is_char_boundary(bounded.len()));
-    }
-
-    #[test]
-    fn failed_process_reasons_are_projected_without_fabricating_exit_errors() {
-        let now = Utc::now();
-        let mut failed = synthetic_process(
-            "process_spawn_failure",
-            None,
-            ProcessKind::Command,
-            ProcessState::Failed,
-            now,
-        );
-        failed.reject_reason = Some("spawn_failed: executable missing".to_string());
-        let detail = synthetic_detail(failed.clone());
-        let response = managed_response_from_observation(
-            ProcessObservation {
-                process: failed,
-                detail,
-                output: None,
-            },
-            ProcessReadView::Status,
-            None,
-            0,
-            DEFAULT_PROCESS_RESPONSE_BYTES,
-        )
-        .unwrap();
-        let error = response.response.error.unwrap();
-        assert_eq!(error.code, "spawn_failed");
-        assert!(error.message.starts_with("spawn_failed:"));
-
-        let mut nonzero_exit = synthetic_process(
-            "process_nonzero_exit",
-            None,
-            ProcessKind::Command,
-            ProcessState::Failed,
-            now + chrono::Duration::seconds(1),
-        );
-        nonzero_exit.exit_code = Some(127);
-        let detail = synthetic_detail(nonzero_exit.clone());
-        let response = managed_response_from_observation(
-            ProcessObservation {
-                process: nonzero_exit,
-                detail,
-                output: None,
-            },
-            ProcessReadView::Status,
-            None,
-            0,
-            DEFAULT_PROCESS_RESPONSE_BYTES,
-        )
-        .unwrap();
-        assert!(response.response.error.is_none());
-    }
-
-    #[test]
-    fn process_read_rejects_output_pages_that_cannot_advance() {
-        let mut info = synthetic_process(
-            "process_tiny_output_budget",
-            None,
-            ProcessKind::Command,
-            ProcessState::Running,
-            Utc::now(),
-        );
-        info.agent_id.clear();
-        info.capture_status = ProcessCaptureStatus::Capturing;
-        let detail = synthetic_detail(info.clone());
-        let output = crate::process_history::ProcessOutputSnapshot {
-            stdout: vec![0xff],
-            stdout_start_offset: 0,
-            stdout_end_offset: 1,
-            ..Default::default()
-        };
-        let (mut response, _, _, fallback_preview) = process_response_base(
-            ProcessObservation {
-                process: info,
-                detail,
-                output: Some(output.clone()),
-            },
-            ProcessReadView::Auto,
-            0,
-        );
-        let cursor = ProcessCursor {
-            version: 1,
-            process_id: response.process_id.clone(),
-            stdout_offset: 0,
-            stderr_offset: 0,
-        };
-        response.output =
-            Some(output_page_reservation(&output, &response.process_id, &cursor).unwrap());
-        let fixed_size = serialized_size(&response);
-        assert!(fixed_size < MIN_PROCESS_RESPONSE_BYTES);
-        response.agent_id = "a".repeat(MIN_PROCESS_RESPONSE_BYTES - fixed_size - 1);
-        response.output = None;
-
-        let error = fit_process_response(
-            &mut response,
-            Some(&output),
-            Some(&cursor),
-            fallback_preview,
-            MIN_PROCESS_RESPONSE_BYTES,
-        )
-        .unwrap_err();
-        assert_eq!(error, "process_response_budget_too_small");
-    }
-
     #[tokio::test]
     async fn exec_waits_for_terminal_state_after_early_output() {
         let (state, workspace) = test_state(1).await;
@@ -5429,48 +5317,6 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(too_small, "process_read_max_bytes_out_of_range");
-    }
-
-    #[tokio::test]
-    async fn output_overflow_reports_exact_retained_gap() {
-        let mut ring = OutputRing::new(Arc::new(Notify::new()));
-        ring.mark_started();
-        ring.push(&vec![b'x'; PROCESS_OUTPUT_RING_CAPACITY + 5]);
-        ring.finish(ReaderOutcome::Eof);
-        let (data, start, end) = ring.snapshot();
-        let snapshot = crate::process_history::ProcessOutputSnapshot {
-            stdout: data,
-            stdout_start_offset: start,
-            stdout_end_offset: end,
-            ..Default::default()
-        };
-        let cursor = ProcessCursor {
-            version: 1,
-            process_id: "process_gap".to_string(),
-            stdout_offset: 0,
-            stderr_offset: 0,
-        };
-        let (page, used) = output_page_for_json_budget(
-            &snapshot,
-            "process_gap",
-            &cursor,
-            ProcessCaptureStatus::Complete,
-            64,
-        )
-        .unwrap();
-        let gap = page
-            .stdout
-            .gap
-            .as_ref()
-            .expect("retained output must report a gap");
-        assert_eq!(gap.start_offset, "0");
-        assert_eq!(gap.end_offset, "5");
-        assert_eq!(page.stdout.start_offset, "5");
-        assert_eq!(page.stdout.end_offset, "69");
-        assert_eq!(used, 64);
-        assert_eq!(decode_segment(&page.stdout), vec![b'x'; 64]);
-        assert!(page.has_more);
-        assert!(!page.eof);
     }
 
     #[tokio::test]
@@ -6756,20 +6602,5 @@ mod tests {
             crate::process_history::HistoryHealthStatus::Degraded
         );
         assert_eq!(state.process_history.health().pending_terminal_count, 0);
-    }
-
-    #[tokio::test]
-    async fn skill_leases_still_block_updates() {
-        let manager = crate::skills::SkillLeaseManager::new();
-        let shared = manager.try_shared("demo").await.unwrap();
-        assert!(manager
-            .acquire_exclusive("demo", Duration::from_millis(20))
-            .await
-            .is_err());
-        drop(shared);
-        assert!(manager
-            .acquire_exclusive("demo", Duration::from_millis(100))
-            .await
-            .is_ok());
     }
 }

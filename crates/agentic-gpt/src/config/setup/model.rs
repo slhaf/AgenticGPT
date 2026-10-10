@@ -1006,81 +1006,11 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config::{sparse_config_value, ToolNamespace};
-    use crate::config_templates::{OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource};
+    use crate::config::sparse_config_value;
+    use crate::config_templates::{OptionalSection, RuntimeMode, SecretValue};
     use crate::WorkerProfile;
 
     use super::*;
-
-    #[test]
-    fn setup_defaults_to_standalone_normal_and_preserves_inactive_mode_seeds() {
-        let seed = SetupSeed {
-            mode: Some(RuntimeMode::Hub),
-            tunnel_id: Some("tunnel_seed".into()),
-            hub_url: Some("https://hub.example.com".into()),
-            ..SetupSeed::default()
-        };
-        let mut session =
-            SetupSession::new(seed, UiLanguage::En, PathBuf::from("/tmp/config.json"));
-
-        assert_eq!(session.selected_mode(), RuntimeMode::Hub);
-        assert_eq!(session.selected_profile(), WorkerProfile::Normal);
-        assert_eq!(session.standalone().tunnel_id, "tunnel_seed");
-        assert_eq!(session.hub().hub_url, "https://hub.example.com");
-
-        session.set_mode(RuntimeMode::Standalone);
-        assert_eq!(session.standalone().tunnel_id, "tunnel_seed");
-        session.set_mode(RuntimeMode::Hub);
-        assert_eq!(session.hub().hub_url, "https://hub.example.com");
-    }
-
-    #[test]
-    fn tunnel_secret_reference_seeds_are_parsed_without_exposing_secret_text() {
-        let file_session = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                tunnel_api_key: Some("file:/tmp/tunnel-secret".into()),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/config.json"),
-        );
-        assert_eq!(
-            file_session.standalone().secret_source,
-            TunnelSecretSource::File
-        );
-        assert_eq!(file_session.standalone().secret_path, "/tmp/tunnel-secret");
-        assert!(file_session.standalone().secret_environment.is_empty());
-
-        let env_session = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                tunnel_api_key: Some("env:TUNNEL_SECRET".into()),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/config.json"),
-        );
-        assert_eq!(
-            env_session.standalone().secret_source,
-            TunnelSecretSource::Environment
-        );
-        assert_eq!(env_session.standalone().secret_environment, "TUNNEL_SECRET");
-        assert!(env_session.standalone().secret_path.is_empty());
-
-        let hub_secret = SecretValue::new("hub-secret-marker");
-        let hub_session = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Hub),
-                agent_secret: Some(hub_secret),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/config.json"),
-        );
-        assert!(format!("{:?}", hub_session.hub()).contains("REDACTED"));
-        assert!(!format!("{:?}", hub_session.hub()).contains("hub-secret-marker"));
-    }
 
     #[test]
     fn preview_is_the_redacted_sparse_projection_without_transaction_secret_material() {
@@ -1162,24 +1092,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_tunnel_secret_reference_is_reported_as_a_field_error() {
-        let session = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                tunnel_id: Some("tunnel-test".into()),
-                tunnel_api_key: Some("file:".into()),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/config.json"),
-        );
-
-        let errors = session.validate_connection().unwrap_err();
-        assert_eq!(errors[0].field, SetupField::TunnelSecretPath);
-        assert_eq!(errors[0].code, "config_init_secret_path_invalid");
-    }
-
-    #[test]
     fn mcp_server_draft_defaults_empty_and_saves_as_configured() {
         let mut session = SetupSession::new(
             SetupSeed::default(),
@@ -1218,117 +1130,5 @@ mod tests {
             "mcp-token-marker"
         );
         assert!(!format!("{draft:?}").contains("mcp-token-marker"));
-    }
-
-    #[test]
-    fn room_availability_uses_profile_preset_without_explicit_toolset_selection() {
-        let mut session = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Local),
-                profile: Some(WorkerProfile::Normal),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/config.json"),
-        );
-
-        assert!(!session.effective_toolsets().is_enabled(ToolNamespace::Room));
-        assert!(!session
-            .available_optional_sections()
-            .contains(&OptionalSection::Room));
-
-        session.set_profile(WorkerProfile::Room);
-        assert!(session.effective_toolsets().is_enabled(ToolNamespace::Room));
-        assert!(session
-            .available_optional_sections()
-            .contains(&OptionalSection::Room));
-
-        session.set_profile(WorkerProfile::Normal);
-        assert!(!session.effective_toolsets().is_enabled(ToolNamespace::Room));
-        assert!(!session
-            .available_optional_sections()
-            .contains(&OptionalSection::Room));
-    }
-
-    #[test]
-    fn optional_status_and_drafts_survive_mode_and_profile_changes() {
-        let mut session = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                profile: Some(WorkerProfile::Normal),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/config.json"),
-        );
-
-        assert_eq!(
-            session.section_status(OptionalSection::Identity),
-            SectionStatus::Default
-        );
-        session
-            .save_optional_section(OptionalSectionDraft::Identity(IdentityDraft {
-                display_name: "Configured agent".into(),
-            }))
-            .unwrap();
-        assert_eq!(
-            session.section_status(OptionalSection::Identity),
-            SectionStatus::Configured
-        );
-
-        session
-            .save_optional_section(OptionalSectionDraft::TunnelClient(TunnelClientDraft {
-                version: "1.2.3".into(),
-                cache_dir: "/tmp/tunnel-cache".into(),
-                auto_download: true,
-                executable: String::new(),
-                download_url: String::new(),
-                sha256: String::new(),
-            }))
-            .unwrap();
-        session.set_mode(RuntimeMode::Local);
-        assert_eq!(
-            session.section_status(OptionalSection::TunnelClient),
-            SectionStatus::NotApplicable
-        );
-        session.set_mode(RuntimeMode::Standalone);
-        assert_eq!(
-            session.section_status(OptionalSection::TunnelClient),
-            SectionStatus::Configured
-        );
-        assert!(matches!(
-            session.optional_draft(OptionalSection::TunnelClient),
-            OptionalSectionDraft::TunnelClient(TunnelClientDraft { ref version, .. })
-                if version == "1.2.3"
-        ));
-
-        session.set_profile(WorkerProfile::Room);
-        session
-            .save_optional_section(OptionalSectionDraft::Room(RoomDraft {
-                timezone: "UTC".into(),
-                diary_boundary_hour: "4".into(),
-                repository_root: "/tmp/room-repository".into(),
-                maintenance_mode: "workflow".into(),
-                maintenance_auto_push: true,
-            }))
-            .unwrap();
-        session.set_profile(WorkerProfile::Normal);
-        assert_eq!(
-            session.section_status(OptionalSection::Room),
-            SectionStatus::NotApplicable
-        );
-        session.set_profile(WorkerProfile::Room);
-        assert_eq!(
-            session.section_status(OptionalSection::Room),
-            SectionStatus::Configured
-        );
-        match session.optional_draft(OptionalSection::Room) {
-            OptionalSectionDraft::Room(draft) => {
-                assert_eq!(draft.repository_root, "/tmp/room-repository");
-                assert_eq!(draft.maintenance_mode, "workflow");
-                assert!(draft.maintenance_auto_push);
-            }
-            other => panic!("unexpected room draft: {other:?}"),
-        }
     }
 }

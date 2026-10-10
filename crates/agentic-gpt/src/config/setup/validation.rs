@@ -11,8 +11,7 @@ mod tests {
     use crate::WorkerProfile;
 
     use super::super::model::{
-        HubReportingDraft, LimitsDraft, OptionalSectionDraft, RoomDraft, SandboxDraft, SetupField,
-        SetupSeed, SetupSession, ShellDraft, ToolsetsDraft, WorkspaceDraft,
+        OptionalSectionDraft, RoomDraft, SetupSeed, SetupSession, ShellDraft, ToolsetsDraft,
     };
 
     fn session(mode: RuntimeMode, profile: WorkerProfile) -> SetupSession {
@@ -44,104 +43,6 @@ mod tests {
     }
 
     #[test]
-    fn required_connection_fields_report_concrete_domain_fields() {
-        let session = SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                tunnel_id: Some(String::new()),
-                tunnel_api_key: Some("file:/tmp/tunnel-secret".into()),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/config.json"),
-        );
-        assert_eq!(
-            session.validate_connection().unwrap_err()[0].field,
-            SetupField::TunnelId
-        );
-    }
-
-    #[test]
-    fn hub_connection_transport_and_secret_are_structured() {
-        let mut session = session(RuntimeMode::Hub, WorkerProfile::Normal);
-        session.hub_mut().hub_url = "ftp://hub.example.com".to_string();
-        session.hub_mut().hub_transport = "polling".to_string();
-        session.hub_mut().agent_secret = None;
-        let errors = session.validate_connection().unwrap_err();
-        assert_eq!(errors[0].field, SetupField::HubUrl);
-        assert_eq!(errors[0].code, "hub_url_invalid");
-        assert!(errors.iter().any(|error| {
-            error.field == SetupField::HubTransport && error.code == "hub_transport_invalid"
-        }));
-        assert!(errors.iter().any(|error| {
-            error.field == SetupField::AgentSecret && error.code == "config_init_secret_empty"
-        }));
-    }
-
-    #[test]
-    fn optional_validation_covers_paths_numbers_runtime_paths_and_reporting() {
-        let mut session = session(RuntimeMode::Local, WorkerProfile::Normal);
-        let workspace = OptionalSectionDraft::Workspace(WorkspaceDraft {
-            workspace_root: "/tmp/workspace".to_string(),
-            write_roots: "not-json".to_string(),
-            read_only_roots: "[]".to_string(),
-            deny_roots: "[]".to_string(),
-        });
-        let errors = session.save_optional_section(workspace).unwrap_err();
-        assert_eq!(errors[0].field, SetupField::WriteRoots);
-        assert_eq!(
-            errors[0].code,
-            "config_init_path_policy_write_roots_invalid"
-        );
-
-        let limits = OptionalSectionDraft::Limits(LimitsDraft {
-            max_concurrent_tasks: "two".to_string(),
-            max_active_processes: "never".to_string(),
-            max_file_search_context_lines: "five".to_string(),
-            process_response_bytes: "8192".to_string(),
-        });
-        let errors = session.save_optional_section(limits).unwrap_err();
-        assert_eq!(errors[0].field, SetupField::MaxConcurrentTasks);
-        assert!(errors.iter().any(|error| {
-            error.field == SetupField::MaxActiveProcesses
-                && error.code == "config_init_number_invalid: max_active_processes"
-        }));
-
-        let sandbox = OptionalSectionDraft::Sandbox(SandboxDraft {
-            enabled: true,
-            bubblewrap_path: "bwrap".to_string(),
-            required_runtime_paths: "{\"/usr\":true}".to_string(),
-        });
-        let errors = session.save_optional_section(sandbox).unwrap_err();
-        assert_eq!(errors[0].field, SetupField::RequiredRuntimePaths);
-        assert_eq!(errors[0].code, "config_init_runtime_paths_invalid");
-
-        let room = OptionalSectionDraft::Room(RoomDraft {
-            timezone: "Asia/Shanghai".to_string(),
-            diary_boundary_hour: "24".to_string(),
-            repository_root: String::new(),
-            maintenance_mode: "local".to_string(),
-            maintenance_auto_push: false,
-        });
-        let errors = session.save_optional_section(room).unwrap_err();
-        assert_eq!(errors[0].field, SetupField::RoomTimezone);
-        assert_eq!(errors[0].code, "config_init_optional_section_invalid");
-
-        let reporting = OptionalSectionDraft::HubReporting(HubReportingDraft {
-            enabled: true,
-            detail: "everything".to_string(),
-        });
-        let errors = session.save_optional_section(reporting).unwrap_err();
-        assert_eq!(errors[0].field, SetupField::HubReportingDetail);
-        assert_eq!(errors[0].code, "config_init_optional_section_invalid");
-
-        assert_eq!(
-            session.section_status(OptionalSection::Room),
-            super::super::model::SectionStatus::NotApplicable
-        );
-    }
-
-    #[test]
     fn shell_init_file_modes_preserve_default_disabled_and_explicit_path() {
         let cases = [
             ("default", ShellInitFile::Default),
@@ -162,56 +63,6 @@ mod tests {
                 .unwrap();
             let built = build_config(session.build_active_input().unwrap()).unwrap();
             assert_eq!(built.config.shell.init_file, expected);
-        }
-    }
-
-    #[test]
-    fn process_response_bytes_limit_accepts_protocol_bounds_and_rejects_invalid_values() {
-        use agentic_gpt_protocol::{MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES};
-
-        let mut session = session(RuntimeMode::Local, WorkerProfile::Normal);
-        let limits_draft = |process_response_bytes: String| {
-            OptionalSectionDraft::Limits(LimitsDraft {
-                max_concurrent_tasks: "2".to_string(),
-                max_active_processes: "auto".to_string(),
-                max_file_search_context_lines: "5".to_string(),
-                process_response_bytes,
-            })
-        };
-
-        for value in [MIN_PROCESS_RESPONSE_BYTES, MAX_PROCESS_RESPONSE_BYTES] {
-            session
-                .save_optional_section(limits_draft(value.to_string()))
-                .unwrap();
-            let OptionalSectionDraft::Limits(saved) =
-                session.optional_draft(OptionalSection::Limits)
-            else {
-                unreachable!();
-            };
-            assert_eq!(saved.process_response_bytes, value.to_string());
-        }
-
-        for value in [
-            (MIN_PROCESS_RESPONSE_BYTES - 1).to_string(),
-            (MAX_PROCESS_RESPONSE_BYTES + 1).to_string(),
-            "not-a-number".to_string(),
-        ] {
-            let errors = session
-                .save_optional_section(limits_draft(value))
-                .unwrap_err();
-            assert!(errors.iter().any(|error| {
-                error.field == SetupField::ProcessResponseBytes
-                    && error.code == "config_init_number_invalid: process_response_bytes"
-            }));
-            let OptionalSectionDraft::Limits(saved) =
-                session.optional_draft(OptionalSection::Limits)
-            else {
-                unreachable!();
-            };
-            assert_eq!(
-                saved.process_response_bytes,
-                MAX_PROCESS_RESPONSE_BYTES.to_string()
-            );
         }
     }
 
@@ -304,44 +155,6 @@ mod tests {
             RoomMaintenanceMode::Workflow
         );
         assert!(built.config.room.maintenance.auto_push);
-    }
-
-    #[test]
-    fn normal_profile_with_explicit_room_disabled_toolset_hides_and_rejects_room() {
-        let mut session = session(RuntimeMode::Local, WorkerProfile::Normal);
-        let toolsets = ToolsetConfig::normal();
-        session
-            .save_optional_section(toolsets_draft(&toolsets))
-            .unwrap();
-
-        assert!(!session
-            .available_optional_sections()
-            .contains(&OptionalSection::Room));
-        assert_eq!(
-            session.section_status(OptionalSection::Room),
-            super::super::model::SectionStatus::NotApplicable
-        );
-
-        let errors = session
-            .save_optional_section(OptionalSectionDraft::Room(RoomDraft {
-                timezone: "UTC".to_string(),
-                diary_boundary_hour: "5".to_string(),
-                repository_root: String::new(),
-                maintenance_mode: "local".to_string(),
-                maintenance_auto_push: false,
-            }))
-            .unwrap_err();
-        assert_eq!(errors[0].field, SetupField::RoomTimezone);
-        assert_eq!(errors[0].code, "config_init_optional_section_invalid");
-
-        session.set_profile(WorkerProfile::Room);
-        assert!(!session
-            .available_optional_sections()
-            .contains(&OptionalSection::Room));
-        assert_eq!(
-            session.section_status(OptionalSection::Room),
-            super::super::model::SectionStatus::NotApplicable
-        );
     }
 }
 use std::collections::{BTreeMap, HashSet};

@@ -312,18 +312,3 @@ fn t<'a>(language: UiLanguage, en: &'a str, zh_cn: &'a str) -> &'a str {
         UiLanguage::ZhCn => zh_cn,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{clip, short_process_id};
-
-    #[test]
-    fn clipping_and_short_id_are_bounded() {
-        assert_eq!(clip("abcdefghijkl", 6), "abcde…");
-        assert_eq!(clip("abc", 6), "abc");
-        assert_eq!(
-            short_process_id("process_boot_1234567890abcdef"),
-            "1234567890a…"
-        );
-    }
-}

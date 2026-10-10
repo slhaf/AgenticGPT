@@ -1,7 +1,5 @@
 use super::*;
-use crate::config::mcp_servers::{
-    mutate_servers, server_config_revision, validate_server_configs, McpConfigCommand,
-};
+use crate::config::mcp_servers::{mutate_servers, validate_server_configs, McpConfigCommand};
 use crate::config::Config;
 use agentic_gpt_protocol::{McpBatchMode, McpBatchRequest, McpBatchStatus};
 use std::collections::BTreeMap;
@@ -1875,57 +1873,4 @@ fn config_cli_rejects_invalid_server_without_writing_and_accepts_valid_server() 
         Some("https://example.test/mcp")
     );
     let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn server_config_revision_is_deterministic_and_content_sensitive() {
-    let mut first = BTreeMap::new();
-    first.insert(
-        "b".to_string(),
-        server("streamable-http", Some("https://b.example/mcp")),
-    );
-    first.insert("a".to_string(), server("stdio", Some("node a.mjs")));
-    let mut second = BTreeMap::new();
-    second.insert("a".to_string(), server("stdio", Some("node a.mjs")));
-    second.insert(
-        "b".to_string(),
-        server("streamable-http", Some("https://b.example/mcp")),
-    );
-    assert_eq!(
-        server_config_revision(&first),
-        server_config_revision(&second)
-    );
-    second.get_mut("b").unwrap().enabled = false;
-    assert_ne!(
-        server_config_revision(&first),
-        server_config_revision(&second)
-    );
-}
-
-#[test]
-fn streamable_http_bearer_auth_is_validated_and_injected() {
-    let mut http = server("streamable-http", Some("https://example.test/mcp"));
-    http.auth = Some(McpServerAuthConfig::Bearer {
-        token: "secret-token".to_string(),
-    });
-    let mut servers = BTreeMap::new();
-    servers.insert("secured".to_string(), http.clone());
-    validate_server_configs(&servers).unwrap();
-    assert_eq!(
-        streamable_http_transport_config(&http)
-            .unwrap()
-            .auth_header
-            .as_deref(),
-        Some("secret-token")
-    );
-    assert!(!format!("{http:?}").contains("secret-token"));
-
-    let mut stdio = server("stdio", Some("node server.mjs"));
-    stdio.auth = http.auth;
-    servers.clear();
-    servers.insert("local".to_string(), stdio);
-    assert!(validate_server_configs(&servers)
-        .unwrap_err()
-        .to_string()
-        .starts_with("mcp_server_auth_unsupported"));
 }

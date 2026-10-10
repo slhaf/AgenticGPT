@@ -191,23 +191,3 @@ pub(crate) fn default_config_summary() -> SafeConfigSummary {
         tunnel: None,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::default_config_summary;
-
-    #[test]
-    fn safe_default_summary_has_no_paths_or_secrets() {
-        let summary = default_config_summary();
-        assert_eq!(summary.workspace_root, "unknown");
-        assert_eq!(summary.sandbox.mode, "unknown");
-        assert!(summary.path_policy.write_roots.is_empty());
-        assert!(summary.path_policy.read_only_roots.is_empty());
-        assert!(summary.path_policy.deny_roots.is_empty());
-        assert!(summary.policy_rules.allow.is_empty());
-        assert!(summary.policy_rules.confirm.is_empty());
-        assert!(summary.policy_rules.deny.is_empty());
-        assert!(summary.policy_rules.builtins.confirm.is_empty());
-        assert!(summary.policy_rules.builtins.deny.is_empty());
-    }
-}

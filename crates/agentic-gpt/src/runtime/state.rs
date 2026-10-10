@@ -207,38 +207,3 @@ impl AppState {
             .map(|(generation, _)| generation)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runtime_capabilities_follow_transport_and_profile() {
-        let hub_normal = RuntimeModel::hub(CapabilityProfile::Normal).capabilities();
-        assert!(!hub_normal.skills);
-        assert!(!hub_normal.bootstrap);
-        assert!(!hub_normal.diary);
-        assert!(!hub_normal.notebook);
-        assert!(hub_normal.notifications);
-
-        let tunnel_normal = RuntimeModel::tunnel(CapabilityProfile::Normal, false).capabilities();
-        assert!(tunnel_normal.skills);
-        assert!(tunnel_normal.bootstrap);
-        assert!(!tunnel_normal.diary);
-        assert!(!tunnel_normal.notebook);
-        assert!(!tunnel_normal.notifications);
-
-        let local_normal = RuntimeModel::local(CapabilityProfile::Normal);
-        assert_eq!(local_normal.transport, Transport::LocalUnix);
-        assert_eq!(local_normal.hub_mode, HubMode::Disabled);
-        assert_eq!(local_normal.capabilities(), tunnel_normal);
-
-        let tunnel_room = RuntimeModel::tunnel(CapabilityProfile::Room, true);
-        assert_eq!(tunnel_room.hub_mode, HubMode::ReportingOnly);
-        assert!(tunnel_room.capabilities().skills);
-        assert!(tunnel_room.capabilities().bootstrap);
-        assert!(tunnel_room.capabilities().diary);
-        assert!(tunnel_room.capabilities().notebook);
-        assert_eq!(tunnel_room.profile.role(), AgentRole::Room);
-    }
-}

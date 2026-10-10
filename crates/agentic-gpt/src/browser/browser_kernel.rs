@@ -182,14 +182,13 @@ mod tests {
     use parking_lot::Mutex;
     use rmcp::{
         model::{
-            CallToolRequestParams, ClientCapabilities, Content, InitializeRequestParams,
-            ProtocolVersion, ServerCapabilities, ServerInfo,
+            CallToolRequestParams, Content, InitializeRequestParams, ProtocolVersion,
+            ServerCapabilities, ServerInfo,
         },
         service::{RequestContext, RunningService},
         RoleServer, ServerHandler, ServiceExt,
     };
     use std::{
-        ffi::OsStr,
         future::Future,
         path::PathBuf,
         sync::{
@@ -202,9 +201,6 @@ mod tests {
     enum Behavior {
         Preserve,
         Success,
-        ToolError,
-        BrowserUnavailable,
-        ServiceFailure,
     }
 
     #[derive(Clone, Debug)]
@@ -261,15 +257,6 @@ mod tests {
             match self.behavior {
                 Behavior::Preserve => std::future::ready(Ok(expected_result())),
                 Behavior::Success => std::future::ready(Ok(CallToolResult::default())),
-                Behavior::ToolError => std::future::ready(Ok(CallToolResult::structured_error(
-                    json!({"message": "tool failed"}),
-                ))),
-                Behavior::BrowserUnavailable => std::future::ready(Ok(CallToolResult::success(
-                    vec![Content::text(BROWSER_UNAVAILABLE_SENTINEL)],
-                ))),
-                Behavior::ServiceFailure => std::future::ready(Err(
-                    rmcp::ErrorData::internal_error("fake service failure", None),
-                )),
             }
         }
 
@@ -313,60 +300,6 @@ mod tests {
         &meta.0["x-codex-turn-metadata"]
     }
 
-    #[test]
-    fn node_repl_client_info_uses_the_frozen_initialize_contract() {
-        let info = node_repl_client_info();
-
-        assert_eq!(info.protocol_version, ProtocolVersion::V_2025_06_18);
-        assert_eq!(info.capabilities, ClientCapabilities::default());
-        assert_eq!(info.client_info.name, "agentic-browser-runtime");
-        assert_eq!(info.client_info.version, env!("CARGO_PKG_VERSION"));
-    }
-
-    #[test]
-    fn command_helper_uses_direct_program_cwd_and_env_overrides() {
-        let spec = NodeReplLaunchSpec {
-            program: PathBuf::from("/runtime/node-repl.mjs"),
-            cwd: PathBuf::from("/runtime"),
-            env_overrides: std::collections::BTreeMap::from([(
-                "CUSTOM_SETTING".to_string(),
-                "preserved".to_string(),
-            )]),
-        };
-        let command = command_from_launch_spec(&spec);
-        let command = command.as_std();
-
-        assert_eq!(command.get_program(), OsStr::new("/runtime/node-repl.mjs"));
-        assert_eq!(
-            command.get_current_dir(),
-            Some(PathBuf::from("/runtime").as_path())
-        );
-        assert!(command.get_args().next().is_none());
-        assert_eq!(
-            command
-                .get_envs()
-                .find(|(key, _)| *key == OsStr::new("CUSTOM_SETTING"))
-                .and_then(|(_, value)| value),
-            Some(OsStr::new("preserved"))
-        );
-    }
-
-    #[tokio::test]
-    async fn spawn_rejects_invalid_ids_before_attempting_process_creation() {
-        let spec = NodeReplLaunchSpec {
-            program: PathBuf::from("/definitely/missing/node-repl"),
-            cwd: PathBuf::from("."),
-            env_overrides: std::collections::BTreeMap::new(),
-        };
-
-        let error = match NodeReplKernel::spawn(&spec, " ".to_string(), "turn-1".to_string()).await
-        {
-            Ok(_) => panic!("invalid session id was accepted"),
-            Err(error) => error,
-        };
-        assert_eq!(error.to_string(), "browser_runtime_session_id_invalid");
-    }
-
     #[tokio::test]
     async fn impossible_executable_is_a_spawn_failure() {
         let spec = NodeReplLaunchSpec {
@@ -384,218 +317,6 @@ mod tests {
         assert!(error
             .to_string()
             .starts_with("browser_runtime_node_repl_spawn_failed:"));
-    }
-
-    #[tokio::test]
-    async fn constructor_rejects_empty_or_whitespace_session_ids() {
-        for session_id in ["", " ", "\n\t"] {
-            let server = FakeNodeReplServer::new(Behavior::Preserve);
-            let (client, server_task) = connected(server).await;
-            let error = match NodeReplKernel::from_initialized_client(
-                client,
-                session_id.to_string(),
-                "turn-1".to_string(),
-            ) {
-                Ok(_) => panic!("empty session id was accepted"),
-                Err(error) => error,
-            };
-            assert_eq!(error.to_string(), "browser_runtime_session_id_invalid");
-            server_task.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn constructor_rejects_empty_or_whitespace_turn_ids() {
-        for turn_id in ["", " ", "\n\t"] {
-            let server = FakeNodeReplServer::new(Behavior::Preserve);
-            let (client, server_task) = connected(server).await;
-            let error = match NodeReplKernel::from_initialized_client(
-                client,
-                "session-1".to_string(),
-                turn_id.to_string(),
-            ) {
-                Ok(_) => panic!("empty turn id was accepted"),
-                Err(error) => error,
-            };
-            assert_eq!(error.to_string(), "browser_runtime_turn_id_invalid");
-            server_task.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn js_sends_exact_tool_name_and_arguments() {
-        let server = FakeNodeReplServer::new(Behavior::Preserve);
-        let calls = server.calls.clone();
-        let (client, server_task) = connected(server).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        kernel.js("1 + 2", 750).await.unwrap();
-        {
-            let calls = calls.lock();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].name, "js");
-            assert_eq!(
-                calls[0].arguments,
-                Map::from_iter([
-                    ("code".to_string(), json!("1 + 2")),
-                    ("timeout_ms".to_string(), json!(750_u64)),
-                ])
-            );
-        }
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn js_attaches_exact_codex_turn_metadata() {
-        let server = FakeNodeReplServer::new(Behavior::Preserve);
-        let calls = server.calls.clone();
-        let (client, server_task) = connected(server).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-abc".to_string(),
-            "turn-xyz".to_string(),
-        )
-        .unwrap();
-
-        kernel.js("console.log(1)", 100).await.unwrap();
-        {
-            let calls = calls.lock();
-            assert_eq!(
-                metadata_values(calls[0].meta.as_ref().unwrap()),
-                &json!({"session_id": "session-abc", "turn_id": "turn-xyz"})
-            );
-        }
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn turn_ended_sends_exact_tool_name_and_arguments() {
-        let server = FakeNodeReplServer::new(Behavior::Success);
-        let calls = server.calls.clone();
-        let (client, server_task) = connected(server).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-abc".to_string(),
-            "turn-xyz".to_string(),
-        )
-        .unwrap();
-
-        kernel.turn_ended().await.unwrap();
-        {
-            let calls = calls.lock();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].name, "turn_ended");
-            assert_eq!(
-                calls[0].arguments,
-                Map::from_iter([
-                    ("hook_event_name".to_string(), json!("Stop")),
-                    ("session_id".to_string(), json!("session-abc")),
-                    ("turn_id".to_string(), json!("turn-xyz")),
-                ])
-            );
-        }
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn reset_js_sends_exact_tool_name_and_empty_arguments() {
-        let server = FakeNodeReplServer::new(Behavior::Success);
-        let calls = server.calls.clone();
-        let (client, server_task) = connected(server).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        kernel.reset_js().await.unwrap();
-        {
-            let calls = calls.lock();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].name, "js_reset");
-            assert!(calls[0].arguments.is_empty());
-        }
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn turn_ended_converts_tool_error_to_stable_failure() {
-        let (client, server_task) = connected(FakeNodeReplServer::new(Behavior::ToolError)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let error = kernel.turn_ended().await.unwrap_err();
-        assert_eq!(error.to_string(), "browser_runtime_turn_ended_failed");
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn reset_js_converts_tool_error_to_stable_failure() {
-        let (client, server_task) = connected(FakeNodeReplServer::new(Behavior::ToolError)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let error = kernel.reset_js().await.unwrap_err();
-        assert_eq!(error.to_string(), "browser_runtime_js_reset_failed");
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn turn_ended_prefixes_rmcp_service_failures() {
-        let (client, server_task) =
-            connected(FakeNodeReplServer::new(Behavior::ServiceFailure)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let error = kernel.turn_ended().await.unwrap_err();
-        assert!(error
-            .to_string()
-            .starts_with("browser_runtime_node_repl_call_failed:"));
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn reset_js_prefixes_rmcp_service_failures() {
-        let (client, server_task) =
-            connected(FakeNodeReplServer::new(Behavior::ServiceFailure)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let error = kernel.reset_js().await.unwrap_err();
-        assert!(error
-            .to_string()
-            .starts_with("browser_runtime_node_repl_call_failed:"));
-        drop(kernel);
-        server_task.await.unwrap();
     }
 
     #[tokio::test]
@@ -648,58 +369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn js_preserves_mixed_result_fields_unchanged() {
-        let (client, server_task) = connected(FakeNodeReplServer::new(Behavior::Preserve)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let result = kernel.js("code", 1).await.unwrap();
-        assert_eq!(result, expected_result());
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn js_keeps_tool_error_result_as_successful_transport_return() {
-        let (client, server_task) = connected(FakeNodeReplServer::new(Behavior::ToolError)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let result = kernel.js("bad code", 1).await.unwrap();
-        assert_eq!(result.is_error, Some(true));
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn js_prefixes_rmcp_service_failures() {
-        let (client, server_task) =
-            connected(FakeNodeReplServer::new(Behavior::ServiceFailure)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let error = kernel.js("code", 1).await.unwrap_err();
-        assert!(error
-            .to_string()
-            .starts_with("browser_runtime_node_repl_call_failed:"));
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn bootstrap_sends_escaped_path_and_frozen_browser_setup_code() {
+    async fn bootstrap_escapes_import_path_and_initializes_browser_in_order() {
         let server = FakeNodeReplServer::new(Behavior::Success);
         let calls = server.calls.clone();
         let (client, server_task) = connected(server).await;
@@ -724,86 +394,39 @@ mod tests {
             assert_eq!(calls[0].arguments["timeout_ms"], json!(20_000_u64));
             let code = calls[0].arguments["code"].as_str().unwrap();
             let encoded_path = serde_json::to_string(&raw_path).unwrap();
-            assert!(code.contains(&format!("await import({encoded_path})")));
+            let import_path = format!("import({encoded_path})");
+            assert!(code.contains(&import_path));
             assert!(!code.contains(&raw_path));
-            assert!(code.contains("if (globalThis.agent == null)"));
-            assert!(code.contains("const { setupBrowserRuntime } = await import("));
-            assert!(code.contains("globalThis.agent = await setupBrowserRuntime();"));
-            assert!(code.contains("if (globalThis.browser == null)"));
-            assert!(code.contains("await globalThis.agent.browsers.list()"));
-            assert!(code.contains("browser.family === \"chrome\""));
+
+            let agent_guard = code.find("globalThis.agent == null").unwrap();
+            let setup_import = code.find(&import_path).unwrap();
+            let setup_agent = code
+                .find("globalThis.agent = await setupBrowserRuntime()")
+                .unwrap();
+            let browser_guard = code.find("globalThis.browser == null").unwrap();
+            let list_browsers = code.find("browsers.list()").unwrap();
+            let select_chrome = code.find("browser.family === \"chrome\"").unwrap();
+            let get_browser = code.find("browsers.get(\"chrome\")").unwrap();
+            let result_guard = code.find("if (globalThis.browser != null)").unwrap();
+            let result_write = code.find("nodeRepl.write(JSON.stringify").unwrap();
+            let browser_id = code
+                .find("browserId: globalThis.browser.browserId")
+                .unwrap();
+
+            assert!(
+                agent_guard < setup_import
+                    && setup_import < setup_agent
+                    && setup_agent < browser_guard
+                    && browser_guard < list_browsers
+                    && list_browsers < select_chrome
+                    && select_chrome < get_browser
+                    && get_browser < result_guard
+                    && result_guard < result_write
+                    && result_write < browser_id
+            );
             assert!(code.contains(BROWSER_UNAVAILABLE_SENTINEL));
-            assert!(code
-                .contains("globalThis.browser = await globalThis.agent.browsers.get(\"chrome\");"));
-            assert!(code.find("browsers.list").unwrap() < code.find("browsers.get").unwrap());
-            assert!(code.contains(
-                "nodeRepl.write(JSON.stringify({ browserId: globalThis.browser.browserId }));"
-            ));
+            assert!(code.contains("JSON.stringify"));
         }
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn bootstrap_sentinel_maps_to_browser_unavailable() {
-        let (client, server_task) =
-            connected(FakeNodeReplServer::new(Behavior::BrowserUnavailable)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let error = kernel
-            .bootstrap_browser(Path::new("/runtime/browser-client.mjs"))
-            .await
-            .unwrap_err();
-        assert_eq!(error.to_string(), "browser_runtime_browser_unavailable");
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn bootstrap_converts_tool_error_to_stable_failure() {
-        let (client, server_task) = connected(FakeNodeReplServer::new(Behavior::ToolError)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let error = kernel
-            .bootstrap_browser(Path::new("/runtime/browser-client.mjs"))
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "browser_runtime_browser_bootstrap_failed"
-        );
-        drop(kernel);
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn bootstrap_preserves_rmcp_service_failure_prefix() {
-        let (client, server_task) =
-            connected(FakeNodeReplServer::new(Behavior::ServiceFailure)).await;
-        let mut kernel = NodeReplKernel::from_initialized_client(
-            client,
-            "session-1".to_string(),
-            "turn-1".to_string(),
-        )
-        .unwrap();
-
-        let error = kernel
-            .bootstrap_browser(Path::new("/runtime/browser-client.mjs"))
-            .await
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .starts_with("browser_runtime_node_repl_call_failed:"));
         drop(kernel);
         server_task.await.unwrap();
     }

@@ -6,7 +6,7 @@
 - Report counts separately by language and tier. Record review-worthy cases among tiers 1–3, low-value cases among tiers 4–5, and mixed-scope cases with the behaviors they exercise.
 - Ambiguous cases that cannot be responsibly assigned go to a review list with their test content summarized; continue the rest of the inventory.
 - Initial inventory phase was read-only. User has now authorized execution using `cleanup-manifest.md`; this phase may change only explicitly listed test declarations and the manifest/planning records.
-- Verification: static inventory, Rust `cargo test --workspace -- --list`, Kotlin Gradle discovery per enabled test source set; do not run the full matrix.
+- Historical inventory discovery used non-executing discovery only. For the current cleanup, verification follows `.github/workflows/ci.yml` plus all four documented shared Kotlin test tasks; the old no-full-matrix boundary does not constrain this authorized cleanup.
 - Attempt cap: five rounds. Escalate if a Rust/Kotlin test source set cannot be read or enumerated.
 
 ## Research Findings
@@ -50,6 +50,15 @@
 - Repository HEAD at execution start: `8232dcf35953bd6db3b6f0a268f0532cedab6a43`; initial `git status --short` and `git diff --stat` were empty.
 - Production code and tests outside the manifest are out of scope. Mismatched targets are skipped and logged. Merge/simplify changes must preserve all unique valid regression behavior.
 - Work is partitioned by disjoint source ownership to avoid conflicting edits: (1) Hub; (2) Protocol, apply-patch, browser-host, and the three Kotlin test files; (3) Agent browser tests; (4) remaining Agent test files, including config, files, ingress, operations, process, runtime, storage, skills, room, and UI. Each batch reads exact identifiers from the manifest, makes no test runs, and returns actual outcomes for integration.
+- Supporting Rust/Kotlin batch completed: deleted 26 manifest declarations (1 Apply-patch, 4 browser-host, 18 Protocol, 3 Kotlin). The Protocol process-read consolidation removed one additional test declaration and moved defaults, wait clamp edge cases, and no-cursor assertions into the existing budget-boundary test. No mismatches/skips; no tests run.
+- Agent browser batch completed: 43 listed deletions. The pinned-key fingerprint test was retained because no signed pinned-repository fixture independently exercises that trust material. The target-name test's invalid filename/hash failures moved to a real-consumer test; browser bootstrap test was narrowed to escaping, call order, sentinel, and result semantics.
+- Agent config/files batch completed: 49 listed deletions; all three assigned consolidation targets merged, preserving save/load configuration behavior, pending-action/redaction cases, and invalid regex/glob errors alongside separate bound assertions. No mismatch/skip.
+- Remaining Agent modules batch completed: 135 listed deletions; no merge targets, mismatch, or skip. Its detailed per-file list is retained in the worker result; no tests run.
+- Hub batch completed: 53 listed deletions; the MCP batch test was simplified in place, preserving required schema fields, 16-call resource limit, and side-effect annotations while removing isolated wait/timeout numeric snapshots. No mismatch/skip.
+- Batch reconciliation: 53 Hub + 26 supporting Rust/Kotlin + 43 Agent browser + 49 Agent config/files + 135 remaining Agent = all 306 manifest deletion targets. The 8 merge/simplify targets were resolved as five merges, two in-place simplifications, and one unchanged retention with a documented reason; none was skipped.
+- Verification contract: Rust main pinned-toolchain CI ran formatting, workspace check, strict Clippy, full workspace tests, Agent/Hub binary build, and live contract parity. The separate stable workflow ran strict Clippy. Kotlin has no workflow in `.github/workflows/`; after a combined JVM/JS/Wasm Gradle invocation failed during concurrent Yarn lock setup, the user directed not to run every Kotlin target. `:shared:jvmTest` passed independently; JS/Wasm test sources compiled in the combined invocation but their test runners did not complete. Android host remains unverified because SDK licenses were not accepted. Visually reviewed the remaining Kotlin changes.
+- Final Rust results: `cargo test --workspace -- --list` reported 520 tests; full execution passed 519 with one existing ignored test. Formatting, workspace check, strict pinned-toolchain Clippy, Agent/Hub build, contract parity, and latest-stable strict Clippy all passed.
+- Kotlin result: `:shared:jvmTest` passed separately (2 seconds; 3 tasks executed, 14 up-to-date). Combined JVM/JS/Wasm execution failed at `:kotlinStoreYarnLock` because `console/build/js/yarn.lock` was missing after parallel JS/Wasm Yarn setup. Test source compilation for both JS and Wasm completed before the failure. Per user instruction no further Kotlin targets were run; this is recorded as unverified, not passed.
 ## Technical Decisions
 | Decision | Rationale |
 |----------|-----------|
@@ -60,5 +69,13 @@
 |-------|------------|
 | Planning template edit initially retained its old footer | Removed duplicate footer from the planning file |
 
+| `cargo fmt --all -- --check` initially failed | Removal of the final test also removed `tmux_tests`' closing brace and left repeated blank lines; restored the brace, ran `cargo fmt --all`, and the subsequent format check passed |
+| Strict workspace Clippy found dead Protocol test scaffolds after listed tests were removed | Removed only the now-unused test import/helper and empty test module; rerun strict Clippy |
+| Strict Clippy after initial lint cleanup reported unused imports and lost imports still required by retained tests | Restored retained Hub/browser/runtime test imports, retained `Behavior::Success` and its success result arm, removed confirmed unused imports; rerun strict Clippy |
+| Workspace tests failed in the simplified browser bootstrap test because fake `Success` returned an error result | Restored the original successful `CallToolResult::default()` response separately from `Preserve`; the targeted test passed |
+| `xd://lsp` reference lookup was unavailable (no language server found) | Used exact-symbol search; both `build_resource` and `backoff_delay` are `#[cfg(test)]` declarations, not production runtime behavior |
+| Workspace tests found that the simplified Hub MCP assertion expected optional integers as a scalar type | Matched the live schema's `["integer", "null"]` type for optional `waitSeconds`/`timeoutSeconds`; the focused Hub test passed |
+| `:shared:testAndroidHostTest` could not configure with the local SDK | Set `ANDROID_HOME`; Gradle then reported unaccepted Build-Tools 36 and Android 36 licenses. Did not accept licenses; task remains unverified |
+| Combined JVM/JS/Wasm Gradle invocation failed at `:kotlinStoreYarnLock` because `console/build/js/yarn.lock` was missing during concurrent Yarn setup | Isolated JVM task passed. User directed not to run every Kotlin target; did not rerun JS/Wasm. Removed generated untracked `console/kotlin-js-store/` after Gradle finished. |
 ## Resources
 -

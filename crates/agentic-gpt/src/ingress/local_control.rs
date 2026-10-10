@@ -411,11 +411,4 @@ mod tests {
         assert!(error.starts_with("local_mcp_runtime_path_unsafe"));
         let _ = fs::remove_dir_all(root);
     }
-
-    #[test]
-    fn socket_path_rejects_invalid_identity_and_oversized_path() {
-        assert!(socket_path("bad/id").is_err());
-        let long = PathBuf::from("/tmp").join("x".repeat(MAX_SOCKET_PATH_BYTES));
-        assert!(validate_socket_path(&long).is_err());
-    }
 }

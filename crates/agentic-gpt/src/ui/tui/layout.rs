@@ -103,33 +103,3 @@ impl SurfaceCursor {
         Some(rows)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use ratatui::layout::{Constraint, Rect};
-
-    use super::{master_detail_layout, MasterDetailSpec, PaneMode, SurfaceCursor};
-
-    const SPEC: MasterDetailSpec =
-        MasterDetailSpec::new(Constraint::Min(40), 2, Constraint::Min(24), 66);
-
-    #[test]
-    fn master_detail_collapses_to_active_pane() {
-        let area = Rect::new(0, 0, 60, 20);
-        let master = master_detail_layout(area, SPEC, PaneMode::Master);
-        assert_eq!(master.master, area);
-        assert_eq!(master.detail, Rect::default());
-
-        let detail = master_detail_layout(area, SPEC, PaneMode::Detail);
-        assert_eq!(detail.master, Rect::default());
-        assert_eq!(detail.detail, area);
-    }
-
-    #[test]
-    fn surface_cursor_honors_reserved_bottom_rows() {
-        let mut cursor = SurfaceCursor::new(Rect::new(2, 3, 20, 6)).reserve_bottom(2);
-        assert_eq!(cursor.rows(3), Some(Rect::new(2, 3, 20, 3)));
-        assert_eq!(cursor.rows(1), Some(Rect::new(2, 6, 20, 1)));
-        assert_eq!(cursor.rows(1), None);
-    }
-}

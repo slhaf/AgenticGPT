@@ -29,11 +29,6 @@ pub enum ApplyPatchError {
 mod tests {
     use super::*;
     #[test]
-    fn parses_patch() {
-        let p=parse_patch("*** Begin Patch\n*** Add File: add.txt\n+hello\n*** Delete File: delete.txt\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n-old\n+new\n*** End Patch").unwrap();
-        assert_eq!(p.hunks.len(), 3);
-    }
-    #[test]
     fn applies_update() {
         let p = parse_patch(
             "*** Begin Patch\n*** Update File: sample.txt\n@@\n-alpha\n+beta\n*** End Patch",

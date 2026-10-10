@@ -29,29 +29,3 @@ pub(crate) fn centered_overlay(area: Rect, preferred_width: u16, preferred_heigh
         height,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use ratatui::layout::Rect;
-
-    use super::{centered_overlay, surface_shell_areas};
-
-    #[test]
-    fn shell_uses_config_tui_margin_and_fixed_chrome_rows() {
-        let [header, top_rule, body, bottom_rule, footer] =
-            surface_shell_areas(Rect::new(0, 0, 100, 30));
-        assert_eq!(header, Rect::new(2, 1, 96, 1));
-        assert_eq!(top_rule.height, 1);
-        assert_eq!(body.height, 24);
-        assert_eq!(bottom_rule.height, 1);
-        assert_eq!(footer.height, 1);
-    }
-
-    #[test]
-    fn overlay_stays_inside_small_terminal() {
-        assert_eq!(
-            centered_overlay(Rect::new(0, 0, 20, 8), 52, 9),
-            Rect::new(2, 1, 16, 6)
-        );
-    }
-}

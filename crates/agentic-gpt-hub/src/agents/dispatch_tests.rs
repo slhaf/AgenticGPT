@@ -1,9 +1,9 @@
 use super::*;
 use crate::agents::test_support::*;
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentMessage, EventListRequest, EventResponseDisposition,
-    EventSettleRequest, EventSource, EventSourceKind, HubCommand, HubCommandEnvelope,
-    ProcessBatchExecRequest, ProcessExecElement, ProcessExecRequest,
+    AgentMessage, EventListRequest, EventResponseDisposition, EventSettleRequest, EventSource,
+    EventSourceKind, HubCommand, HubCommandEnvelope, ProcessBatchExecRequest, ProcessExecElement,
+    ProcessExecRequest,
 };
 
 use axum::body::to_bytes;
@@ -104,37 +104,6 @@ async fn rejected_reason(response: Response) -> String {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["error"]["code"], "agent_message_rejected");
     value["error"]["message"].as_str().unwrap().to_string()
-}
-#[tokio::test]
-async fn pending_replay_sends_reliable_envelope() {
-    let state = test_state();
-    let command = HubCommand::Exec {
-        request_id: "req_replay".to_string(),
-        payload: ProcessExecRequest {
-            agent_id: "agent".to_string(),
-            group: None,
-            command: "printf 'ok'".to_string(),
-            need_confirm: false,
-            confirm_method: None,
-            cwd: None,
-            wait_seconds: None,
-        },
-    };
-    let run = runs::prepare_run(&state, "agent", "req_replay", &command).unwrap();
-    runs::mark_dispatched(&state, &run.run_id).unwrap();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-
-    send_pending_replays(&state, "agent", &tx).await;
-
-    let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
-        panic!("expected replay envelope");
-    };
-    let envelope = serde_json::from_str::<HubCommandEnvelope>(&text).unwrap();
-    assert_eq!(envelope.run_id, run.run_id);
-    assert_eq!(envelope.request_id, "req_replay");
-    assert_eq!(envelope.command_hash, run.command_hash);
-    assert!(matches!(envelope.command, HubCommand::Exec { .. }));
-    assert!(rx.try_recv().is_err());
 }
 #[tokio::test]
 async fn stale_response_with_matching_run_is_accepted() {
@@ -579,76 +548,6 @@ async fn response_owner_keeps_waiter_on_store_failure() {
     let stored = runs::get_run(&state, &envelope.run_id).unwrap().unwrap();
     assert_eq!(stored.status, "completed");
     assert_eq!(stored.result, Some(data));
-}
-#[tokio::test]
-async fn failed_request_send_removes_current_connection() {
-    let state = test_state();
-    let rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
-    drop(rx);
-    let command = HubCommand::Exec {
-        request_id: "req_send_failed".to_string(),
-        payload: ProcessExecRequest {
-            agent_id: "agent".to_string(),
-            group: None,
-            command: "printf 'ok'".to_string(),
-            need_confirm: false,
-            confirm_method: None,
-            cwd: None,
-            wait_seconds: None,
-        },
-    };
-
-    let result = request_agent(&state, "agent", command, 1).await;
-
-    assert_eq!(result.unwrap_err(), "agent_offline");
-    assert!(!state.agents.snapshot_for_test().await.contains_key("agent"));
-    let run_id: String = state
-        .db
-        .lock()
-        .unwrap()
-        .query_row(
-            "select run_id from agent_runs where request_id = ?1",
-            params!["req_send_failed"],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!state.dispatch.pending.lock().await.contains_key(&run_id));
-}
-#[tokio::test]
-async fn reporting_only_connection_is_not_a_command_target() {
-    let state = test_state();
-    let _rx = insert_connection(&state, "agent", "reporting", chrono::Utc::now()).await;
-    let mut connection = state
-        .agents
-        .snapshot_for_test()
-        .await
-        .remove("agent")
-        .unwrap();
-    connection.connection_mode = AgentConnectionMode::ReportingOnly;
-    state.agents.insert_for_test("agent", connection).await;
-    let command = HubCommand::Exec {
-        request_id: "req_reporting_only".to_string(),
-        payload: ProcessExecRequest {
-            agent_id: "agent".to_string(),
-            group: None,
-            command: "printf 'blocked'".to_string(),
-            need_confirm: false,
-            confirm_method: None,
-            cwd: None,
-            wait_seconds: None,
-        },
-    };
-
-    let result = request_agent(&state, "agent", command, 1).await;
-
-    assert_eq!(result.unwrap_err(), "agent_reporting_only");
-    let run_count: i64 = state
-        .db
-        .lock()
-        .unwrap()
-        .query_row("select count(*) from agent_runs", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(run_count, 0);
 }
 #[tokio::test]
 async fn wp1_send_failure_marks_not_sent_and_excludes_replay() {

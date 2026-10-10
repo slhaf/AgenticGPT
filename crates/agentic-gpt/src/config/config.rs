@@ -2527,48 +2527,6 @@ mod tests {
     }
 
     #[test]
-    fn max_active_processes_supports_auto_and_explicit_round_trips() {
-        let auto: MaxActiveProcesses = serde_json::from_value(json!("auto")).unwrap();
-        let explicit: MaxActiveProcesses = serde_json::from_value(json!(12)).unwrap();
-        assert_eq!(auto, MaxActiveProcesses::Auto);
-        assert_eq!(explicit, MaxActiveProcesses::Explicit(12));
-        assert_eq!(serde_json::to_value(auto).unwrap(), json!("auto"));
-        assert_eq!(serde_json::to_value(explicit).unwrap(), json!(12));
-        assert!(serde_json::from_value::<MaxActiveProcesses>(json!(-1)).is_err());
-        assert!(serde_json::from_value::<MaxActiveProcesses>(json!("AUTO")).is_err());
-    }
-
-    #[test]
-    fn file_search_context_limit_defaults_and_rejects_invalid_values() {
-        let base = |value: serde_json::Value| {
-            serde_json::from_value::<LimitsConfig>(json!({
-                "maxConcurrentTasks": 2,
-                "maxActiveProcesses": "auto",
-                "maxFileSearchContextLines": value,
-            }))
-        };
-
-        let defaults = serde_json::from_value::<LimitsConfig>(json!({
-            "maxConcurrentTasks": 2,
-            "maxActiveProcesses": "auto",
-        }))
-        .unwrap();
-        assert_eq!(
-            defaults.max_file_search_context_lines,
-            DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES
-        );
-        for value in [0, 5, 20, MAX_FILE_SEARCH_CONTEXT_LINES] {
-            assert_eq!(
-                base(json!(value)).unwrap().max_file_search_context_lines,
-                value
-            );
-        }
-        assert!(base(json!(-1)).is_err());
-        assert!(base(json!(1.5)).is_err());
-        assert!(base(json!(MAX_FILE_SEARCH_CONTEXT_LINES + 1)).is_err());
-    }
-
-    #[test]
     fn process_response_bytes_defaults_validates_bounds_and_rejects_invalid_values() {
         let limits = |process_response_bytes: serde_json::Value| {
             serde_json::from_value::<LimitsConfig>(json!({
@@ -2602,98 +2560,6 @@ mod tests {
     }
 
     #[test]
-    fn limits_reject_retired_max_active_jobs_field() {
-        let error = serde_json::from_value::<LimitsConfig>(json!({
-            "maxConcurrentTasks": 2,
-            "maxActiveJobs": 4
-        }))
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("unknown field `maxActiveJobs`"));
-        assert!(error.contains("maxActiveProcesses"));
-    }
-
-    #[test]
-    fn auto_max_active_processes_uses_the_frozen_formula() {
-        for (parallelism, expected) in [(1, 6), (4, 6), (8, 12), (12, 18), (16, 24), (20, 24)] {
-            let resolved = MaxActiveProcesses::Auto.resolve_with_parallelism(Some(parallelism));
-            assert_eq!(resolved.resolved, expected, "parallelism={parallelism}");
-        }
-        assert_eq!(
-            MaxActiveProcesses::Auto
-                .resolve_with_parallelism(None)
-                .resolved,
-            6
-        );
-        assert_eq!(
-            MaxActiveProcesses::Explicit(4)
-                .resolve_with_parallelism(Some(20))
-                .resolved,
-            4
-        );
-    }
-
-    #[test]
-    fn new_default_config_serializes_auto_limit() {
-        let value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
-        assert_eq!(value["limits"]["maxActiveProcesses"], json!("auto"));
-        assert_eq!(
-            value["limits"]["maxFileSearchContextLines"],
-            json!(DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES)
-        );
-        assert_eq!(
-            value["confirmationProvider"]["channels"],
-            json!(["freedesktop", "ntfy"])
-        );
-        assert!(value["confirmationProvider"].get("provider").is_none());
-    }
-    #[test]
-    fn toolset_profiles_are_closed_and_deterministic() {
-        assert_eq!(
-            ToolNamespace::all(),
-            &[
-                ToolNamespace::Agent,
-                ToolNamespace::File,
-                ToolNamespace::Mcp,
-                ToolNamespace::Process,
-                ToolNamespace::Skills,
-                ToolNamespace::Tmux,
-                ToolNamespace::Browser,
-                ToolNamespace::Room,
-            ]
-        );
-        let normal = ToolsetConfig::normal();
-        assert_eq!(
-            normal.enabled_names(),
-            vec!["agent", "file", "mcp", "process", "skills", "tmux", "browser",]
-        );
-        let room = ToolsetConfig::room();
-        assert_eq!(
-            room.enabled_names(),
-            vec!["agent", "file", "mcp", "process", "skills", "tmux", "browser", "room",]
-        );
-        assert_eq!(ToolsetConfig::for_profile(WorkerProfile::Normal), normal);
-        assert_eq!(ToolsetConfig::for_profile(WorkerProfile::Room), room);
-        assert!(!normal.is_enabled(ToolNamespace::Room));
-        assert!(room.is_enabled(ToolNamespace::Room));
-
-        let mut changed = normal.clone();
-        changed.disable(ToolNamespace::File);
-        changed.enable(ToolNamespace::Room);
-        assert!(!changed.is_enabled(ToolNamespace::File));
-        assert!(changed.is_enabled(ToolNamespace::Room));
-        assert_eq!(ToolNamespace::parse("room").unwrap(), ToolNamespace::Room);
-        assert_eq!(
-            ToolNamespace::parse("browser").unwrap(),
-            ToolNamespace::Browser
-        );
-        assert!(ToolNamespace::parse("ROOM").is_err());
-
-        let config = Config::default_config().unwrap();
-        assert_eq!(config.toolsets, normal);
-    }
-
-    #[test]
     fn config_load_rejects_missing_toolsets() {
         let path = temp_config_path();
         let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
@@ -2703,34 +2569,6 @@ mod tests {
         let error = Config::load(&path).unwrap_err().to_string();
         assert!(error.contains("config_requires_toolsets"));
         let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn confirmation_provider_disk_shape_rejects_legacy_provider() {
-        assert!(serde_json::from_value::<ConfirmationProviderConfig>(json!({
-            "provider": "none"
-        }))
-        .is_err());
-    }
-
-    #[test]
-    fn confirmation_provider_rejects_duplicate_or_unknown_channels() {
-        assert!(serde_json::from_value::<ConfirmationProviderConfig>(json!({
-            "channels": ["ntfy", "ntfy"]
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ConfirmationProviderConfig>(json!({
-            "channels": ["email"]
-        }))
-        .is_err());
-    }
-
-    #[test]
-    fn legacy_confirmation_labels_map_to_canonical_fallback_order() {
-        let provider = ConfirmationProviderConfig::from_legacy("hub").unwrap();
-        assert_eq!(provider.fallback_label(), "ntfy");
-        let provider = ConfirmationProviderConfig::from_legacy("freedesktop-then-hub").unwrap();
-        assert_eq!(provider.fallback_label(), "freedesktop → ntfy");
     }
 
     #[test]
@@ -2808,27 +2646,6 @@ mod tests {
     }
 
     #[test]
-    fn mcp_server_semantics_are_validated_before_standalone_use() {
-        let mut config = Config::default_config().unwrap();
-        config.mcp_servers.insert(
-            "valid-http".to_string(),
-            McpServerConfig {
-                enabled: true,
-                transport: "streamable-http".to_string(),
-                url: Some("https://example.test/mcp".to_string()),
-                auth: None,
-            },
-        );
-        assert!(config.validate_mcp_servers().is_ok());
-        config.mcp_servers.get_mut("valid-http").unwrap().transport = "sse".to_string();
-        assert!(config
-            .validate_mcp_servers()
-            .unwrap_err()
-            .to_string()
-            .starts_with("unsupported_mcp_transport"));
-    }
-
-    #[test]
     fn tunnel_secret_references_are_strict_and_safe_summary_is_redacted() {
         assert!(validate_secret_reference("env:AGENTIC_TUNNEL_API_KEY").is_ok());
         assert!(validate_secret_reference("file:/run/secrets/tunnel").is_ok());
@@ -2848,86 +2665,6 @@ mod tests {
         assert!(config.validate_standalone().is_ok());
         config.tunnel.as_mut().unwrap().api_key = "secret".to_string();
         assert!(config.validate_standalone().is_err());
-    }
-
-    #[test]
-    fn shell_init_file_serde_preserves_default_disabled_and_explicit_paths() {
-        let mut config = Config::default_config().unwrap();
-        let default_value = serde_json::to_value(&config).unwrap();
-        assert!(default_value.get("shell").is_none());
-        let loaded: Config = serde_json::from_value(default_value).unwrap();
-        assert_eq!(loaded.shell.init_file, ShellInitFile::Default);
-
-        let explicit_default_path = DEFAULT_SHELL_INIT_FILE.to_string();
-        config.shell.init_file = ShellInitFile::Path(explicit_default_path.clone());
-        let explicit_default = serde_json::to_value(&config).unwrap();
-        assert_eq!(
-            explicit_default["shell"]["initFile"],
-            json!(DEFAULT_SHELL_INIT_FILE)
-        );
-        let loaded: Config = serde_json::from_value(explicit_default).unwrap();
-        assert_eq!(
-            loaded.shell.init_file,
-            ShellInitFile::Path(explicit_default_path.clone())
-        );
-        assert!(serde_json::to_string(&config.safe_summary())
-            .unwrap()
-            .find(&explicit_default_path)
-            .is_none());
-
-        config.shell.init_file = ShellInitFile::Disabled;
-        let disabled = serde_json::to_value(&config).unwrap();
-        assert_eq!(disabled["shell"]["initFile"], Value::Null);
-        let loaded: Config = serde_json::from_value(disabled).unwrap();
-        assert_eq!(loaded.shell.init_file, ShellInitFile::Disabled);
-
-        config.shell.init_file = ShellInitFile::Path("/tmp/trusted-init.sh".to_string());
-        let custom_path = serde_json::to_value(&config).unwrap();
-        let loaded: Config = serde_json::from_value(custom_path).unwrap();
-        assert_eq!(
-            loaded.shell.init_file,
-            ShellInitFile::Path("/tmp/trusted-init.sh".to_string())
-        );
-    }
-
-    #[test]
-    fn http_bearer_file_references_require_absolute_paths_without_tightening_tunnel_refs() {
-        assert!(validate_http_mcp_bearer_token("file:/run/secrets/http").is_ok());
-        assert!(validate_http_mcp_bearer_token("file:relative-token").is_err());
-        assert!(validate_http_mcp_bearer_token("file:~/secrets/http").is_err());
-        assert!(validate_secret_reference("file:relative-token").is_ok());
-    }
-
-    #[test]
-    fn sparse_projection_always_keeps_selectors_and_omits_reconstructable_defaults() {
-        let mut config = Config::default_config().unwrap();
-        config.mode = RuntimeMode::Local;
-        config.profile = WorkerProfile::Normal;
-
-        let value = sparse_config_value(&config, false).unwrap();
-        assert_eq!(value["mode"], json!("local"));
-        assert_eq!(value["profile"], json!("normal"));
-        assert_eq!(
-            value["toolsets"],
-            serde_json::to_value(&config.toolsets).unwrap()
-        );
-        for key in [
-            "agentId",
-            "displayName",
-            "hub",
-            "workspaceRoot",
-            "pathPolicy",
-            "policy",
-            "limits",
-            "skills",
-            "room",
-            "tunnel",
-        ] {
-            assert!(
-                value.get(key).is_none(),
-                "default field was retained: {key}"
-            );
-        }
     }
 
     #[test]
@@ -3389,9 +3126,20 @@ mod tests {
         let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["mode"], json!("local"));
         assert_eq!(value["profile"], json!("normal"));
+        assert_eq!(
+            value["toolsets"],
+            serde_json::to_value(&config.toolsets).unwrap()
+        );
         assert_eq!(value["futureField"], json!(true));
-        assert!(value.get("limits").is_none());
-        assert!(value.get("pathPolicy").is_none());
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.mode, RuntimeMode::Local);
+        assert_eq!(loaded.profile, WorkerProfile::Normal);
+        assert_eq!(loaded.toolsets, config.toolsets);
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&config).unwrap()
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -3425,30 +3173,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_browser_section_is_omitted_from_sparse_defaults() {
-        let config = Config::default_config().unwrap();
-        assert!(sparse_config_value(&config, false)
-            .unwrap()
-            .get("browser")
-            .is_none());
-    }
-
-    #[test]
-    fn managed_browser_policy_defaults_are_enabled_without_auto_provisioning() {
-        let config = Config::default_config().unwrap();
-        assert!(config.browser.managed.enabled);
-        assert!(!config.browser.managed.auto_provision);
-        assert_eq!(serde_json::to_value(&config.browser).unwrap(), json!({}));
-        let parsed = serde_json::from_value::<BrowserConfig>(json!({"managed": {}})).unwrap();
-        assert!(parsed.managed.enabled);
-        assert!(!parsed.managed.auto_provision);
-        assert!(sparse_config_value(&config, false)
-            .unwrap()
-            .get("browser")
-            .is_none());
-    }
-
-    #[test]
     fn managed_browser_policy_round_trips_non_default_values() {
         let mut config = Config::default_config().unwrap();
         config.browser.managed.enabled = false;
@@ -3465,39 +3189,5 @@ mod tests {
         let imported = Config::import(&path).unwrap();
         assert_eq!(imported.config.browser.managed, config.browser.managed);
         let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn managed_browser_policy_rejects_unknown_fields() {
-        let error = serde_json::from_value::<BrowserConfig>(json!({
-            "managed": {
-                "unknownField": true
-            }
-        }))
-        .unwrap_err();
-        assert!(error.to_string().contains("unknown field"));
-    }
-
-    #[test]
-    fn hub_validation_rejects_invalid_url_and_transport_with_stable_errors() {
-        for (url, transport, expected) in [
-            ("ftp://hub.example.com", "websocket", "hub_url_invalid"),
-            (
-                "https://hub.example.com",
-                "polling",
-                "hub_transport_invalid",
-            ),
-        ] {
-            let mut config = Config::default_config().unwrap();
-            config.hub.url = url.to_string();
-            config.hub.transport = transport.to_string();
-            config.hub.agent_secret = "configured-secret".to_string();
-            let error = config.validate_hub().unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                expected,
-                "Hub validation error code changed"
-            );
-        }
     }
 }

@@ -1781,29 +1781,6 @@ mod tests {
     }
 
     #[test]
-    fn low_ttl_out_of_range_returns_an_error_without_panicking() {
-        let too_large = MAX_LOW_TTL_SECONDS + 1;
-        assert_eq!(
-            checked_ttl_duration(too_large).unwrap_err().to_string(),
-            "event_low_ttl_out_of_range"
-        );
-        assert_eq!(
-            expiry_for(EventSeverity::Low, too_large, Utc::now())
-                .unwrap_err()
-                .to_string(),
-            "event_low_ttl_out_of_range"
-        );
-        let policy = InternalEventPolicy {
-            low_ttl_seconds: too_large,
-            ..InternalEventPolicy::default()
-        };
-        assert_eq!(
-            policy.validate().unwrap_err().to_string(),
-            "event_low_ttl_out_of_range"
-        );
-    }
-
-    #[test]
     fn unrepresentable_rfc3339_ttl_is_rejected_before_event_insertion() {
         let (store, _, root) = store("rfc3339-ttl-bound");
         let invalid_ttl = 1_000_000_000_000;

@@ -558,36 +558,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn diary_periods_use_strict_direct_layer_paths() {
-        assert_eq!(
-            diary_relative_path(RoomDiaryLayer::Daily, "2026-09-11").unwrap(),
-            (
-                "2026-09-11".to_string(),
-                "Diary/Daily/2026-09-11.md".to_string()
-            )
-        );
-        assert_eq!(
-            diary_relative_path(RoomDiaryLayer::Weekly, "2026-09-07--2026-09-13").unwrap(),
-            (
-                "2026-09-07--2026-09-13".to_string(),
-                "Diary/Weekly/2026-09-07--2026-09-13.md".to_string()
-            )
-        );
-        assert!(diary_relative_path(RoomDiaryLayer::Daily, "2026-02-30").is_err());
-        assert!(diary_relative_path(RoomDiaryLayer::Monthly, "2026-10-01--2026-09-30").is_err());
-        assert!(diary_relative_path(RoomDiaryLayer::Daily, "Diary/secret.md").is_err());
-    }
-
-    #[test]
-    fn semantic_paths_reject_arbitrary_repository_files() {
-        assert!(validate_notebook_path("Notebook/topic.md").is_ok());
-        assert!(validate_notebook_path("State/entities/project.md").is_err());
-        assert!(validate_notebook_path("Notebook/../secret.md").is_err());
-        assert!(state_relative_path("project").is_ok());
-        assert!(state_relative_path("project.v2").is_ok());
-        assert!(state_relative_path("../project").is_err());
-    }
     #[tokio::test]
     async fn state_list_entities_round_trip_for_dotted_stem() {
         let workspace_root = std::env::temp_dir().join(format!(

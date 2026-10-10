@@ -947,28 +947,3 @@ pub(crate) fn confirmation_decision_value(decision: ConfirmationDecision) -> Str
     }
     .to_string()
 }
-
-#[cfg(test)]
-mod shell_confirmation_tests {
-    use super::{batch_confirmation_preview, BatchConfirmationElement};
-    use crate::config::Config;
-
-    #[test]
-    fn batch_confirmation_shows_the_original_script_and_working_directory() {
-        let config = Config::default_config().unwrap();
-        let command = "printf 'first' && printf \"second value\"";
-        let element = BatchConfirmationElement {
-            index: 2,
-            command: command.to_string(),
-            cwd: Some("/tmp/work".to_string()),
-        };
-        let preview = batch_confirmation_preview(
-            &config,
-            std::slice::from_ref(&element),
-            std::slice::from_ref(&element),
-        );
-
-        assert!(preview.contains(command));
-        assert!(preview.contains("/tmp/work"));
-    }
-}

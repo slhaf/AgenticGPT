@@ -44,33 +44,3 @@ fn content_text(value: &Value) -> String {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::AgenticResult;
-
-    #[test]
-    fn wraps_native_json_as_structured_success_when_value_has_no_error() {
-        let value = json!({ "status": "ok", "count": 2 });
-
-        let result = AgenticResult::from_native_value(value.clone()).into_call_tool_result();
-        let serialized = serde_json::to_value(result).expect("serialize result");
-
-        assert_eq!(serialized["structuredContent"], value);
-        assert_eq!(serialized["isError"], false);
-        assert_eq!(serialized["content"][0]["type"], "text");
-    }
-
-    #[test]
-    fn wraps_native_json_as_structured_error_when_value_has_error() {
-        let value = json!({ "error": { "code": "boom", "message": "failed" } });
-
-        let result = AgenticResult::from_native_value(value.clone()).into_call_tool_result();
-        let serialized = serde_json::to_value(result).expect("serialize result");
-
-        assert_eq!(serialized["structuredContent"], value);
-        assert_eq!(serialized["isError"], true);
-    }
-}

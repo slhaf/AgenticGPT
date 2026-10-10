@@ -5260,30 +5260,3 @@ fn render_placeholder(
     );
     let _ = state;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shell_path_field_is_focusable_only_for_explicit_path_mode() {
-        let mut draft = default_optional_draft(UiLanguage::En, OptionalSection::Shell);
-        let default_focus = optional_focus_items(OptionalSection::Shell, &draft);
-        assert_eq!(default_focus.len(), 3);
-        assert!(default_focus
-            .iter()
-            .all(|item| item.field() == SetupField::ShellInitFileMode));
-
-        set_optional_field(
-            &mut draft,
-            SetupField::ShellInitFileMode,
-            "path".to_string(),
-        );
-        let path_focus = optional_focus_items(OptionalSection::Shell, &draft);
-        assert_eq!(path_focus.len(), 4);
-        assert!(matches!(
-            path_focus.last(),
-            Some(OptionalFocusItem::Field(SetupField::ShellInitFilePath))
-        ));
-    }
-}

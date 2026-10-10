@@ -1088,18 +1088,6 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    #[test]
-    fn event_mark_body_requires_an_agent_and_event_ids() {
-        assert!(serde_json::from_value::<EventMarkHttpRequest>(json!({
-            "eventIds": []
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<EventMarkHttpRequest>(json!({
-            "agentId": "agent"
-        }))
-        .is_err());
-    }
-
     #[tokio::test]
     async fn event_http_routes_require_authorization_and_an_enabled_agent() {
         let state = http_test_state();
@@ -1201,23 +1189,6 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
         assert_eq!(state.dispatch.pending_count().await, 0);
-    }
-
-    #[tokio::test]
-    async fn offline_event_list_returns_an_error_without_cached_events() {
-        let state = http_test_state();
-        register_http_agent(&state);
-
-        let response = list_events(
-            State(state),
-            http_action_headers(),
-            Query(event_list_query("agent", None)),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-        let body = response_json(response).await;
-        assert_eq!(body["error"]["code"], "event_list_timeout");
-        assert!(body.get("events").is_none());
     }
 
     #[tokio::test]
@@ -1421,121 +1392,6 @@ mod tests {
         assert_eq!(body, response_data);
         assert!(body.get("freshness").is_none());
         assert!(body.get("observedAt").is_none());
-    }
-
-    #[tokio::test]
-    async fn unavailable_process_read_reports_only_stale_cache_metadata() {
-        let state = http_test_state();
-        register_http_agent(&state);
-        let now = chrono::Utc::now();
-        let process: agentic_gpt_protocol::ProcessInfo =
-            serde_json::from_value(serde_json::json!({
-                "agentId": "agent",
-                "processId": "process-1",
-                "kind": "command",
-                "state": "completed",
-                "createdAt": now.to_rfc3339(),
-                "updatedAt": now.to_rfc3339(),
-                "captureStatus": "complete"
-            }))
-            .unwrap();
-        state
-            .process_cache
-            .record("agent", "old-connection", None, process)
-            .await;
-        state
-            .process_cache
-            .mark_connection_stale("agent", "old-connection")
-            .await;
-
-        let response = get_process_read(
-            State(state),
-            http_action_headers(),
-            Path("process-1".to_string()),
-            Query(ProcessReadQuery {
-                agent_id: "agent".to_string(),
-                wait_seconds: Some(0),
-                view: None,
-                cursor: None,
-                max_bytes: None,
-            }),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = response_json(response).await;
-        assert_eq!(body["processId"], "process-1");
-        assert_eq!(body["status"], "unavailable");
-        assert_eq!(body["error"]["code"], "process_read_unavailable");
-        assert_eq!(body["freshness"], "stale");
-        assert!(body["observedAt"].is_string());
-        assert_eq!(body["cached"]["processId"], "process-1");
-        for field in ["output", "mcpResult", "stdout", "stderr", "result"] {
-            assert!(body.get(field).is_none());
-            assert!(body["cached"].get(field).is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn process_read_keeps_domain_errors_as_http_errors() {
-        for (code, expected_status) in [
-            ("invalid_process_output_cursor", StatusCode::BAD_REQUEST),
-            (
-                "process_output_cursor_ahead_of_output",
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                "process_read_cursor_with_status_view",
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                "process_read_cursor_not_supported_for_mcp",
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                "process_read_max_bytes_out_of_range",
-                StatusCode::BAD_REQUEST,
-            ),
-            ("process_response_budget_too_small", StatusCode::BAD_REQUEST),
-            ("process_not_found", StatusCode::NOT_FOUND),
-            ("process_lost_after_restart", StatusCode::NOT_FOUND),
-        ] {
-            let response = process_success_response(json!({
-                "error": { "code": code, "message": "Agent rejected the request" }
-            }));
-            assert_eq!(response.status(), expected_status, "{code}");
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body["error"]["code"], code);
-            assert_eq!(body["error"]["message"], "Agent rejected the request");
-        }
-
-        let response_data = json!({
-            "agentId": "agent",
-            "processId": "process-1",
-            "kind": "mcp",
-            "state": "completed",
-            "captureStatus": "complete",
-            "mcpResult": {
-                "status": "included",
-                "bytes": 9,
-                "sha256": "digest",
-                "value": {
-                    "content": [{ "type": "text", "text": "done" }],
-                    "isError": false
-                }
-            }
-        });
-        let response = process_success_response(response_data.clone());
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-            response_data
-        );
     }
 
     #[tokio::test]

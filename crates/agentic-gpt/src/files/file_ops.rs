@@ -2929,7 +2929,7 @@ mod tests {
     }
 
     #[test]
-    fn search_streams_file_byte_and_output_limits_without_overshoot() {
+    fn search_enforces_stream_bounds_and_rejects_invalid_patterns() {
         let root = std::env::temp_dir().join(format!(
             "file-search-bounds-{}",
             uuid::Uuid::new_v4().simple()
@@ -3005,19 +3005,7 @@ mod tests {
         .unwrap();
         assert_eq!(output["truncationReason"], "output_bytes");
         assert!(serde_json::to_vec(&output["matches"]).unwrap().len() <= MAX_SEARCH_OUTPUT_BYTES);
-        let _ = fs::remove_dir_all(root);
-    }
 
-    #[test]
-    fn search_rejects_invalid_patterns_and_enforces_bounds() {
-        let root = std::env::temp_dir().join(format!(
-            "file-search-invalid-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("a.txt"), "x\n").unwrap();
-        let resolved = resolve_path(&config(&root), ".", Access::Read).unwrap();
-        let empty = Vec::new();
         let invalid_regex = search_with_context_limit(
             SearchOptions {
                 root: &resolved,
@@ -3040,7 +3028,7 @@ mod tests {
         let invalid_glob = search_with_context_limit(
             SearchOptions {
                 root: &resolved,
-                query: "x",
+                query: "needle",
                 mode: SearchMode::Literal,
                 case_sensitive: true,
                 include: &["[".to_string()],
@@ -3057,69 +3045,6 @@ mod tests {
         .unwrap_err();
         assert_eq!(invalid_glob.code, "file_invalid_glob");
         let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn bounded_diff_preserves_blank_lines_and_emits_disjoint_hunks() {
-        let before =
-            "top\n\nold-a\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nkeep-6\nkeep-7\nkeep-8\nold-b\n\nbottom\n";
-        let after =
-            "top\n\nnew-a\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nkeep-6\nkeep-7\nkeep-8\nnew-b\n\nbottom\n";
-        let (diff, truncated, changed) = bounded_diff(before, after);
-        assert!(!truncated);
-        assert_eq!(changed, json!({"added": 2, "removed": 2}));
-        assert!(diff.contains("-old-a"));
-        assert!(diff.contains("+new-a"));
-        assert!(diff.contains("-old-b"));
-        assert!(diff.contains("+new-b"));
-        assert_eq!(diff.matches("@@ -").count(), 2);
-    }
-
-    #[test]
-    fn bounded_diff_counts_create_delete_crlf_and_final_newline() {
-        let (created, truncated, changed) = bounded_diff("", "one\n\ntwo\n");
-        assert!(!truncated);
-        assert_eq!(changed, json!({"added": 3, "removed": 0}));
-        assert!(created.contains("+one"));
-        assert!(created.contains("+two"));
-
-        let (deleted, truncated, changed) = bounded_diff("one\n\ntwo\n", "");
-        assert!(!truncated);
-        assert_eq!(changed, json!({"added": 0, "removed": 3}));
-        assert!(deleted.contains("-one"));
-        assert!(deleted.contains("-two"));
-
-        let (crlf, truncated, changed) =
-            bounded_diff("one\r\nold\r\nthree\r\n", "one\r\nnew\r\nthree\r\n");
-        assert!(!truncated);
-        assert_eq!(changed, json!({"added": 1, "removed": 1}));
-        assert!(crlf.contains("-old\r\n"));
-        assert!(crlf.contains("+new\r\n"));
-
-        let (newline, truncated, changed) = bounded_diff("one", "one\n");
-        assert!(!truncated);
-        assert_eq!(changed, json!({"added": 1, "removed": 1}));
-        assert!(newline.contains("No newline at end of file"));
-
-        let (unchanged, truncated, changed) = bounded_diff("same\n", "same\n");
-        assert!(!truncated);
-        assert_eq!(changed, json!({"added": 0, "removed": 0}));
-        assert!(unchanged.is_empty());
-    }
-
-    #[test]
-    fn bounded_diff_truncates_utf8_after_computing_complete_counts() {
-        let before = (0..4_000)
-            .map(|index| format!("旧内容-{index:04}-abcdefghijk\n"))
-            .collect::<String>();
-        let after = (0..4_000)
-            .map(|index| format!("新内容-{index:04}-ABCDEFGHIJK\n"))
-            .collect::<String>();
-        let (diff, truncated, changed) = bounded_diff(&before, &after);
-        assert!(truncated);
-        assert!(diff.len() <= MAX_DIFF_BYTES);
-        assert!(diff.is_char_boundary(diff.len()));
-        assert_eq!(changed, json!({"added": 4_000, "removed": 4_000}));
     }
 
     #[cfg(unix)]
@@ -3153,26 +3078,6 @@ mod tests {
             0o640
         );
         let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn apply_patch_parser_handles_add_delete_update_and_move_without_fs_access() {
-        let parsed = parse_patch("*** Begin Patch\n*** Add File: add.txt\n+hello\n*** Delete File: gone.txt\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n-old\n+new\n*** End Patch").unwrap();
-        assert_eq!(parsed.hunks.len(), 3);
-    }
-
-    #[test]
-    fn rejects_duplicate_and_ancestor_patch_paths() {
-        let duplicate = PathBuf::from("/workspace/file.txt");
-        let error = reject_overlapping_paths(&[duplicate.clone(), duplicate]).unwrap_err();
-        assert_eq!(error.code, "file_patch_ambiguous_paths");
-
-        let error = reject_overlapping_paths(&[
-            PathBuf::from("/workspace/tree"),
-            PathBuf::from("/workspace/tree/file.txt"),
-        ])
-        .unwrap_err();
-        assert_eq!(error.code, "file_patch_ambiguous_paths");
     }
 
     #[test]

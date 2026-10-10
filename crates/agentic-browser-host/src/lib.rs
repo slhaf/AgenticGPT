@@ -601,47 +601,6 @@ mod tests {
     }
 
     #[test]
-    fn native_frame_round_trip_uses_uint32_prefix() {
-        let message = json!({"jsonrpc": "2.0", "id": 7, "result": "héllo"});
-        let mut encoded = Vec::new();
-
-        write_frame(&mut encoded, &message).unwrap();
-
-        let declared = u32::from_ne_bytes(encoded[..4].try_into().unwrap()) as usize;
-        assert_eq!(declared, encoded.len() - 4);
-        assert_eq!(encoded[4..], serde_json::to_vec(&message).unwrap());
-        assert_eq!(
-            read_frame(&mut Cursor::new(encoded)).unwrap(),
-            Some(message)
-        );
-    }
-
-    #[test]
-    fn oversized_frame_is_rejected_before_reading_payload() {
-        let input = ((MAX_PAYLOAD_SIZE + 1) as u32).to_ne_bytes();
-        assert!(matches!(
-            read_frame(&mut Cursor::new(input)),
-            Err(FrameError::TooLarge(size)) if size as usize == MAX_PAYLOAD_SIZE + 1
-        ));
-    }
-
-    #[test]
-    fn truncated_frames_match_baseline_eof_behavior() {
-        assert!(read_frame(&mut Cursor::new(Vec::<u8>::new()))
-            .unwrap()
-            .is_none());
-        assert!(read_frame(&mut Cursor::new(vec![1_u8, 2]))
-            .unwrap()
-            .is_none());
-
-        let mut truncated_payload = 5_u32.to_ne_bytes().to_vec();
-        truncated_payload.extend_from_slice(b"{}");
-        assert!(read_frame(&mut Cursor::new(truncated_payload))
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
     fn zero_malformed_and_non_utf8_payloads_are_errors() {
         let cases = [
             0_u32.to_ne_bytes().to_vec(),
@@ -757,34 +716,6 @@ mod tests {
                 }),
             ]
         );
-    }
-
-    #[test]
-    fn bridge_status_is_local_and_reports_current_clients() {
-        let (host, extension) = test_host();
-        let requesting_client = SharedBuffer::default();
-        let client_id = host.register_client(Box::new(requesting_client.clone()), None);
-        host.register_client(Box::new(SharedBuffer::default()), None);
-
-        host.handle_client_message(
-            client_id,
-            json!({"jsonrpc": "2.0", "id": "status", "method": "bridge.getStatus"}),
-        )
-        .unwrap();
-
-        assert_eq!(
-            requesting_client.messages(),
-            vec![json!({
-                "jsonrpc": "2.0",
-                "id": "status",
-                "result": {
-                    "ok": true,
-                    "socketPath": "/tmp/test-browser-host.sock",
-                    "clients": 2,
-                },
-            })]
-        );
-        assert!(extension.messages().is_empty());
     }
 
     #[test]

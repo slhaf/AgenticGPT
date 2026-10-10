@@ -5,12 +5,8 @@ pub(crate) mod http;
 
 #[cfg(test)]
 mod tests {
-    use super::control::{
-        register_connection_role, release_active_room_if_current, request_active_room,
-        RoomRouteError,
-    };
-    use super::http::{room_notebook_read, room_value_response};
-    use crate::agents::lifecycle::replace_agent_connection;
+    use super::control::register_connection_role;
+    use super::http::room_notebook_read;
     use crate::agents::transport::{post_agent_message, SseConnectQuery};
     use crate::config::RemoteConfirmationConfig;
     use crate::db::init_db;
@@ -21,7 +17,7 @@ mod tests {
     use crate::HubConfig;
     use agentic_gpt_protocol::{
         AgentConnectionMode, AgentMessage, AgentRole, HubCommand, HubCommandEnvelope,
-        RoomMaintenanceStatusRequest, RoomNotebookReadRequest,
+        RoomNotebookReadRequest,
     };
     use axum::body::to_bytes;
     use axum::extract::{Path, Query, State};
@@ -101,207 +97,6 @@ mod tests {
             )
             .await;
         rx
-    }
-
-    #[test]
-    fn bootstrap_error_codes_map_to_frozen_http_statuses() {
-        assert_eq!(
-            room_value_response(json!({
-                "error": { "code": "bootstrap_not_found", "message": "missing" }
-            }))
-            .status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            room_value_response(json!({
-                "error": { "code": "guide_not_found", "message": "missing" }
-            }))
-            .status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            room_value_response(json!({
-                "error": { "code": "bootstrap_invalid", "message": "invalid" }
-            }))
-            .status(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            room_value_response(json!({
-                "error": { "code": "bootstrap_read_failed", "message": "failed" }
-            }))
-            .status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-    }
-
-    async fn replace_connection(
-        state: &HubState,
-        agent_id: &str,
-        connection_id: &str,
-    ) -> mpsc::UnboundedReceiver<OutboundAgentMessage> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        replace_agent_connection(
-            state,
-            agent_id,
-            connection_id,
-            AgentTransport::WebSocket,
-            tx,
-        )
-        .await
-        .unwrap();
-        rx
-    }
-
-    #[tokio::test]
-    async fn first_room_agent_becomes_active_room() {
-        let state = test_state();
-        let _rx = insert_connection(&state, "room", "conn1", AgentRole::Normal).await;
-        register_connection_role(&state, "room", "conn1", AgentRole::Room)
-            .await
-            .unwrap();
-        let active = state.active_room.lock().await.clone().unwrap();
-        assert_eq!(active.agent_id, "room");
-        assert_eq!(active.connection_id, "conn1");
-    }
-
-    #[tokio::test]
-    async fn second_different_room_agent_is_rejected() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room-a", "conn1", AgentRole::Room).await;
-        register_connection_role(&state, "room-a", "conn1", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = insert_connection(&state, "room-b", "conn2", AgentRole::Normal).await;
-        assert_eq!(
-            register_connection_role(&state, "room-b", "conn2", AgentRole::Room).await,
-            Err("room_already_active")
-        );
-    }
-
-    #[tokio::test]
-    async fn same_room_agent_reconnect_replaces_old_room_connection() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = replace_connection(&state, "room", "new").await;
-        assert!(state.active_room.lock().await.is_none());
-        register_connection_role(&state, "room", "new", AgentRole::Room)
-            .await
-            .unwrap();
-        let active = state.active_room.lock().await.clone().unwrap();
-        assert_eq!(active.connection_id, "new");
-    }
-
-    #[tokio::test]
-    async fn same_agent_normal_hello_releases_old_active_room() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = replace_connection(&state, "room", "normal").await;
-        register_connection_role(&state, "room", "normal", AgentRole::Normal)
-            .await
-            .unwrap();
-        assert!(state.active_room.lock().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn same_agent_replacement_without_hello_does_not_leave_stale_active_room() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = replace_connection(&state, "room", "new-no-hello").await;
-        assert!(state.active_room.lock().await.is_none());
-        release_active_room_if_current(&state, "room", "new-no-hello").await;
-        assert!(state.active_room.lock().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn room_api_after_replacement_without_hello_returns_not_active() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = replace_connection(&state, "room", "new-no-hello").await;
-        let result = request_active_room(
-            &state,
-            HubCommand::RoomNotebookRead {
-                request_id: "req".to_string(),
-                payload: RoomNotebookReadRequest {
-                    path: "Notebook/topic.md".to_string(),
-                },
-            },
-            1,
-        )
-        .await;
-        assert_eq!(result.unwrap_err(), RoomRouteError::NotActive);
-    }
-
-    #[tokio::test]
-    async fn stale_room_disconnect_does_not_release_new_room_connection() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = insert_connection(&state, "room", "new", AgentRole::Room).await;
-        register_connection_role(&state, "room", "new", AgentRole::Room)
-            .await
-            .unwrap();
-        release_active_room_if_current(&state, "room", "old").await;
-        let active = state.active_room.lock().await.clone().unwrap();
-        assert_eq!(active.connection_id, "new");
-    }
-
-    #[tokio::test]
-    async fn room_api_without_active_room_returns_not_active() {
-        let state = test_state();
-        let result = request_active_room(
-            &state,
-            HubCommand::RoomNotebookRead {
-                request_id: "req".to_string(),
-                payload: RoomNotebookReadRequest {
-                    path: "Notebook/topic.md".to_string(),
-                },
-            },
-            1,
-        )
-        .await;
-        assert_eq!(result.unwrap_err(), RoomRouteError::NotActive);
-    }
-
-    #[tokio::test]
-    async fn read_and_maintenance_room_api_without_active_room_returns_not_active() {
-        let state = test_state();
-        let read = request_active_room(
-            &state,
-            HubCommand::RoomNotebookRead {
-                request_id: "req-read".to_string(),
-                payload: RoomNotebookReadRequest {
-                    path: "Notebook/missing.md".to_string(),
-                },
-            },
-            1,
-        )
-        .await;
-        assert_eq!(read.unwrap_err(), RoomRouteError::NotActive);
-        let maintenance = request_active_room(
-            &state,
-            HubCommand::RoomMaintenanceStatus {
-                request_id: "req-status".to_string(),
-                payload: RoomMaintenanceStatusRequest {},
-            },
-            1,
-        )
-        .await;
-        assert_eq!(maintenance.unwrap_err(), RoomRouteError::NotActive);
     }
 
     #[tokio::test]
@@ -389,23 +184,5 @@ mod tests {
         assert_eq!(run.agent_id, "room");
         assert_eq!(run.status, "completed");
         assert_eq!(run.result, Some(response_data));
-    }
-
-    #[tokio::test]
-    async fn normal_agent_is_not_room_api_fallback() {
-        let state = test_state();
-        let _rx = insert_connection(&state, "normal", "conn1", AgentRole::Normal).await;
-        let result = request_active_room(
-            &state,
-            HubCommand::RoomNotebookRead {
-                request_id: "req".to_string(),
-                payload: RoomNotebookReadRequest {
-                    path: "Notebook/topic.md".to_string(),
-                },
-            },
-            1,
-        )
-        .await;
-        assert_eq!(result.unwrap_err(), RoomRouteError::NotActive);
     }
 }

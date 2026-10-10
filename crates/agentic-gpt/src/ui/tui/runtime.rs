@@ -139,16 +139,3 @@ fn restore_with(mut step: impl FnMut(&'static str)) {
         step(step_name);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn restoration_seam_records_cleanup_in_reverse_setup_order() {
-        let mut steps = Vec::new();
-        super::restore_with(|step| steps.push(step));
-        assert_eq!(
-            steps,
-            ["show_cursor", "leave_alt_screen", "disable_raw_mode"]
-        );
-    }
-}

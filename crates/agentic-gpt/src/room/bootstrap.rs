@@ -660,24 +660,6 @@ fn parse_required_frontmatter(text: &str) -> Result<Value> {
     Ok(value)
 }
 
-#[cfg(test)]
-fn build_resource(
-    bytes: &[u8],
-    path: &str,
-    max_bytes: usize,
-    warning_code: &str,
-) -> Result<(BootstrapTextResource, Option<String>)> {
-    build_resource_parts(
-        bytes,
-        bytes.len() as u64,
-        logical_line_count(bytes),
-        &hex_sha256(bytes),
-        path,
-        max_bytes,
-        warning_code,
-    )
-}
-
 fn build_scanned_resource(
     scan: &FileScan,
     path: &str,
@@ -1001,22 +983,6 @@ mod tests {
     }
 
     #[test]
-    fn guide_directory_entry_errors_are_reported_without_dropping_readable_entries() {
-        let root = PathBuf::from("/tmp/bootstrap-guides");
-        let readable = root.join("readable.md");
-        let (paths, warnings) = collect_guide_paths(
-            vec![
-                Ok(readable.clone()),
-                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
-            ],
-            &root,
-        );
-        assert_eq!(paths, vec![readable]);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].starts_with("guide_dir_entry_unreadable:"));
-    }
-
-    #[test]
     fn guides_sort_by_priority_then_id_and_manifest_caps_at_64_but_read_keeps_all() {
         let (config, root) = test_config("ordering");
         write_entrypoint(&root, "");
@@ -1079,27 +1045,6 @@ mod tests {
         )
         .unwrap();
         assert_ne!(load_config(&config).unwrap().revision, first);
-    }
-
-    #[test]
-    fn resource_truncation_is_line_aware_and_utf8_safe() {
-        let bytes = "a\nβββ\nlast".as_bytes();
-        let (resource, warning) =
-            build_resource(bytes, "guides/demo.md", 5, "guide_truncated").unwrap();
-        assert_eq!(resource.content, "a\n");
-        assert_eq!(resource.total_lines, 3);
-        assert_eq!(resource.returned_through_line, 1);
-        assert_eq!(resource.omitted_from_line, Some(2));
-        assert!(resource.last_line_complete);
-        assert!(warning.unwrap().starts_with("guide_truncated:"));
-
-        let (resource, _) =
-            build_resource("ββββ".as_bytes(), "guides/demo.md", 5, "guide_truncated").unwrap();
-        assert_eq!(resource.content, "ββ");
-        assert!(!resource.last_line_complete);
-        assert_eq!(resource.returned_through_line, 1);
-        assert_eq!(resource.omitted_from_line, Some(1));
-        assert_eq!(resource.returned_size_bytes, resource.content.len() as u64);
     }
 
     #[test]

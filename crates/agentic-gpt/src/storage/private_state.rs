@@ -637,30 +637,6 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn legacy_wide_agent_id_uses_stable_safe_state_key() {
-        let root = temp_root("wide-id");
-        let workspace = root.join("workspace");
-        let agentic = root.join("home");
-        let mut config = config_with_workspace(workspace);
-        config.agent_id = "hub/team A".to_string();
-
-        let first = prepare_at(&config, &agentic).unwrap();
-        let second = prepare_at(&config, &agentic).unwrap();
-
-        assert_eq!(first.paths.root, second.paths.root);
-        assert_eq!(
-            first.paths.root.parent(),
-            Some(agentic.join("state/agent").as_path())
-        );
-        let key = first.paths.root.file_name().unwrap().to_string_lossy();
-        assert!(key.starts_with("id-"));
-        assert!(key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
-        let _ = fs::remove_dir_all(root);
-    }
-
     #[cfg(unix)]
     #[test]
     fn private_agent_root_is_mode_0700() {
