@@ -50,6 +50,11 @@ Phase 6
 - [x] Commit planning-only changes; do not alter test or implementation files
 - **Status:** complete
 
+## 后续人工复审交接（不属于 Phase 6 的原始交付）
+
+- 2026-10-08 用户确认 [`cleanup-review.md`](cleanup-review.md) 的 31 项处理方向：保留 20、合并/精简 8、清理 3；同时确认原有 296 个低档清理候选**无需二次价值审查**。后续拟清理 299 项，另有 8 项合并/精简待实施；7 个待判断及 303 个涉及 T4/T5 的 MIXED 不在本次决定内。
+- 原始候选和技术分类仍见 `review-candidates.md` 及用例索引。已生成 [`cleanup-manifest.md`](cleanup-manifest.md) 列明 299 个删除目标、8 个合并/精简项和 20 个保留保护项；**尚未启动实际清理**，执行时应保留合并项的独有断言并遵守仓库验证规范。
+
 
 ## Decisions Made
 | Decision | Rationale |

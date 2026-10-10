@@ -2,6 +2,8 @@
 
 仅作盘点，供用户后续决定；本清单不表示要修改或删除任何测试或实现。档位依据实际断言的行为。技术分类中的 MIXED 总数不变；仅含 T1–T3 的混合用例按用户规则并入本清单，含 T4/T5 的混合用例仍列在专门的混合档清单中。
 
+本清单中 31 个低档保留候选已有后续代码级价值复审，见 [cleanup-review.md](cleanup-review.md)（用户认可 20 个保留、8 个合并/精简、3 个清理）。用户也确认其余 296 个低档清理候选无需再做二次价值审查；执行目标已单独整理在 [cleanup-manifest.md](cleanup-manifest.md)。这里仍保留原始分类和候选理由，**尚未实际清理测试**。
+
 ## 低档但值得保留的行为
 
 | 用例 | 档位 | 值得保护的行为 |
@@ -27,7 +29,7 @@
 | `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::terminal_transition_clears_actions_and_rejects_duplicate_transition` | T3 | 保护进入终态时清空 actions，以及拒绝重复终态转换。 |
 | `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::target_names_are_frozen` | T1+T3 | 固定浏览器目标名，并拒绝路径穿越、错误空白和无效 hash；保护制品名称与校验边界。 |
 | `crates/agentic-gpt/src/browser/browser_kernel.rs::bootstrap_sends_escaped_path_and_frozen_browser_setup_code` | T1+T2 | 检查注入到 bootstrap 脚本的路径经过转义，并锁定浏览器初始化代码，防止路径内容改变脚本语义。 |
-| `crates/agentic-gpt/src/browser/browser_runtime.rs::managed_browser_policy_defaults_are_enabled_without_auto_provisioning` | T1+T2+T3 | 保护托管浏览器默认启用、但默认不自动安装的配置策略。 |
+| `crates/agentic-gpt/src/config/config.rs::managed_browser_policy_defaults_are_enabled_without_auto_provisioning` | T1+T2+T3 | 保护托管浏览器默认启用、但默认不自动安装的配置策略。 |
 | `crates/agentic-gpt/src/config/config.rs::room_repository_and_maintenance_use_the_v2_json_shape` | T2+T3 | 保护 Room/maintenance v2 配置形状，并拒绝旧 `notebookRoot` 字段。 |
 | `crates/agentic-gpt/src/config/config.rs::sparse_projection_always_keeps_selectors_and_omits_reconstructable_defaults` | T2+T3 | 保护稀疏配置投影必须保留选择器、可重建默认值可省略的规则。 |
 | `crates/agentic-gpt/src/config/config.rs::sparse_projection_keeps_inactive_sections_and_redacts_config_secrets` | T2+T3 | 保护未激活配置段保留和 secret 脱敏，避免稀疏投影丢失用户数据或泄漏凭据。 |

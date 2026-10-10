@@ -58,6 +58,10 @@ Rust 单元测试应与实现代码放在一起，位于 `#[cfg(test)]` 模块�
 - 第 4、5 档允许 Agent 主动编写
 - 前 1、2、3 档如果 Agent 认为有编写价值，需要主动与用户商讨并获取许可
 
+并遵循该原则：
+> 评估测试的保留价值时，重点看它能否在未来扩展或重构中发现对长期有效行为的意外回归，而非仅锁定当前阶段的默认配置、工具集合、提示文案或实现细节；档位高低不直接决定价值。
+> 对已由其他具名测试覆盖相同失败模式的用例，优先精简或合并；对安全边界、数据完整性及需要保持兼容的公开契约，优先保留有效的回归保障。
+
 ## Commit & Pull Request Guidelines
 
 Write short, imperative commit subjects. Existing history accepts both plain subjects (`Add skills support`) and scoped Conventional Commit forms (`feat(hub): ...`, `fix(android): ...`); use a scope when it clarifies the affected component. Keep commits focused. Pull requests should explain motivation and behavior changes, list verification commands, link related issues, and include screenshots for console UI changes. Call out OpenAPI, configuration, security-policy, or migration impacts explicitly.
