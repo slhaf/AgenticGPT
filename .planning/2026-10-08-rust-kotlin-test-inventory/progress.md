@@ -37,6 +37,13 @@
 - 在低档清理审查范围内（304 个纯 T1–T3 加 30 个只含 T1–T3 的 MIXED），当前是 31 个保留候选、296 个清理候选、7 个待用户判断。另有 T4/T5 低价值候选单独列出，不计入此清理数量；以上均未删除测试。
 - ID-by-ID static check passed: all 30 lower-only mixed case names appear exactly once in the correct disposition section (17 retain, 6 cleanup, 7 user judgment), none remain in either mixed catalog, and the catalogs contain 297+6=303 T4/T5 mixed cases.
 - No engineering-consultant consultation was used for this phase; the seven uncertain value judgments are documented for the user. No Rust or Kotlin tests were run, and no source/test files were modified.
+
+## Session: Test Cleanup Execution
+- User authorized execution of the explicit `cleanup-manifest.md` scope; no test or implementation files were modified before that authorization.
+- Read the development guide and planning workflow. Repository was clean at HEAD `8232dcf35953bd6db3b6f0a268f0532cedab6a43`.
+- Recounted the manifest: exactly 306 deletion rows and 8 merge/simplify rows. This supersedes the stale 299 deletion count in the inventory handoff.
+- CodeGraph exploration returned partial symbols (80 across five files); exact per-file target matching remains required before each edit.
+- Planning now tracks Phase 7 cleanup and Phase 8 verification/delivery. No source edits or test runs yet.
 ### Errors
 | Error | Resolution |
 |-------|------------|

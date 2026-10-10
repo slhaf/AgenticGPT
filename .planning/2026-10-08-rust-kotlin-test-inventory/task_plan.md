@@ -3,7 +3,7 @@
 ## Goal
 Count every Rust and Kotlin test case by the repository's five-tier testing standard; persist a complete case/name/behavior inventory, final counts, and review candidates in planning records only.
 
-Await the user’s review of the retention, cleanup, and uncertain-value candidates; no test or implementation edits are in scope.
+The inventory has been converted into an execution request: process only the exact targets in `cleanup-manifest.md` (306 test removals and 8 merge/simplify targets). Do not modify production behavior or tests outside that manifest. Verify affected Rust/Kotlin crates and report any skipped or blocked items.
 
 ## Current Phase
 Phase 6
@@ -50,10 +50,16 @@ Phase 6
 - [x] Commit planning-only changes; do not alter test or implementation files
 - **Status:** complete
 
-## 后续人工复审交接（不属于 Phase 6 的原始交付）
+### Phase 7: Test Cleanup
+- [ ] Remove the 306 exact test declarations in `cleanup-manifest.md`; skip and record any source/name mismatch.
+- [ ] Process the 8 merge/simplify targets, preserving unique long-term regression assertions; unchanged targets require a reason.
+- [ ] Update manifest checkboxes and record per-batch removals, merges, simplifications, retained, and skipped items.
+- **Status:** in_progress
 
-- 2026-10-08 用户确认 [`cleanup-review.md`](cleanup-review.md) 的 31 项处理方向：保留 20、合并/精简 8、清理 3；同时确认原有 296 个低档清理候选**无需二次价值审查**。后续拟清理 299 项，另有 8 项合并/精简待实施；7 个待判断及 303 个涉及 T4/T5 的 MIXED 不在本次决定内。
-- 原始候选和技术分类仍见 `review-candidates.md` 及用例索引。已生成 [`cleanup-manifest.md`](cleanup-manifest.md) 列明 299 个删除目标、8 个合并/精简项和 20 个保留保护项；**尚未启动实际清理**，执行时应保留合并项的独有断言并遵守仓库验证规范。
+### Phase 8: Verification & Delivery
+- [ ] Verify affected Rust crates and Kotlin shared test tasks; reconcile test-discovery changes against actual edits.
+- [ ] Commit the cleanup implementation and record command results and any blockers.
+- **Status:** pending
 
 
 ## Decisions Made

@@ -5,7 +5,7 @@
 - Classify using the repository's five-tier testing standard: fixed content, mechanical handling, independent logic, internal chain, actual execution.
 - Report counts separately by language and tier. Record review-worthy cases among tiers 1–3, low-value cases among tiers 4–5, and mixed-scope cases with the behaviors they exercise.
 - Ambiguous cases that cannot be responsibly assigned go to a review list with their test content summarized; continue the rest of the inventory.
-- Read-only audit; only the selected `.planning/2026-10-08-rust-kotlin-test-inventory/` records may be updated.
+- Initial inventory phase was read-only. User has now authorized execution using `cleanup-manifest.md`; this phase may change only explicitly listed test declarations and the manifest/planning records.
 - Verification: static inventory, Rust `cargo test --workspace -- --list`, Kotlin Gradle discovery per enabled test source set; do not run the full matrix.
 - Attempt cap: five rounds. Escalate if a Rust/Kotlin test source set cannot be read or enumerated.
 
@@ -44,6 +44,12 @@
 - Three `agentic-gpt` platform-sensitive declarations need manual review, not tier reclassification: `runtime/main_tests.rs::read_only_system_file_is_allowed` assumes `/proc/meminfo`; `runtime/main_tests.rs::symlink_to_denied_path_is_rejected` has no exercised assertion off Unix; `runtime/tunnel_distribution.rs::executable_override_checks_permissions_and_optional_hash` uses Unix symlink behavior without a guard.
 - Tier-boundary uncertainties were resolved from assertions/source; no test remains unclassified. The three runtime cases above are portability/coverage review items, not tier ambiguities.
 - Final tier rule: classify asserted behavior, not async/fixture setup. T5 requires material assertions about real files, SQLite, sockets, processes, or Git. In-memory SQLite counts when SQL state/effects are asserted; setup, cleanup, and empty-store/response-shape checks alone do not. MIXED requires distinct behavior at multiple named tiers. `denied_process_batch_creates_no_processes` is MIXED T4+T5 for the post-denial no-persisted-process invariant; the three empty-store/shape-only cases above are T4.
+
+## Cleanup Execution
+- Authoritative scope: `cleanup-manifest.md` currently contains 306 deletion targets and 8 merge/simplify targets. A shell count of the section entries confirmed both totals; the earlier 299-target handoff in `task_plan.md` was stale and is superseded.
+- Repository HEAD at execution start: `8232dcf35953bd6db3b6f0a268f0532cedab6a43`; initial `git status --short` and `git diff --stat` were empty.
+- Production code and tests outside the manifest are out of scope. Mismatched targets are skipped and logged. Merge/simplify changes must preserve all unique valid regression behavior.
+- Work is partitioned by disjoint source ownership to avoid conflicting edits: (1) Hub; (2) Protocol, apply-patch, browser-host, and the three Kotlin test files; (3) Agent browser tests; (4) remaining Agent test files, including config, files, ingress, operations, process, runtime, storage, skills, room, and UI. Each batch reads exact identifiers from the manifest, makes no test runs, and returns actual outcomes for integration.
 ## Technical Decisions
 | Decision | Rationale |
 |----------|-----------|
