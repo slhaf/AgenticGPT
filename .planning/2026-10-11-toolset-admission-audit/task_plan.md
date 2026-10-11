@@ -11,7 +11,7 @@
 - 阶段结束提交调查记录。
 
 ### 阶段 2：追踪消费者与特殊限制
-- Status: in_progress
+- Status: complete
 - 核查 Hub、本地 MCP、Unix、HTTP 的实际调用链。
 - 核查 Skills 内部 Process、Room profile、基础 Event 例外及动态配置语义。
 - 汇总可复核证据，阶段结束提交。
@@ -21,3 +21,6 @@
 
 ## 错误记录
 - 初次 rg 查询包含不存在的 docs glob，退出码 2；改为按明确文件范围查询。
+
+## 完成结果
+当前差异已确认；所有相关入口、既有特殊规则及最小修复建议见 findings.md。本轮调查完整结束，实现属于后续任务。
