@@ -19,3 +19,6 @@
 - 后续 Local smoke：使用全新短临时 HOME/XDG/TMPDIR，真实 config init/run/local list-tools/agent.info、printf 进程、内联 Skill 安装并激活均通过。精简配置的两次 smoke 脚本构造错误（缺省 shell 字段、policy Rule 格式）修正后重跑通过；每次临时根均已清理。
 - 实际冷启动只生成 events.sqlite3 与 process.sqlite3；访问 Skills 后生成 active-skills.json，安装后生成 skill-installs/install-*.json 与 staging/。不存在 state/agent。两库 integrity_check=ok，版本分别4/2，事件owner metadata与进程SQL/JSON agentId均不存在。
 - 原生写入权限实测：state根0700，SQLite文件0600；active-skills.json和安装记录0644、skill-installs及staging0755（本次umask0022）。父state根0700限制外部用户访问；原生子项尚未统一600/700，独立迁移脚本的复制权限规则仍为600/700。本次仅核验并记录，不改权限实现。
+
+- 阶段 7：按用户要求删除本轮新增或改写的 12 个状态／迁移回归用例（迁移集成 3、事件 SQLite 3、进程 SQLite 2、状态目录 4），以及两个既有用例内新增的状态验证断言。既有测试的临时 HOME、路径注入、接口适配和资源清理调整保留；迁移脚本及运行时实现保留。前述测试数量与执行结果是删除前的历史记录，不代表当前保留的测试集合。
+- 删除后 cargo fmt --all -- --check、cargo check --workspace --all-targets、git diff --check 均通过；编译检查使用临时 HOME/XDG/TMPDIR 并已清理。本阶段未重跑 smoke 或全量测试，没有新增测试。已对比实施前提交，当前无本轮新增测试函数残留。公开行为与文档契约未改变，无需改用户文档。

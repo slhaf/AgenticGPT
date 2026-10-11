@@ -33,6 +33,11 @@
 - 新临时 HOME 下冷启动、写进程与 Skill 状态，检查实际目录树、SQLite schema/完整性及权限，终止等待后清理。
 - Status: complete
 
+### 阶段 7：删除本轮新增测试
+- 按用户要求删除迁移、状态目录及 SQLite 新增回归用例，移除既有测试中新增的状态验证断言。
+- 保留既有用例的 HOME 隔离和接口适配；运行格式与全目标编译检查，独立提交。
+- Status: complete
+
 ## 验收
 - 新 runtime 不再创建 state/agent/<key>、无 owner_fingerprint 或 local process agentId。
 - Hub payload、local API 的 wire 身份和身份校验保持原样；内部模型及落盘记录不携带本地归属身份。

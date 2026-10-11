@@ -289,37 +289,7 @@ async fn builder_accepts_pre_resolved_browser_context_without_discovery() {
             .app_version,
         "test-builder"
     );
-    let event = state
-        .event_store
-        .inject(
-            &agentic_gpt_protocol::EventInjectRequest {
-                message: "persists across connection identity changes".to_string(),
-                severity: Some(agentic_gpt_protocol::EventSeverity::Medium),
-                reference: "builder-shared-state".to_string(),
-            },
-            3600,
-        )
-        .unwrap();
-    let first_identity = state.transport_agent_id.clone();
     drop(state);
-    let mut renamed_config = Config::default_config().unwrap();
-    renamed_config.workspace_root = root.join("workspace");
-    renamed_config.agent_id = format!("{first_identity}-renamed");
-    let reopened = build_app_state_with_private_state(
-        root.join("config.json"),
-        renamed_config,
-        RuntimeModel::local(CapabilityProfile::Normal),
-        false,
-        None,
-        crate::private_state::PrivateStatePaths::for_test(root.join("private-state")),
-    )
-    .unwrap();
-    assert_ne!(reopened.transport_agent_id, first_identity);
-    assert_eq!(
-        reopened.event_store.get(&event.event_id).unwrap().message,
-        event.message
-    );
-    drop(reopened);
     let _ = fs::remove_dir_all(root);
 }
 

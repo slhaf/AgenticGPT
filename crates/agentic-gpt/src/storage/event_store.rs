@@ -1291,23 +1291,6 @@ mod tests {
 
     use crate::private_state::PrivateStatePaths;
 
-    struct TestRoot(std::path::PathBuf);
-
-    impl TestRoot {
-        fn new(name: &str) -> Self {
-            Self(
-                std::env::temp_dir()
-                    .join(format!("agentic-events-{name}-{}", Uuid::new_v4().simple())),
-            )
-        }
-    }
-
-    impl Drop for TestRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     fn store(name: &str) -> (Arc<EventStore>, PrivateStatePaths, std::path::PathBuf) {
         let root =
             std::env::temp_dir().join(format!("agentic-events-{name}-{}", Uuid::new_v4().simple()));
@@ -1820,119 +1803,6 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_fresh_openers_share_only_a_fully_initialized_database() {
-        let root = TestRoot::new("concurrent-fresh");
-        let paths = PrivateStatePaths::for_test(root.0.clone());
-        let start = Arc::new(std::sync::Barrier::new(9));
-        let workers: Vec<_> = (0..8)
-            .map(|index| {
-                let paths = paths.clone();
-                let start = Arc::clone(&start);
-                thread::spawn(move || {
-                    start.wait();
-                    let store = EventStore::open(&paths).unwrap();
-                    store
-                        .inject(
-                            &request(
-                                &format!("writer-{index}"),
-                                "shared event",
-                                Some(EventSeverity::High),
-                            ),
-                            0,
-                        )
-                        .unwrap();
-                })
-            })
-            .collect();
-        start.wait();
-        for worker in workers {
-            worker.join().unwrap();
-        }
-        let store = EventStore::open(&paths).unwrap();
-        assert_eq!(
-            store
-                .list(&EventListRequest::default())
-                .unwrap()
-                .items
-                .len(),
-            8
-        );
-        drop(store);
-        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(root.0.join("events.sqlite3"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
-    }
-
-    #[test]
-    fn unsupported_event_databases_are_rejected_without_modification() {
-        for version in [0, 1, 2, 3, 5] {
-            let root = TestRoot::new("unsupported-version");
-            let paths = PrivateStatePaths::for_test(root.0.clone());
-            let path = root.0.join("events.sqlite3");
-            let legacy = Connection::open(&path).unwrap();
-            legacy
-                .execute_batch(
-                    "CREATE TABLE event_store_metadata (
-                        id INTEGER PRIMARY KEY,
-                        owner_fingerprint TEXT NOT NULL
-                    );
-                    INSERT INTO event_store_metadata VALUES (1,'old-owner');",
-                )
-                .unwrap();
-            legacy.pragma_update(None, "user_version", version).unwrap();
-            drop(legacy);
-            let original = fs::read(&path).unwrap();
-
-            let start = Arc::new(std::sync::Barrier::new(3));
-            let mut workers = Vec::new();
-            for _ in 0..2 {
-                let paths = paths.clone();
-                let start = Arc::clone(&start);
-                workers.push(thread::spawn(move || {
-                    start.wait();
-                    EventStore::open(&paths).err().unwrap().to_string()
-                }));
-            }
-            start.wait();
-            for worker in workers {
-                assert!(worker
-                    .join()
-                    .unwrap()
-                    .starts_with("event_store_schema_migration_required:"));
-            }
-
-            assert_eq!(fs::read(&path).unwrap(), original);
-            let connection = Connection::open(&path).unwrap();
-            assert_eq!(
-                connection
-                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-                    .unwrap(),
-                version
-            );
-            assert_eq!(
-                connection
-                    .query_row(
-                        "SELECT owner_fingerprint FROM event_store_metadata",
-                        [],
-                        |row| { row.get::<_, String>(0) }
-                    )
-                    .unwrap(),
-                "old-owner"
-            );
-        }
-    }
-
-    #[test]
     fn remote_settlement_requires_matching_origin_and_stays_sticky() {
         let (store, paths, root) = store("remote-origin-settlement");
         let remote = source(EventSourceKind::Process, "remote-process");
@@ -2073,59 +1943,6 @@ mod tests {
             .contains(&awaiting));
         let _ = fs::remove_dir_all(root);
     }
-    #[test]
-    fn shared_event_database_survives_request_agent_identity_changes() {
-        let root = TestRoot::new("shared-identity");
-        let paths = PrivateStatePaths::for_test(root.0.clone());
-        let first = EventStore::open(&paths).unwrap();
-        let event = first
-            .inject(
-                &request("shared", "shared event", Some(EventSeverity::High)),
-                0,
-            )
-            .unwrap();
-        let old_identity = EventListRequest {
-            agent_id: "old-agent".to_string(),
-            ..EventListRequest::default()
-        };
-        assert_eq!(
-            first.list(&old_identity).unwrap().items[0].event_id,
-            event.event_id
-        );
-        drop(first);
-
-        let reopened = EventStore::open(&paths).unwrap();
-        let new_identity = EventListRequest {
-            agent_id: "new-agent".to_string(),
-            ..old_identity
-        };
-        assert_eq!(
-            reopened.list(&new_identity).unwrap().items[0].event_id,
-            event.event_id
-        );
-        assert_eq!(
-            reopened.get(&event.event_id).unwrap().message,
-            "shared event"
-        );
-        let connection = Connection::open(root.0.join("events.sqlite3")).unwrap();
-        assert_eq!(
-            connection
-                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-                .unwrap(),
-            EVENT_STORE_SCHEMA_VERSION
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE name='event_store_metadata'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0
-        );
-    }
-
     #[test]
     fn reopen_does_not_replace_existing_policy_snapshot_or_completion() {
         let (store, _, root) = store("immutable-internal-snapshot");
