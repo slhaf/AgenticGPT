@@ -50,8 +50,9 @@ agentic-gpt config toolset disable <namespace>
 
 同一个 `toolsets.enabled` 数组也可以直接编辑 JSON。有效的 toolset 修改会在 worker 运行时
 热加载，并对后续工具发现与调用生效；无需重启。无效候选会保留上一次有效的 live selection。
-Room bootstrap、日记和笔记本命令以实时 `room` namespace 为授权依据，而不是启动时的
-profile。该 namespace 禁用时，直接分发 Room 命令会返回 `room_toolset_required`。
+该选择同时约束 Hub 下发及本地 MCP/Unix/HTTP 的普通工具调用。Room 命令先检查实时
+`room` namespace；禁用时，共享操作层返回 `room_toolset_required`。已有运行时能力和
+Hub Room Profile 限制继续生效；基础 Event API、CLI 管理入口等例外见[操作准入边界](interfaces.md#agent-接入与操作边界wp2)。
 
 例如，显式固定 normal 选择时写成：
 

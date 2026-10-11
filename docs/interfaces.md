@@ -10,6 +10,10 @@
 
 Agent 通过一个范围狭窄的内部准入边界处理请求，不引入新的框架或注册表。每个适配器都会创建不可变的 `RequestContext { ingress, operation }`；`operation::authorize(runtime, config, context)` 会根据真实接入来源以及命名空间/工具集和能力规则进行检查。`read_only`、`destructive`、`open_world` 等描述符注解仍是发现/客户端元数据，绝不构成授权。
 
+普通外部工具调用在 Hub wire、本地 MCP/Unix 和 Agent HTTP MCP 上均按操作所属命名空间检查实时 `toolsets.enabled`，关闭工具集后，后续请求会在进入执行者前被拒绝。Hub HTTP 和 Apps MCP 经 Hub wire 下发，同样受此门控约束。工具发现过滤不能替代调用时准入。`skills.run` 只检查 `skills` 工具集；内部使用受管理进程不要求同时启用 `process`，但后续显式调用 `process.read/cancel` 仍受 `process` 开关控制。
+
+`event.list/get/mark` 是基础收件箱 API，不受普通 Toolset 开关控制。CLI 的四项本地 tmux 管理操作继续使用管理准入规则；`privateevent.inject` 仅允许 Unix 本地入口，`event.panel/settle` 仅允许 Hub，通知投递继续检查通知能力。其余普通操作先检查工具集，再检查既有能力条件：Skills 仍要求运行时 Skills 能力，Hub 的 Room 语义读取及维护仍要求 Room Profile，Bootstrap 不追加该 Profile 条件。如果开关与能力同时不满足，普通操作先返回工具集拒绝；共享操作层普通工具集的错误码为 `toolset_required`，Room 为 `room_toolset_required`，本地 MCP 的调用时可用性过滤仍保留自己的协议错误封套。
+
 各接入路径的身份验证、封装和错误封套仍互相独立：本地 Unix 保留 UID/套接字防护和 `local:` 来源前缀；Tunnel stdio 使用 `tunnel:`；worker HTTP MCP 保留 bearer、Host/Origin/session 处理并使用 `http:`；Hub WS/SSE 保留其协议封套/重放行为并使用 `hub:`；CLI 使用 `localadmin:`。CLI 准入门有意限制为现有四项本地 tmux 管理操作。HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上有所不同，而共享 Agent 操作使用同一套值/错误和精简 Process/Skill 结果层。
 
 Normal 并不等于 Room：只有显式启用 `room` 命名空间时，Normal 运行时才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。

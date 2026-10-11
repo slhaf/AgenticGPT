@@ -79,7 +79,7 @@ Agent-local operation 是本地入口调用 Agent 所有者的行为，可供本
 新增 Hub 命令时，按以下顺序核对：
 
 1. 在相应领域的 Protocol 文件中定义请求/响应（例如进程请求位于 [`process.rs`](../../crates/agentic-gpt-protocol/src/process.rs)），更新 [`HubCommand`](../../crates/agentic-gpt-protocol/src/envelopes.rs) 及 Hub 入口映射；不要把所有领域的 DTO 都放入进程文件。
-2. 检查 Agent [`operation.rs`](../../crates/agentic-gpt/src/operations/operation.rs) 中的 `hub_command_name`、`operation_namespace` 与操作分类，再核对 `authorize` 是否在真实入口、运行模式、profile 和工具集下正确准入。Room 操作还须检查 `is_current_room_operation`、`is_hub_room_toolset_operation` 及各自的准入分支。名称或前缀相同不等于分类已经更新。
+2. 检查 Agent [`operation.rs`](../../crates/agentic-gpt/src/operations/operation.rs) 中的 `hub_command_name`、`operation_namespace` 与操作分类，再核对 `authorize` 是否在真实入口、运行模式、profile 和工具集下正确准入。普通操作共用实时 Toolset 检查；Room 操作另核对 `is_current_room_operation` 的 Hub Profile 条件，Bootstrap 不追加该条件。名称或前缀相同不等于分类已经更新。
 3. 更新 [`local_service.rs`](../../crates/agentic-gpt/src/operations/local_service.rs) 的消费与结果映射分支，接入实际资源所有者。若暴露 MCP 工具，另核对其描述符中的只读、破坏性和开放世界注解；这些注解不能替代运行时授权。
 4. 覆盖允许、禁止及能力未启用的真实入口路径。新增 Room 命令尤其要验证普通 Agent、工具集关闭和活动 Room 的差异，而不是只证明 DTO 能序列化。
 

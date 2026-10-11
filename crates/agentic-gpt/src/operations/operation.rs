@@ -281,13 +281,6 @@ fn is_current_room_operation(operation: &str) -> bool {
     )
 }
 
-fn is_hub_room_toolset_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        "room.bootstrap" | "room.bootstrap.read" | "bootstrap" | "bootstrap.read"
-    )
-}
-
 pub(crate) fn authorize(
     runtime: RuntimeModel,
     config: &Config,
@@ -336,37 +329,6 @@ pub(crate) fn authorize(
         });
     }
 
-    if context.ingress == RequestIngress::Hub {
-        if operation_namespace(operation).is_none() {
-            return Err(AdmissionError::UnknownOperation {
-                operation: operation.to_string(),
-            });
-        }
-        if is_current_room_operation(operation) {
-            if runtime.profile != crate::state::CapabilityProfile::Room {
-                return Err(AdmissionError::CapabilityRequired);
-            }
-            if !config.toolsets.is_enabled(ToolNamespace::Room) {
-                return Err(AdmissionError::ToolsetDisabled {
-                    namespace: ToolNamespace::Room,
-                });
-            }
-        }
-        if is_hub_room_toolset_operation(operation)
-            && !config.toolsets.is_enabled(ToolNamespace::Room)
-        {
-            return Err(AdmissionError::ToolsetDisabled {
-                namespace: ToolNamespace::Room,
-            });
-        }
-        if operation_namespace(operation) == Some(ToolNamespace::Skills)
-            && !runtime.capabilities().skills
-        {
-            return Err(AdmissionError::CapabilityRequired);
-        }
-        return Ok(());
-    }
-
     let Some(namespace) = operation_namespace(operation) else {
         return Err(AdmissionError::UnknownOperation {
             operation: operation.to_string(),
@@ -374,6 +336,12 @@ pub(crate) fn authorize(
     };
     if !config.toolsets.is_enabled(namespace) {
         return Err(AdmissionError::ToolsetDisabled { namespace });
+    }
+    if context.ingress == RequestIngress::Hub
+        && is_current_room_operation(operation)
+        && runtime.profile != crate::state::CapabilityProfile::Room
+    {
+        return Err(AdmissionError::CapabilityRequired);
     }
     if namespace == ToolNamespace::Skills && !runtime.capabilities().skills {
         return Err(AdmissionError::CapabilityRequired);
