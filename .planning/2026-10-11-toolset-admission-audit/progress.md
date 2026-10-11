@@ -34,3 +34,9 @@
 - 阶段 4 实现提交 eb40eb6；阶段 5 workspace cargo check已通过，严格Clippy与其余测试进行中。
 - 阶段 5 完成：workspace check 与 all-targets 严格 Clippy 通过；其余 workspace 测试 96 通过，Agent 四组集成测试 35 通过。加上已完成 Agent bin 套件，合计 511 通过、0 失败、1 个既有手动 Browser smoke 忽略。
 - 独立审查通过，最终验证成功退出并清理隔离状态根；收尾删除仅本轮创建的两个临时验证脚本。未执行发布、推送或 live contract parity。
+- 用户授权合入本地主分支；主工作区干净，合并提交 0f8dd1b 的文件树与验证提交 132c54b 完全一致，未推送远端。
+- 用户追加完整 CI 模拟；读取 ci.yml 与独立的 rust-stable.yml，主 CI 仅 Rust，Console 和发布不在该链路。对齐 main 后，在隔离 HOME 中按主 CI 顺序完整运行，新增 live parity 验证。
+- 主 CI 的格式、workspace check、严格 Clippy、全 workspace test（511 通过、1 忽略）与 Agent/Hub build 均通过。隔离 venv 创建成功；PyPI 依赖安装出现 TLS EOF、断连及读取超时，pip 自动重试中，此为本机网络阶段问题。
+- PyPI 自动重试恢复，隔离 venv 中成功安装 PyYAML 6.0.3 与 jsonschema 4.26.0（含 format 依赖），live parity 开始。整条 runner 已使用沙箱外执行授权，未调整生产配置或用户环境。
+- live parity 全部通过并输出自身覆盖限制；主 CI runner 完成所有步骤。工作区测试 511 通过、0 失败、1 个既有手动用例忽略；没有生产代码或 CI 配置改动。
+- 隔离 runner 已结束，执行清理检查并删除本轮临时脚本与日志；阶段 6 提交仅包含验证记录，随后同步本地 main，未推送远端。

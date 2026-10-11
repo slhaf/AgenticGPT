@@ -93,3 +93,17 @@ Profile 不只是工具集初始化预设和 Hub 准入：它还选择内置命�
 - 合计 511 通过、0 失败、1 个既有手动用例忽略；独立 reviewer 未发现可行动回归。
 - 所有运行验证均使用独立临时 HOME/XDG/TMPDIR，后续另隔离 D-Bus 地址；仅复用 Cargo/Rustup 与 target 构建缓存。验证结束后 runner 停止并等待其进程组退出，临时状态根已清理。
 - 未运行 live cross-surface contract parity 或手动真实 Browser 包 smoke，未启动长期 Agent/Hub、未发布或推送。公开 DTO/schema 与传输封套未变；新增跨入口回归验证的是共享准入与实际调用链。
+
+## 主 CI 模拟范围
+- `.github/workflows/ci.yml` 的 push/PR 主 CI 为一个 ubuntu-latest Rust job：工具链版本、fmt、workspace check、all-targets 严格 Clippy、workspace test、Agent/Hub build、PyYAML/jsonschema 依赖、live parity。
+- `rust-stable.yml` 是独立定时/手动的最新 stable 升级兼容性任务，release.yml 是发布流程，均不属于本次 push/PR CI 模拟。
+- 使用本机 Rust 1.99.0 与已有 Cargo/target 缓存；隔离运行状态及 Python venv。parity 的显式 --agent-bin/--hub-bin 参数指向刚构建的缓存目录二进制，其他主 CI 命令保持原样。
+
+### 主 CI 模拟结果
+- 验证源码提交为 `0f8dd1b`，主分支合并后的文件树；运行工具链为 rustc/cargo 1.99.0、x86_64-unknown-linux-gnu。
+- `rustup show`、版本检查、fmt、workspace check、all-targets 严格 Clippy、`cargo test --workspace`、Agent/Hub build 全部通过。workspace 测试总计 511 通过、0 失败、1 个既有手动 Browser package smoke 忽略。
+- 临时 Python venv 安装 PyYAML 6.0.3 与 jsonschema 4.26.0（含 format 依赖）成功；PyPI TLS EOF/超时自动重试后恢复，没有改变依赖源或放宽校验。
+- `scripts/check_contract_parity.py` 返回 `contract parity gate: PASS`，完整 runner 返回 `ALL PRIMARY CI STEPS PASSED`。
+- parity 实际覆盖本地 Unix/stdio/HTTP MCP、共享事件 inbox、live reload、真实 Skills 安装/运行、Hub HTTP/Apps MCP/wire、进程读取/取消/批次与回执恢复、Room profile 路由/维护/重连，以及 schema/format 检查。
+- 检查器自身限制保留：生产 tunnel executable transport 未验证；supplemental recovery 使用含真实证据的临时 Hub DB checkpoint，未复现 live partial-A 后重连发现 source-B 的精确交错。
+- 本次是使用缓存的本机主 CI 模拟，没有 GitHub Actions 远端运行结果，也未执行独立 latest-stable 定时任务、Console 或发布工作流；无需修改代码/CI。

@@ -42,3 +42,11 @@
 
 ## 完成结果
 修复已在 eb40eb6 完成：普通 Hub/Local 操作共享实时 Toolset 门控，保留既有 Event、CLI、入口和能力例外。格式、工作区编译、严格 Clippy、Agent bin 与其余 Rust 测试均通过，独立审查未发现可行动问题；具体验证范围见 findings.md。
+
+### 阶段 6：模拟主 CI 链路
+- Status: complete
+- 验证基线为已合入 main 的 0f8dd1b，当前独立 worktree 对齐该提交。
+- 按 .github/workflows/ci.yml 顺序执行工具链检查、格式、check、严格 Clippy、全工作区测试、Agent/Hub build、隔离 venv 安装 parity 依赖及 live contract parity。
+- 使用临时 HOME/XDG/TMPDIR 与 D-Bus 地址，复用构建缓存；本机模拟不声称等同 GitHub ubuntu-latest 的干净机器。
+- 最终记录结果与限制，阶段结束提交并同步本地主分支。
+- 主 CI 的全部本地步骤通过，live contract parity 返回 PASS；无需修改生产代码或 CI 配置。
