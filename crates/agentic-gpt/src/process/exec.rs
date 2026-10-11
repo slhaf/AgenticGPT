@@ -68,7 +68,6 @@ pub(crate) fn kernel_argument_limit_error(
 
 #[derive(Clone)]
 pub(crate) struct ExecutionRequest {
-    pub(crate) agent_id: String,
     pub(crate) group: Option<String>,
     pub(crate) execution: ExecutionSpec,
     pub(crate) need_confirm: bool,
@@ -80,7 +79,6 @@ pub(crate) struct ExecutionRequest {
 impl From<agentic_gpt_protocol::ProcessExecRequest> for ExecutionRequest {
     fn from(request: agentic_gpt_protocol::ProcessExecRequest) -> Self {
         Self {
-            agent_id: request.agent_id,
             group: request.group,
             execution: ExecutionSpec::Shell {
                 command: request.command,
@@ -95,7 +93,6 @@ impl From<agentic_gpt_protocol::ProcessExecRequest> for ExecutionRequest {
 
 impl ExecutionRequest {
     pub(crate) fn argv(
-        agent_id: String,
         group: Option<String>,
         program: String,
         args: Vec<String>,
@@ -103,7 +100,6 @@ impl ExecutionRequest {
         wait_seconds: Option<u64>,
     ) -> Self {
         Self {
-            agent_id,
             group,
             execution: ExecutionSpec::Argv { program, args },
             need_confirm: false,

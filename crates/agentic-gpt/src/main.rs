@@ -68,6 +68,8 @@ mod private_state;
 mod process;
 #[path = "storage/process_history.rs"]
 mod process_history;
+#[path = "process/model.rs"]
+mod process_model;
 #[path = "room/room_maintenance.rs"]
 mod room_maintenance;
 #[path = "room/room_reads.rs"]

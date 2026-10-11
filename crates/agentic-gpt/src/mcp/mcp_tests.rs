@@ -223,6 +223,7 @@ async fn managed_test_state(max_active_processes: usize) -> (AppState, PathBuf) 
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let mut config = Config::default_config().unwrap();
+    config.agent_id = "test-agent".to_owned();
     config.workspace_root = workspace;
     config.limits.max_active_processes =
         crate::config::MaxActiveProcesses::Explicit(max_active_processes);
@@ -235,13 +236,12 @@ async fn managed_test_state(max_active_processes: usize) -> (AppState, PathBuf) 
             auth: None,
         },
     );
-    let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
-        root.join("private-state"),
-        config.agent_id.clone(),
-    );
+    let private_state =
+        crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
     let event_store = crate::event_store::EventStore::open(&private_state).unwrap();
     let state = AppState {
         config_path: root.join("config.json"),
+        transport_agent_id: config.agent_id.clone(),
         config: Arc::new(RwLock::new(config)),
         private_state: private_state.clone(),
         event_store,
@@ -1252,6 +1252,7 @@ async fn mcp_batch_clips_late_results_to_the_aggregate_budget() {
     let process_id = omitted.process.process.process_id.clone();
     let projected = crate::operation_result::slim_mcp_batch_response(
         batch::ManagedMcpBatchResponse {
+            transport_agent_id: state.transport_agent_id.clone(),
             response,
             response_budget: agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES,
         },
@@ -1329,6 +1330,7 @@ async fn mcp_batch_public_projection_obeys_exact_json_budget_and_keeps_deferred_
     let min_budget = agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES;
     let deferred_projection = crate::operation_result::slim_mcp_batch_response(
         batch::ManagedMcpBatchResponse {
+            transport_agent_id: state.transport_agent_id.clone(),
             response: response.clone(),
             response_budget: min_budget,
         },
@@ -1387,6 +1389,7 @@ async fn mcp_batch_public_projection_obeys_exact_json_budget_and_keeps_deferred_
     }
     let one_value_projection = crate::operation_result::slim_mcp_batch_response(
         batch::ManagedMcpBatchResponse {
+            transport_agent_id: state.transport_agent_id.clone(),
             response: one_value_response,
             response_budget: agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES,
         },
@@ -1399,6 +1402,7 @@ async fn mcp_batch_public_projection_obeys_exact_json_budget_and_keeps_deferred_
 
     let exact_projection = crate::operation_result::slim_mcp_batch_response(
         batch::ManagedMcpBatchResponse {
+            transport_agent_id: state.transport_agent_id.clone(),
             response: response.clone(),
             response_budget: exact_bytes,
         },
@@ -1414,6 +1418,7 @@ async fn mcp_batch_public_projection_obeys_exact_json_budget_and_keeps_deferred_
     let one_byte_below = exact_bytes - 1;
     let below_projection = crate::operation_result::slim_mcp_batch_response(
         batch::ManagedMcpBatchResponse {
+            transport_agent_id: state.transport_agent_id.clone(),
             response,
             response_budget: one_byte_below,
         },

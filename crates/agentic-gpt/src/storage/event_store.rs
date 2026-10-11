@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -17,12 +17,11 @@ use rusqlite::{
     params, types::Value, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::private_state::PrivateStatePaths;
 
-const EVENT_STORE_SCHEMA_VERSION: i64 = 3;
+const EVENT_STORE_SCHEMA_VERSION: i64 = 4;
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 1_000;
 const EVENT_HISTORY_RETENTION: Duration = Duration::days(7);
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
@@ -93,16 +92,6 @@ CREATE TABLE IF NOT EXISTS internal_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_internal_sources_recovery
     ON internal_sources(response_state, completion_seen, source_kind, source_ref);
-CREATE TABLE IF NOT EXISTS event_store_metadata (
-    id INTEGER PRIMARY KEY CHECK (id=1),
-    owner_fingerprint TEXT NOT NULL
-);
-
-"#;
-const MIGRATE_V1_TO_V2: &str = r#"
-ALTER TABLE internal_sources ADD COLUMN origin_run_id TEXT;
-ALTER TABLE internal_sources ADD COLUMN origin_request_id TEXT;
-ALTER TABLE internal_sources ADD COLUMN origin_command_hash TEXT;
 "#;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -189,44 +178,25 @@ impl RawEvent {
 
 impl EventStore {
     pub(crate) fn open(paths: &PrivateStatePaths) -> Result<Arc<Self>> {
-        let owner_fingerprint = event_store_owner_fingerprint(&paths.agent_id)?;
         let path = paths.root.join("events.sqlite3");
         ensure_private_database_file(&paths.root, &path)?;
-        let mut connection = Connection::open(&path)
-            .with_context(|| format!("event_store_open_failed: {}", path.display()))?;
+        let connection =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                .with_context(|| format!("event_store_open_failed: {}", path.display()))?;
         connection
             .busy_timeout(StdDuration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
             .context("event_store_busy_timeout_failed")?;
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .context("event_store_schema_version_read_failed")?;
+        if version != EVENT_STORE_SCHEMA_VERSION {
+            return Err(anyhow!(
+                "event_store_schema_migration_required: found {version}; required {EVENT_STORE_SCHEMA_VERSION}; run the state migration script before starting the Agent"
+            ));
+        }
         connection
             .pragma_update(None, "synchronous", "FULL")
             .context("event_store_synchronous_failed")?;
-
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .context("event_store_schema_transaction_failed")?;
-        let version: i64 = transaction
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .context("event_store_schema_version_read_failed")?;
-        if version > EVENT_STORE_SCHEMA_VERSION {
-            return Err(anyhow!(
-                "unsupported event store schema version {version}; maximum supported {EVENT_STORE_SCHEMA_VERSION}"
-            ));
-        }
-        transaction
-            .execute_batch(SCHEMA)
-            .context("event_store_schema_create_failed")?;
-        if version == 1 {
-            transaction
-                .execute_batch(MIGRATE_V1_TO_V2)
-                .context("event_store_schema_v1_migration_failed")?;
-        }
-        ensure_store_owner(&transaction, &owner_fingerprint)?;
-        transaction
-            .pragma_update(None, "user_version", EVENT_STORE_SCHEMA_VERSION)
-            .context("event_store_schema_version_write_failed")?;
-        transaction
-            .commit()
-            .context("event_store_schema_commit_failed")?;
 
         Ok(Arc::new(Self {
             connection: Mutex::new(connection),
@@ -900,38 +870,6 @@ struct PendingCounts {
     high: i64,
 }
 
-fn event_store_owner_fingerprint(agent_id: &str) -> Result<String> {
-    if agent_id.trim().is_empty() {
-        return Err(anyhow!("event_store_agent_id_invalid"));
-    }
-    let digest = Sha256::digest(agent_id.as_bytes());
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-fn ensure_store_owner(transaction: &Transaction<'_>, owner_fingerprint: &str) -> Result<()> {
-    let stored: Option<String> = transaction
-        .query_row(
-            "SELECT owner_fingerprint FROM event_store_metadata WHERE id=1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .context("event_store_owner_read_failed")?;
-    match stored {
-        Some(stored) if stored == owner_fingerprint => Ok(()),
-        Some(_) => Err(anyhow!("event_store_owner_mismatch")),
-        None => {
-            transaction
-                .execute(
-                    "INSERT INTO event_store_metadata(id,owner_fingerprint) VALUES (1,?1)",
-                    params![owner_fingerprint],
-                )
-                .context("event_store_owner_write_failed")?;
-            Ok(())
-        }
-    }
-}
-
 fn ensure_private_database_file(root: &Path, path: &Path) -> Result<()> {
     let root_metadata = fs::symlink_metadata(root)
         .with_context(|| format!("event_store_private_root_unavailable: {}", root.display()))?;
@@ -944,30 +882,67 @@ fn ensure_private_database_file(root: &Path, path: &Path) -> Result<()> {
                 return Err(anyhow!("event_store_database_path_invalid"));
             }
             set_private_file_permissions(path)?;
+            Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut options = OpenOptions::new();
-            options.read(true).write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+            publish_initialized_database(root, path)?;
+            let metadata =
+                fs::symlink_metadata(path).context("event_store_database_path_check_failed")?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(anyhow!("event_store_database_path_invalid"));
             }
-            match options.open(path) {
-                Ok(file) => drop(file),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let metadata = fs::symlink_metadata(path)
-                        .context("event_store_database_path_check_failed")?;
-                    if metadata.file_type().is_symlink() || !metadata.is_file() {
-                        return Err(anyhow!("event_store_database_path_invalid"));
-                    }
-                    set_private_file_permissions(path)?;
-                }
-                Err(error) => return Err(error).context("event_store_database_create_failed"),
-            }
+            set_private_file_permissions(path)
         }
-        Err(error) => return Err(error).context("event_store_database_path_check_failed"),
+        Err(error) => Err(error).context("event_store_database_path_check_failed"),
     }
+}
+
+struct UnpublishedEventDatabase(PathBuf);
+
+impl Drop for UnpublishedEventDatabase {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let mut path = self.0.as_os_str().to_os_string();
+            path.push(suffix);
+            let _ = fs::remove_file(PathBuf::from(path));
+        }
+    }
+}
+
+fn publish_initialized_database(root: &Path, path: &Path) -> Result<()> {
+    let temporary_path = root.join(format!(".events.sqlite3-init-{}", Uuid::new_v4().simple()));
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&temporary_path)
+        .context("event_store_database_create_failed")?;
+    let temporary = UnpublishedEventDatabase(temporary_path);
+    let mut connection =
+        Connection::open_with_flags(&temporary.0, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(SCHEMA)?;
+    transaction.pragma_update(None, "user_version", EVENT_STORE_SCHEMA_VERSION)?;
+    transaction.commit()?;
+    connection.close().map_err(|(_, error)| error)?;
+    file.sync_all()?;
+    drop(file);
+    // Publish only a complete database; a concurrent winner is never overwritten.
+    match fs::hard_link(&temporary.0, path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).context("event_store_database_publish_failed"),
+    }
+    fs::remove_file(&temporary.0).context("event_store_database_temporary_cleanup_failed")?;
+    drop(temporary);
+    #[cfg(unix)]
+    fs::File::open(root)?.sync_all()?;
     Ok(())
 }
 
@@ -1315,6 +1290,23 @@ mod tests {
     use std::thread;
 
     use crate::private_state::PrivateStatePaths;
+
+    struct TestRoot(std::path::PathBuf);
+
+    impl TestRoot {
+        fn new(name: &str) -> Self {
+            Self(
+                std::env::temp_dir()
+                    .join(format!("agentic-events-{name}-{}", Uuid::new_v4().simple())),
+            )
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn store(name: &str) -> (Arc<EventStore>, PrivateStatePaths, std::path::PathBuf) {
         let root =
@@ -1828,52 +1820,116 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_v1_openers_migrate_the_schema_once() {
-        let root = std::env::temp_dir().join(format!(
-            "agentic-events-migration-{}",
-            Uuid::new_v4().simple()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let paths = PrivateStatePaths::for_test(root.clone());
-        let legacy = Connection::open(root.join("events.sqlite3")).unwrap();
-        legacy
-            .execute_batch(
-                "CREATE TABLE internal_sources (
-                    source_kind TEXT NOT NULL,
-                    source_ref TEXT NOT NULL,
-                    response_state TEXT NOT NULL,
-                    settled_at TEXT,
-                    policy_json TEXT NOT NULL,
-                    completion_seen INTEGER NOT NULL DEFAULT 0,
-                    completion_event_type TEXT,
-                    completion_message TEXT,
-                    completed_at TEXT,
-                    notified INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (source_kind, source_ref)
-                );
-                PRAGMA user_version=1;",
-            )
-            .unwrap();
-        drop(legacy);
-
-        let start = Arc::new(std::sync::Barrier::new(3));
-        let mut workers = Vec::new();
-        for _ in 0..2 {
-            let paths = paths.clone();
-            let start = Arc::clone(&start);
-            workers.push(thread::spawn(move || {
-                start.wait();
-                EventStore::open(&paths)
-            }));
-        }
+    fn concurrent_fresh_openers_share_only_a_fully_initialized_database() {
+        let root = TestRoot::new("concurrent-fresh");
+        let paths = PrivateStatePaths::for_test(root.0.clone());
+        let start = Arc::new(std::sync::Barrier::new(9));
+        let workers: Vec<_> = (0..8)
+            .map(|index| {
+                let paths = paths.clone();
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    let store = EventStore::open(&paths).unwrap();
+                    store
+                        .inject(
+                            &request(
+                                &format!("writer-{index}"),
+                                "shared event",
+                                Some(EventSeverity::High),
+                            ),
+                            0,
+                        )
+                        .unwrap();
+                })
+            })
+            .collect();
         start.wait();
-        let stores = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(stores.len(), 2);
-        drop(stores);
-        let _ = fs::remove_dir_all(root);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let store = EventStore::open(&paths).unwrap();
+        assert_eq!(
+            store
+                .list(&EventListRequest::default())
+                .unwrap()
+                .items
+                .len(),
+            8
+        );
+        drop(store);
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(root.0.join("events.sqlite3"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_event_databases_are_rejected_without_modification() {
+        for version in [0, 1, 2, 3, 5] {
+            let root = TestRoot::new("unsupported-version");
+            let paths = PrivateStatePaths::for_test(root.0.clone());
+            let path = root.0.join("events.sqlite3");
+            let legacy = Connection::open(&path).unwrap();
+            legacy
+                .execute_batch(
+                    "CREATE TABLE event_store_metadata (
+                        id INTEGER PRIMARY KEY,
+                        owner_fingerprint TEXT NOT NULL
+                    );
+                    INSERT INTO event_store_metadata VALUES (1,'old-owner');",
+                )
+                .unwrap();
+            legacy.pragma_update(None, "user_version", version).unwrap();
+            drop(legacy);
+            let original = fs::read(&path).unwrap();
+
+            let start = Arc::new(std::sync::Barrier::new(3));
+            let mut workers = Vec::new();
+            for _ in 0..2 {
+                let paths = paths.clone();
+                let start = Arc::clone(&start);
+                workers.push(thread::spawn(move || {
+                    start.wait();
+                    EventStore::open(&paths).err().unwrap().to_string()
+                }));
+            }
+            start.wait();
+            for worker in workers {
+                assert!(worker
+                    .join()
+                    .unwrap()
+                    .starts_with("event_store_schema_migration_required:"));
+            }
+
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let connection = Connection::open(&path).unwrap();
+            assert_eq!(
+                connection
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT owner_fingerprint FROM event_store_metadata",
+                        [],
+                        |row| { row.get::<_, String>(0) }
+                    )
+                    .unwrap(),
+                "old-owner"
+            );
+        }
     }
 
     #[test]
@@ -2018,32 +2074,58 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
     #[test]
-    fn event_database_rejects_a_different_configured_agent_identity() {
-        let root =
-            std::env::temp_dir().join(format!("agentic-events-owner-{}", Uuid::new_v4().simple()));
-        fs::create_dir_all(&root).unwrap();
-        let paths = PrivateStatePaths::for_test(root.clone());
-        let store = EventStore::open(&paths).unwrap();
-        let event = store
+    fn shared_event_database_survives_request_agent_identity_changes() {
+        let root = TestRoot::new("shared-identity");
+        let paths = PrivateStatePaths::for_test(root.0.clone());
+        let first = EventStore::open(&paths).unwrap();
+        let event = first
             .inject(
-                &request("owner", "owned event", Some(EventSeverity::High)),
+                &request("shared", "shared event", Some(EventSeverity::High)),
                 0,
             )
             .unwrap();
-        drop(store);
-
-        let mut other_paths = paths.clone();
-        other_paths.agent_id = "different-agent".to_string();
-        let error = EventStore::open(&other_paths).err().unwrap();
-        assert!(error.to_string().contains("event_store_owner_mismatch"));
+        let old_identity = EventListRequest {
+            agent_id: "old-agent".to_string(),
+            ..EventListRequest::default()
+        };
+        assert_eq!(
+            first.list(&old_identity).unwrap().items[0].event_id,
+            event.event_id
+        );
+        drop(first);
 
         let reopened = EventStore::open(&paths).unwrap();
+        let new_identity = EventListRequest {
+            agent_id: "new-agent".to_string(),
+            ..old_identity
+        };
+        assert_eq!(
+            reopened.list(&new_identity).unwrap().items[0].event_id,
+            event.event_id
+        );
         assert_eq!(
             reopened.get(&event.event_id).unwrap().message,
-            "owned event"
+            "shared event"
         );
-        let _ = fs::remove_dir_all(root);
+        let connection = Connection::open(root.0.join("events.sqlite3")).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            EVENT_STORE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name='event_store_metadata'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
     }
+
     #[test]
     fn reopen_does_not_replace_existing_policy_snapshot_or_completion() {
         let (store, _, root) = store("immutable-internal-snapshot");

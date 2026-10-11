@@ -1,3 +1,4 @@
+use crate::process_model::{McpBatchChildResponse, McpBatchResponse};
 use std::{
     collections::HashSet,
     sync::{
@@ -7,8 +8,8 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    EventOrigin, McpBatchChildResponse, McpBatchMode, McpBatchRequest, McpBatchResponse,
-    McpBatchStatus, McpCallToolRequest, ProcessError, ProcessState,
+    EventOrigin, McpBatchMode, McpBatchRequest, McpBatchStatus, McpCallToolRequest, ProcessError,
+    ProcessState,
 };
 use anyhow::{anyhow, Result};
 use futures_util::future::try_join_all;
@@ -51,6 +52,7 @@ struct PreparedMcpBatchCall {
 }
 
 pub(crate) struct ManagedMcpBatchResponse {
+    pub(crate) transport_agent_id: String,
     pub(crate) response: McpBatchResponse,
     pub(crate) response_budget: usize,
 }
@@ -74,6 +76,7 @@ pub(crate) async fn batch(
     )
     .await?;
     Ok(ManagedMcpBatchResponse {
+        transport_agent_id: state.transport_agent_id.clone(),
         response,
         response_budget,
     })
@@ -118,6 +121,7 @@ pub(super) async fn start_managed_batch_with_factory_response(
     )
     .await?;
     Ok(ManagedMcpBatchResponse {
+        transport_agent_id: state.transport_agent_id.clone(),
         response,
         response_budget,
     })
@@ -182,7 +186,6 @@ async fn start_managed_batch_with_factory_budget(
     let specs = prepared
         .iter()
         .map(|call| ManagedMcpSpec {
-            agent_id: payload.agent_id.clone(),
             group: payload.group.clone(),
             batch_id: Some(batch_id.clone()),
             batch_call_id: call.id.clone(),

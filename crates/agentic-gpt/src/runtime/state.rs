@@ -166,6 +166,8 @@ impl BrowserRuntimeContext {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    /// Immutable connection identity, never a local state owner.
+    pub(crate) transport_agent_id: String,
     pub(crate) config_path: PathBuf,
     pub(crate) config: Arc<RwLock<Config>>,
     pub(crate) private_state: crate::private_state::PrivateStatePaths,

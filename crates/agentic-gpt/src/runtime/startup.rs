@@ -170,15 +170,28 @@ pub(crate) fn build_app_state(
     supervised: bool,
     browser_runtime: Option<Arc<BrowserRuntimeContext>>,
 ) -> Result<AppState> {
+    build_app_state_with_private_state(
+        config_path,
+        config,
+        runtime,
+        supervised,
+        browser_runtime,
+        private_state::prepare()?,
+    )
+}
+
+pub(crate) fn build_app_state_with_private_state(
+    config_path: PathBuf,
+    config: Config,
+    runtime: RuntimeModel,
+    supervised: bool,
+    browser_runtime: Option<Arc<BrowserRuntimeContext>>,
+    private_state: private_state::PrivateStatePaths,
+) -> Result<AppState> {
     if config.toolsets.is_enabled(config::ToolNamespace::Room) {
         room_repository::ensure_repository(&config)?;
     }
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
-    let prepared = private_state::prepare(&config)?;
-    for warning in &prepared.warnings {
-        log_warn(warning.clone());
-    }
-    let private_state = prepared.paths;
     let event_store = crate::event_store::EventStore::open(&private_state)?;
     let process_history = process_history::ProcessHistoryStore::open(&private_state);
     if let Err(error) = process_history.recover_active(chrono::Utc::now()) {
@@ -187,6 +200,7 @@ pub(crate) fn build_app_state(
     let skill_installs_root = private_state.skill_installs.clone();
     Ok(AppState {
         config_path,
+        transport_agent_id: config.agent_id.clone(),
         config: Arc::new(RwLock::new(config)),
         private_state,
         event_store,

@@ -6,7 +6,7 @@ use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{Config, RuntimeMode};
 use crate::config::{PathPolicyConfig, Rule, TunnelConfig};
 use crate::config_cli::{PathRootCommand, PathRootKind};
-use crate::startup::{build_app_state, reload_live_config_once};
+use crate::startup::{build_app_state_with_private_state, reload_live_config_once};
 use crate::state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel};
 use agentic_gpt_protocol::{
     AgentMessage, BootstrapReadRequest, HubCommand, RoomDiaryActiveRequest,
@@ -42,15 +42,17 @@ fn invalid_explicit_runtime_keeps_app_startup_fail_open() {
     config.browser.runtime.as_mut().unwrap().node_path = Some("relative/node".to_string());
     let root = unique_temp_dir("explicit-browser-fail-open");
     config.workspace_root = root.join("workspace");
-    let state = build_app_state(
+    let state = build_app_state_with_private_state(
         root.join("config.json"),
         config,
         RuntimeModel::local(CapabilityProfile::Normal),
         false,
         None,
+        crate::private_state::PrivateStatePaths::for_test(root.join("private-state")),
     )
     .unwrap();
     assert!(state.browser_runtime.is_none());
+    drop(state);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -269,12 +271,13 @@ async fn builder_accepts_pre_resolved_browser_context_without_discovery() {
     let launch_spec =
         browser_runtime::build_node_repl_launch_spec(&descriptor, &BTreeMap::new()).unwrap();
     let context = BrowserRuntimeContext::new(descriptor, launch_spec);
-    let state = build_app_state(
+    let state = build_app_state_with_private_state(
         root.join("config.json"),
         config,
         RuntimeModel::local(CapabilityProfile::Normal),
         false,
         Some(context),
+        crate::private_state::PrivateStatePaths::for_test(root.join("private-state")),
     )
     .unwrap();
     assert_eq!(
@@ -286,6 +289,37 @@ async fn builder_accepts_pre_resolved_browser_context_without_discovery() {
             .app_version,
         "test-builder"
     );
+    let event = state
+        .event_store
+        .inject(
+            &agentic_gpt_protocol::EventInjectRequest {
+                message: "persists across connection identity changes".to_string(),
+                severity: Some(agentic_gpt_protocol::EventSeverity::Medium),
+                reference: "builder-shared-state".to_string(),
+            },
+            3600,
+        )
+        .unwrap();
+    let first_identity = state.transport_agent_id.clone();
+    drop(state);
+    let mut renamed_config = Config::default_config().unwrap();
+    renamed_config.workspace_root = root.join("workspace");
+    renamed_config.agent_id = format!("{first_identity}-renamed");
+    let reopened = build_app_state_with_private_state(
+        root.join("config.json"),
+        renamed_config,
+        RuntimeModel::local(CapabilityProfile::Normal),
+        false,
+        None,
+        crate::private_state::PrivateStatePaths::for_test(root.join("private-state")),
+    )
+    .unwrap();
+    assert_ne!(reopened.transport_agent_id, first_identity);
+    assert_eq!(
+        reopened.event_store.get(&event.event_id).unwrap().message,
+        event.message
+    );
+    drop(reopened);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -331,17 +365,16 @@ fn command_test_state(
     };
     config.workspace_root = workspace_root;
     let (tx, rx) = mpsc::unbounded_channel();
-    let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
-        std::env::temp_dir().join(format!(
+    let private_state =
+        crate::private_state::PrivateStatePaths::for_test(std::env::temp_dir().join(format!(
             "agentic-test-private-{}",
             uuid::Uuid::new_v4().simple()
-        )),
-        config.agent_id.clone(),
-    );
+        )));
     let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
     (
         AppState {
             config_path: PathBuf::from("test-config.json"),
+            transport_agent_id: config.agent_id.clone(),
             config: Arc::new(RwLock::new(config)),
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,

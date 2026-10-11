@@ -141,7 +141,6 @@ async fn start_managed_call_with_origin(
     let registration = process::register_mcp_process(
         state,
         ManagedMcpSpec {
-            agent_id: payload.agent_id.clone(),
             group: payload.group.clone(),
             batch_id: None,
             batch_call_id: None,

@@ -1,6 +1,7 @@
+use crate::process_model::ProcessInfo;
 use agentic_gpt_protocol::{
-    EventResponseDisposition, EventSource, EventSourceKind, ProcessInfo, ProcessState,
-    SkillInstallStatus, SkillInstallStatusResponse,
+    EventResponseDisposition, EventSource, EventSourceKind, ProcessState, SkillInstallStatus,
+    SkillInstallStatusResponse,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -494,6 +495,7 @@ mod tests {
             crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
         let state = AppState {
             config_path: root.join("config.json"),
+            transport_agent_id: config.agent_id.clone(),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             private_state: private_state.clone(),
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),

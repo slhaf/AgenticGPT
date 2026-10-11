@@ -1,3 +1,4 @@
+use crate::process_model::ProcessInfo;
 #[path = "stdio_schema.rs"]
 mod stdio_schema;
 #[path = "stdio_transport.rs"]
@@ -9,11 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
-use agentic_gpt_protocol::ProcessDetail;
 use agentic_gpt_protocol::{
     normalize_process_group, HubCommand, ProcessBatchExecRequest, ProcessCancelRequest,
-    ProcessExecElement, ProcessExecRequest, ProcessInfo, ProcessListRequest, ProcessReadRequest,
+    ProcessExecElement, ProcessExecRequest, ProcessListRequest, ProcessReadRequest,
 };
 use anyhow::Result;
 use base64::Engine;

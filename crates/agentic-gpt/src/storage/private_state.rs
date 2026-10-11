@@ -2,384 +2,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
-use crate::config::Config;
 use crate::utils::agentic_home;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PrivateStatePaths {
-    // Kept as the authoritative per-agent root for subsequent private-state consumers.
-    #[allow(dead_code)]
     pub(crate) root: PathBuf,
-    pub(crate) agent_id: String,
     pub(crate) active_skills: PathBuf,
     pub(crate) skill_installs: PathBuf,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PrepareOutcome {
-    pub(crate) paths: PrivateStatePaths,
-    pub(crate) warnings: Vec<String>,
+pub(crate) fn prepare() -> Result<PrivateStatePaths> {
+    prepare_at(&agentic_home()?)
 }
 
-pub(crate) fn prepare(config: &Config) -> Result<PrepareOutcome> {
-    prepare_at(config, &agentic_home()?)
-}
-
-fn prepare_at(config: &Config, agentic_root: &Path) -> Result<PrepareOutcome> {
-    let agent_key = agent_state_key(&config.agent_id)?;
-    let root = agentic_root.join("state").join("agent").join(agent_key);
-    let legacy_root = config.workspace_root.join("state");
-    let legacy_active = legacy_root.join("active-skills.json");
-    let legacy_installs = legacy_root.join("skill-installs");
-    let target_active = root.join("active-skills.json");
-    let target_installs = root.join("skill-installs");
-    let mut warnings = Vec::new();
-
-    if let Err(error) = ensure_private_dir(&root) {
-        warnings.push(format!("private_state_root_unavailable: {error}"));
-        return Ok(PrepareOutcome {
-            paths: PrivateStatePaths {
-                agent_id: config.agent_id.clone(),
-                root,
-                active_skills: legacy_active,
-                skill_installs: legacy_installs,
-            },
-            warnings,
-        });
-    }
-
-    if let Err(error) = sync_dir(&root) {
-        warnings.push(format!("private_state_root_sync_failed: {error}"));
-        return Ok(PrepareOutcome {
-            paths: PrivateStatePaths {
-                agent_id: config.agent_id.clone(),
-                root,
-                active_skills: legacy_active,
-                skill_installs: legacy_installs,
-            },
-            warnings,
-        });
-    }
-
-    let active_skills = migrate_file(
-        "active-skills",
-        &legacy_active,
-        &target_active,
-        &mut warnings,
-    );
-    let skill_installs = migrate_directory(
-        "skill-installs",
-        &legacy_installs,
-        &target_installs,
-        &mut warnings,
-    );
-
-    match fs::remove_dir(&legacy_root) {
-        Ok(()) => {
-            if let Some(parent) = legacy_root.parent() {
-                if let Err(error) = sync_dir(parent) {
-                    warnings.push(format!("private_state_legacy_root_sync_failed: {error}"));
-                }
-            }
-        }
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                || error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
-        Err(error) => {
-            warnings.push(format!("private_state_legacy_root_cleanup_failed: {error}"));
-        }
-    }
-
-    Ok(PrepareOutcome {
-        paths: PrivateStatePaths {
-            agent_id: config.agent_id.clone(),
-            root,
-            active_skills,
-            skill_installs,
-        },
-        warnings,
+fn prepare_at(agentic_root: &Path) -> Result<PrivateStatePaths> {
+    let root = agentic_root.join("state");
+    ensure_private_dir(&root)?;
+    sync_dir(&root)?;
+    Ok(PrivateStatePaths {
+        active_skills: root.join("active-skills.json"),
+        skill_installs: root.join("skill-installs"),
+        root,
     })
-}
-
-fn migrate_file(label: &str, source: &Path, target: &Path, warnings: &mut Vec<String>) -> PathBuf {
-    match fs::symlink_metadata(target) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            warnings.push(format!(
-                "private_state_target_symlink_rejected: {label}; legacy source retained"
-            ));
-            return source.to_path_buf();
-        }
-        Ok(_) => {
-            if fs::symlink_metadata(source).is_ok() {
-                if verify_file(source, target).is_ok() {
-                    if let Some(parent) = target.parent() {
-                        if let Err(error) = sync_file(target).and_then(|_| sync_dir(parent)) {
-                            warnings.push(format!(
-                                "private_state_target_sync_failed: {label}: {error}"
-                            ));
-                            return source.to_path_buf();
-                        }
-                    }
-                    if let Err(error) = remove_file_and_sync(source) {
-                        warnings.push(format!(
-                            "private_state_legacy_cleanup_failed: {label}: {error}"
-                        ));
-                    }
-                } else {
-                    warnings.push(format!(
-                        "private_state_conflict: {label} target already exists; legacy source retained"
-                    ));
-                }
-            }
-            return target.to_path_buf();
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            warnings.push(format!(
-                "private_state_target_check_failed: {label}: {error}"
-            ));
-            return source.to_path_buf();
-        }
-    }
-    if !source.exists() {
-        return target.to_path_buf();
-    }
-
-    let result = (|| -> Result<()> {
-        let metadata = fs::symlink_metadata(source)?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(anyhow!("legacy_source_not_regular_file"));
-        }
-        let parent = target
-            .parent()
-            .ok_or_else(|| anyhow!("private_state_parent_missing"))?;
-        ensure_private_dir(parent)?;
-        let tmp = parent.join(format!(".{label}-migrate-{}.tmp", Uuid::new_v4().simple()));
-        let cleanup = tmp.clone();
-        let attempt = (|| -> Result<()> {
-            fs::copy(source, &tmp)?;
-            set_private_file(&tmp)?;
-            sync_file(&tmp)?;
-            verify_file(source, &tmp)?;
-            fs::rename(&tmp, target)?;
-            sync_dir(parent)?;
-            Ok(())
-        })();
-        if attempt.is_err() {
-            let _ = fs::remove_file(cleanup);
-        }
-        attempt?;
-        if let Err(error) = remove_file_and_sync(source) {
-            warnings.push(format!(
-                "private_state_legacy_cleanup_failed: {label}: {error}"
-            ));
-        }
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => target.to_path_buf(),
-        Err(error) => {
-            warnings.push(format!("private_state_migration_failed: {label}: {error}"));
-            source.to_path_buf()
-        }
-    }
-}
-fn migrate_directory(
-    label: &str,
-    source: &Path,
-    target: &Path,
-    warnings: &mut Vec<String>,
-) -> PathBuf {
-    match fs::symlink_metadata(target) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            warnings.push(format!(
-                "private_state_target_symlink_rejected: {label}; legacy source retained"
-            ));
-            return source.to_path_buf();
-        }
-        Ok(_) => {
-            if fs::symlink_metadata(source).is_ok() {
-                if verify_tree(source, target).is_ok() {
-                    if let Some(parent) = target.parent() {
-                        if let Err(error) = sync_dir(parent) {
-                            warnings.push(format!(
-                                "private_state_target_sync_failed: {label}: {error}"
-                            ));
-                            return source.to_path_buf();
-                        }
-                    }
-                    if let Err(error) = remove_dir_and_sync(source) {
-                        warnings.push(format!(
-                            "private_state_legacy_cleanup_failed: {label}: {error}"
-                        ));
-                    }
-                } else {
-                    warnings.push(format!(
-                        "private_state_conflict: {label} target already exists; legacy source retained"
-                    ));
-                }
-            }
-            return target.to_path_buf();
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            warnings.push(format!(
-                "private_state_target_check_failed: {label}: {error}"
-            ));
-            return source.to_path_buf();
-        }
-    }
-    if !source.exists() {
-        return target.to_path_buf();
-    }
-
-    let result = (|| -> Result<()> {
-        let metadata = fs::symlink_metadata(source)?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(anyhow!("legacy_source_not_directory"));
-        }
-        let parent = target
-            .parent()
-            .ok_or_else(|| anyhow!("private_state_parent_missing"))?;
-        ensure_private_dir(parent)?;
-        let tmp = parent.join(format!(".{label}-migrate-{}.tmp", Uuid::new_v4().simple()));
-        let attempt = (|| -> Result<()> {
-            copy_tree(source, &tmp)?;
-            verify_tree(source, &tmp)?;
-            sync_dir(&tmp)?;
-            fs::rename(&tmp, target)?;
-            sync_dir(parent)?;
-            Ok(())
-        })();
-        if attempt.is_err() {
-            let _ = fs::remove_dir_all(&tmp);
-        }
-        attempt?;
-        if let Err(error) = remove_dir_and_sync(source) {
-            warnings.push(format!(
-                "private_state_legacy_cleanup_failed: {label}: {error}"
-            ));
-        }
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => target.to_path_buf(),
-        Err(error) => {
-            warnings.push(format!("private_state_migration_failed: {label}: {error}"));
-            source.to_path_buf()
-        }
-    }
-}
-
-fn copy_tree(source: &Path, target: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(source)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(anyhow!("migration_tree_invalid"));
-    }
-    fs::create_dir(target)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source_path)?;
-        if metadata.file_type().is_symlink() {
-            return Err(anyhow!("migration_symlink_rejected"));
-        }
-        if metadata.is_dir() {
-            copy_tree(&source_path, &target_path)?;
-        } else if metadata.is_file() {
-            fs::copy(&source_path, &target_path)?;
-            fs::set_permissions(&target_path, metadata.permissions())?;
-            sync_file(&target_path)?;
-        } else {
-            return Err(anyhow!("migration_special_file_rejected"));
-        }
-    }
-    sync_dir(target)?;
-    Ok(())
-}
-
-fn verify_tree(source: &Path, target: &Path) -> Result<()> {
-    let source_metadata = fs::symlink_metadata(source)?;
-    let target_metadata = fs::symlink_metadata(target)?;
-    if source_metadata.file_type().is_symlink()
-        || target_metadata.file_type().is_symlink()
-        || !source_metadata.is_dir()
-        || !target_metadata.is_dir()
-    {
-        return Err(anyhow!("migration_verification_mismatch"));
-    }
-    let mut source_names = fs::read_dir(source)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    let mut target_names = fs::read_dir(target)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    source_names.sort();
-    target_names.sort();
-    if source_names != target_names {
-        return Err(anyhow!("migration_verification_mismatch"));
-    }
-    for name in source_names {
-        let source_path = source.join(&name);
-        let target_path = target.join(&name);
-        let source_metadata = fs::symlink_metadata(&source_path)?;
-        let target_metadata = fs::symlink_metadata(&target_path)?;
-        if source_metadata.file_type().is_symlink() || target_metadata.file_type().is_symlink() {
-            return Err(anyhow!("migration_symlink_rejected"));
-        }
-        if source_metadata.is_dir() && target_metadata.is_dir() {
-            verify_tree(&source_path, &target_path)?;
-        } else if source_metadata.is_file() && target_metadata.is_file() {
-            verify_file(&source_path, &target_path)?;
-        } else {
-            return Err(anyhow!("migration_verification_mismatch"));
-        }
-    }
-    Ok(())
-}
-
-fn verify_file(source: &Path, target: &Path) -> Result<()> {
-    let source_metadata = fs::symlink_metadata(source)?;
-    let target_metadata = fs::symlink_metadata(target)?;
-    if source_metadata.file_type().is_symlink()
-        || target_metadata.file_type().is_symlink()
-        || !source_metadata.is_file()
-        || !target_metadata.is_file()
-        || source_metadata.len() != target_metadata.len()
-        || fs::read(source)? != fs::read(target)?
-    {
-        return Err(anyhow!("migration_verification_mismatch"));
-    }
-    Ok(())
-}
-
-fn agent_state_key(agent_id: &str) -> Result<String> {
-    if agent_id.trim().is_empty() {
-        return Err(anyhow!("private_state_agent_id_required"));
-    }
-    if agent_id.len() <= 128
-        && agent_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-    {
-        return Ok(agent_id.to_string());
-    }
-    let digest = Sha256::digest(agent_id.as_bytes());
-    let hex = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok(format!("id-{hex}"))
-}
-fn sync_file(path: &Path) -> Result<()> {
-    fs::File::open(path)?.sync_all()?;
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -394,10 +39,16 @@ fn sync_dir(_path: &Path) -> Result<()> {
 }
 
 fn ensure_private_dir(path: &Path) -> Result<()> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(anyhow!("private_state_directory_symlink"));
         }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(anyhow!("private_state_directory_unavailable"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     fs::create_dir_all(path).map_err(|_| anyhow!("private_state_directory_unavailable"))?;
     #[cfg(unix)]
@@ -409,45 +60,14 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn set_private_file(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|_| anyhow!("private_state_file_unavailable"))?;
-    }
-    Ok(())
-}
-
-fn remove_file_and_sync(path: &Path) -> Result<()> {
-    fs::remove_file(path)?;
-    if let Some(parent) = path.parent() {
-        sync_dir(parent)?;
-    }
-    Ok(())
-}
-
-fn remove_dir_and_sync(path: &Path) -> Result<()> {
-    fs::remove_dir_all(path)?;
-    if let Some(parent) = path.parent() {
-        sync_dir(parent)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 impl PrivateStatePaths {
     pub(crate) fn for_test(root: PathBuf) -> Self {
-        Self::for_test_agent(root, "test-agent".to_string())
-    }
-
-    pub(crate) fn for_test_agent(root: PathBuf, agent_id: String) -> Self {
         ensure_private_dir(&root).expect("test private-state root should be creatable");
         Self {
             active_skills: root.join("active-skills.json"),
             skill_installs: root.join("skill-installs"),
             root,
-            agent_id,
         }
     }
 }
@@ -456,204 +76,104 @@ impl PrivateStatePaths {
 mod tests {
     use super::*;
 
-    fn temp_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "agentic-private-state-{name}-{}",
-            Uuid::new_v4().simple()
-        ))
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn new(name: &str) -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "agentic-private-state-{name}-{}",
+                uuid::Uuid::new_v4().simple()
+            )))
+        }
     }
 
-    fn config_with_workspace(workspace: PathBuf) -> Config {
-        let mut config = Config::default_config().unwrap();
-        config.agent_id = "test-agent".to_string();
-        config.workspace_root = workspace;
-        config
-    }
-
-    #[test]
-    fn prepare_migrates_known_legacy_state_and_cleans_empty_root() {
-        let root = temp_root("migrate");
-        let workspace = root.join("workspace");
-        let agentic = root.join("home");
-        fs::create_dir_all(workspace.join("state/skill-installs/staging/install-1")).unwrap();
-        fs::write(
-            workspace.join("state/active-skills.json"),
-            br#"{"activeSkills":[]}"#,
-        )
-        .unwrap();
-        fs::write(
-            workspace.join("state/skill-installs/install-1.json"),
-            b"record",
-        )
-        .unwrap();
-        fs::write(
-            workspace.join("state/skill-installs/staging/install-1/file.txt"),
-            b"payload",
-        )
-        .unwrap();
-        let config = config_with_workspace(workspace.clone());
-
-        let outcome = prepare_at(&config, &agentic).unwrap();
-
-        assert!(outcome.warnings.is_empty());
-        assert!(outcome.paths.active_skills.is_file());
-        assert!(outcome
-            .paths
-            .skill_installs
-            .join("install-1.json")
-            .is_file());
-        assert!(outcome
-            .paths
-            .skill_installs
-            .join("staging/install-1/file.txt")
-            .is_file());
-        assert!(!workspace.join("state").exists());
-        let _ = fs::remove_dir_all(root);
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
-    fn prepare_is_idempotent_after_successful_migration() {
-        let root = temp_root("idempotent");
-        let workspace = root.join("workspace");
-        let agentic = root.join("home");
-        fs::create_dir_all(workspace.join("state")).unwrap();
-        fs::write(workspace.join("state/active-skills.json"), b"state").unwrap();
-        let config = config_with_workspace(workspace);
+    fn prepare_keeps_shared_state_and_leaves_legacy_state_untouched() {
+        let root = TestRoot::new("shared");
+        let agentic = root.0.join("home/.agentic_gpt");
+        let workspace_state = root.0.join("workspace/state");
+        let old_agent_state = agentic.join("state/agent/old-agent");
+        fs::create_dir_all(&workspace_state).unwrap();
+        fs::create_dir_all(&old_agent_state).unwrap();
+        fs::write(workspace_state.join("active-skills.json"), b"workspace").unwrap();
+        fs::write(old_agent_state.join("active-skills.json"), b"old-agent").unwrap();
 
-        let first = prepare_at(&config, &agentic).unwrap();
-        let second = prepare_at(&config, &agentic).unwrap();
+        let first = prepare_at(&agentic).unwrap();
+        fs::write(&first.active_skills, b"shared").unwrap();
+        let second = prepare_at(&agentic).unwrap();
 
-        assert!(first.warnings.is_empty());
-        assert!(second.warnings.is_empty());
-        assert_eq!(first.paths.active_skills, second.paths.active_skills);
-        assert_eq!(fs::read(second.paths.active_skills).unwrap(), b"state");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn identical_target_and_legacy_source_cleanup_is_self_healing() {
-        let root = temp_root("identical");
-        let workspace = root.join("workspace");
-        let agentic = root.join("home");
-        let target = agentic.join("state/agent/test-agent");
-        fs::create_dir_all(workspace.join("state")).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        fs::write(workspace.join("state/active-skills.json"), b"same").unwrap();
-        fs::write(target.join("active-skills.json"), b"same").unwrap();
-        let config = config_with_workspace(workspace.clone());
-
-        let outcome = prepare_at(&config, &agentic).unwrap();
-
-        assert!(outcome.warnings.is_empty());
-        assert!(!workspace.join("state/active-skills.json").exists());
-        assert_eq!(fs::read(outcome.paths.active_skills).unwrap(), b"same");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn target_conflict_keeps_target_and_retains_legacy_source() {
-        let root = temp_root("conflict");
-        let workspace = root.join("workspace");
-        let agentic = root.join("home");
-        let target = agentic.join("state/agent/test-agent");
-        fs::create_dir_all(workspace.join("state")).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        fs::write(workspace.join("state/active-skills.json"), b"legacy").unwrap();
-        fs::write(target.join("active-skills.json"), b"target").unwrap();
-        let config = config_with_workspace(workspace.clone());
-
-        let outcome = prepare_at(&config, &agentic).unwrap();
-
-        assert_eq!(fs::read(&outcome.paths.active_skills).unwrap(), b"target");
+        assert_eq!(first.root, agentic.join("state"));
+        assert_eq!(first.active_skills, second.active_skills);
+        assert_eq!(fs::read(second.active_skills).unwrap(), b"shared");
         assert_eq!(
-            fs::read(workspace.join("state/active-skills.json")).unwrap(),
-            b"legacy"
+            fs::read(workspace_state.join("active-skills.json")).unwrap(),
+            b"workspace"
         );
-        assert!(outcome
-            .warnings
-            .iter()
-            .any(|warning| warning.starts_with("private_state_conflict: active-skills")));
-        let _ = fs::remove_dir_all(root);
+        assert_eq!(
+            fs::read(old_agent_state.join("active-skills.json")).unwrap(),
+            b"old-agent"
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn migration_rejects_target_symlink_and_preserves_legacy_source() {
+    fn prepare_rejects_symlink_root_without_writing_the_target() {
         use std::os::unix::fs::symlink;
 
-        let root = temp_root("target-symlink");
-        let workspace = root.join("workspace");
-        let agentic = root.join("home");
-        let target_root = agentic.join("state/agent/test-agent");
-        fs::create_dir_all(workspace.join("state")).unwrap();
-        fs::create_dir_all(&target_root).unwrap();
-        let outside = root.join("outside-active-skills.json");
-        fs::write(&outside, b"outside").unwrap();
-        symlink(&outside, target_root.join("active-skills.json")).unwrap();
-        let legacy = workspace.join("state/active-skills.json");
-        fs::write(&legacy, b"legacy").unwrap();
-        let config = config_with_workspace(workspace.clone());
+        let root = TestRoot::new("symlink");
+        let agentic = root.0.join("home/.agentic_gpt");
+        let outside = root.0.join("outside");
+        fs::create_dir_all(&agentic).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("active-skills.json"), b"outside").unwrap();
+        symlink(&outside, agentic.join("state")).unwrap();
 
-        let outcome = prepare_at(&config, &agentic).unwrap();
+        let error = prepare_at(&agentic).unwrap_err();
 
-        assert_eq!(outcome.paths.active_skills, legacy);
-        assert_eq!(fs::read(&legacy).unwrap(), b"legacy");
-        assert_eq!(fs::read(&outside).unwrap(), b"outside");
-        assert!(outcome
-            .warnings
-            .iter()
-            .any(|warning| warning.starts_with("private_state_target_symlink_rejected")));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn migration_rejects_symlink_and_falls_back_to_legacy() {
-        use std::os::unix::fs::symlink;
-
-        let root = temp_root("symlink");
-        let workspace = root.join("workspace");
-        let agentic = root.join("home");
-        fs::create_dir_all(workspace.join("state/skill-installs")).unwrap();
-        fs::write(root.join("outside"), b"secret").unwrap();
-        symlink(
-            root.join("outside"),
-            workspace.join("state/skill-installs/link"),
-        )
-        .unwrap();
-        let config = config_with_workspace(workspace.clone());
-
-        let outcome = prepare_at(&config, &agentic).unwrap();
-
+        assert_eq!(error.to_string(), "private_state_directory_symlink");
         assert_eq!(
-            outcome.paths.skill_installs,
-            workspace.join("state/skill-installs")
+            fs::read(outside.join("active-skills.json")).unwrap(),
+            b"outside"
         );
-        assert!(workspace.join("state/skill-installs/link").exists());
-        assert!(outcome
-            .warnings
-            .iter()
-            .any(|warning| warning.starts_with("private_state_migration_failed: skill-installs")));
-        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepare_fails_when_state_root_is_a_file() {
+        let root = TestRoot::new("unavailable");
+        let agentic = root.0.join("home/.agentic_gpt");
+        fs::create_dir_all(&agentic).unwrap();
+        fs::write(agentic.join("state"), b"occupied").unwrap();
+
+        let error = prepare_at(&agentic).unwrap_err();
+
+        assert_eq!(error.to_string(), "private_state_directory_unavailable");
+        assert_eq!(fs::read(agentic.join("state")).unwrap(), b"occupied");
     }
 
     #[cfg(unix)]
     #[test]
-    fn private_agent_root_is_mode_0700() {
+    fn prepare_enforces_mode_0700_on_existing_shared_root() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = temp_root("permissions");
-        let workspace = root.join("workspace");
-        let agentic = root.join("home");
-        let config = config_with_workspace(workspace);
+        let root = TestRoot::new("permissions");
+        let agentic = root.0.join("home/.agentic_gpt");
+        let state = agentic.join("state");
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(state.join("active-skills.json"), b"existing").unwrap();
 
-        let outcome = prepare_at(&config, &agentic).unwrap();
-        let mode = fs::metadata(&outcome.paths.root)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o700);
-        let _ = fs::remove_dir_all(root);
+        let paths = prepare_at(&agentic).unwrap();
+
+        assert_eq!(
+            fs::metadata(&paths.root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(fs::read(paths.active_skills).unwrap(), b"existing");
     }
 }

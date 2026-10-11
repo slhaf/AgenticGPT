@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use agentic_gpt_protocol::{
-    ProcessCaptureStatus, ProcessDetail, ProcessError, ProcessInfo, ProcessKind,
-    ProcessListRequest, ProcessState,
+    ProcessCaptureStatus, ProcessError, ProcessKind, ProcessListRequest, ProcessState,
 };
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -15,12 +14,13 @@ use rusqlite::{params, types::Value, Connection, OptionalExtension, ToSql, Trans
 use serde::{Deserialize, Serialize};
 
 use crate::private_state::PrivateStatePaths;
+use crate::process_model::{ProcessDetail, ProcessInfo};
 use crate::utils::log_warn;
 
 const HISTORY_RETENTION: Duration = Duration::days(30);
 const HISTORY_CAP_BYTES: u64 = 512 * 1024 * 1024;
 const CLEANUP_INTERVAL: Duration = Duration::hours(1);
-const HISTORY_SCHEMA_VERSION: i64 = 1;
+const HISTORY_SCHEMA_VERSION: i64 = 2;
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 750;
 const MAX_INFO_JSON_BYTES: usize = 256 * 1024;
 const MAX_DETAIL_JSON_BYTES: usize = 1024 * 1024;
@@ -32,7 +32,6 @@ const MAX_ADMISSION_INFO_JSON_BYTES: usize = MAX_INFO_JSON_BYTES - TERMINAL_INFO
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS processes (
     process_id TEXT PRIMARY KEY NOT NULL,
-    agent_id TEXT NOT NULL,
     group_name TEXT,
     kind TEXT NOT NULL,
     state TEXT NOT NULL,
@@ -273,17 +272,16 @@ impl ProcessHistoryStore {
             {
                 let mut statement = transaction.prepare_cached(
                     "INSERT OR IGNORE INTO processes (
-                        process_id, agent_id, group_name, kind, state, created_at,
+                        process_id, group_name, kind, state, created_at,
                         started_at, updated_at, finished_at, info_json, detail_json,
                         stdout_bytes, stdout_start_offset, stdout_end_offset,
                         stderr_bytes, stderr_start_offset, stderr_end_offset,
                         capture_status, capture_error
-                    ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULL,X'', '0','0',X'', '0','0',?11,?12)",
+                    ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,X'', '0','0',X'', '0','0',?10,?11)",
                 )?;
                 for (info, info_json) in &admissions {
                     statement.execute(params![
                         info.process_id,
-                        info.agent_id,
                         info.group,
                         kind_label(info.kind),
                         info.state.label(),
@@ -391,14 +389,14 @@ impl ProcessHistoryStore {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let changed = transaction.execute(
                 "INSERT INTO processes (
-                    process_id, agent_id, group_name, kind, state, created_at,
+                    process_id, group_name, kind, state, created_at,
                     started_at, updated_at, finished_at, info_json, detail_json,
                     stdout_bytes, stdout_start_offset, stdout_end_offset,
                     stderr_bytes, stderr_start_offset, stderr_end_offset,
                     capture_status, capture_error
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
                 ON CONFLICT(process_id) DO UPDATE SET
-                    agent_id=excluded.agent_id, group_name=excluded.group_name,
+                    group_name=excluded.group_name,
                     kind=excluded.kind, state=excluded.state, created_at=excluded.created_at,
                     started_at=excluded.started_at, updated_at=excluded.updated_at,
                     finished_at=excluded.finished_at, info_json=excluded.info_json,
@@ -410,7 +408,6 @@ impl ProcessHistoryStore {
                 WHERE processes.state IN ('queued','waiting_confirmation','starting','running','cancel_requested')",
                 params![
                     info.process_id,
-                    info.agent_id,
                     info.group,
                     kind_label(info.kind),
                     info.state.label(),
@@ -771,30 +768,24 @@ impl ProcessHistoryStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        if !self.path.exists() {
-            let mut options = OpenOptions::new();
-            options.create_new(true).read(true).write(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+        match fs::symlink_metadata(&self.path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                publish_initialized_history_database(&self.path)?;
             }
-            match options.open(&self.path) {
-                Ok(file) => drop(file),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
+            Err(error) => return Err(error.into()),
         }
-        let mut connection = Connection::open(&self.path)?;
+        let metadata = fs::symlink_metadata(&self.path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(anyhow!("process_history_database_path_invalid"));
+        }
+        let connection =
+            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         connection.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > HISTORY_SCHEMA_VERSION {
-            return Err(anyhow!("unsupported process history schema version {version}; maximum supported {HISTORY_SCHEMA_VERSION}"));
+        if version != HISTORY_SCHEMA_VERSION {
+            return Err(anyhow!("process_history_schema_migration_required: found {version}; required {HISTORY_SCHEMA_VERSION}; run the state migration script before starting the Agent"));
         }
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute_batch(SCHEMA)?;
-        transaction.pragma_update(None, "user_version", HISTORY_SCHEMA_VERSION)?;
-        transaction.commit()?;
         Ok(connection)
     }
 
@@ -1041,7 +1032,6 @@ fn format_time(value: DateTime<Utc>) -> String {
 
 fn bounded_info(info: &ProcessInfo) -> ProcessInfo {
     let mut info = info.clone();
-    info.agent_id = truncate_text(&info.agent_id, 64 * 1024);
     info.process_id = truncate_text(&info.process_id, 64 * 1024);
     info.group = info.group.map(|value| truncate_text(&value, 64 * 1024));
     info.batch_id = info.batch_id.map(|value| truncate_text(&value, 64 * 1024));
@@ -1146,11 +1136,72 @@ pub(crate) fn decode_list_cursor(value: &str) -> Result<ProcessHistoryCursor> {
     })
 }
 
+struct UnpublishedHistoryDatabase(PathBuf);
+
+impl Drop for UnpublishedHistoryDatabase {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let mut path = self.0.as_os_str().to_os_string();
+            path.push(suffix);
+            let _ = fs::remove_file(PathBuf::from(path));
+        }
+    }
+}
+
+fn publish_initialized_history_database(path: &Path) -> Result<()> {
+    let root = path
+        .parent()
+        .ok_or_else(|| anyhow!("process_history_database_parent_missing"))?;
+    let temporary_path = root.join(format!(
+        ".process.sqlite3-init-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&temporary_path)?;
+    let temporary = UnpublishedHistoryDatabase(temporary_path);
+    let mut connection =
+        Connection::open_with_flags(&temporary.0, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(SCHEMA)?;
+    transaction.pragma_update(None, "user_version", HISTORY_SCHEMA_VERSION)?;
+    transaction.commit()?;
+    connection.close().map_err(|(_, error)| error)?;
+    file.sync_all()?;
+    drop(file);
+    // A concurrent opener may already have published its fully initialized database.
+    match fs::hard_link(&temporary.0, path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::remove_file(&temporary.0)?;
+    drop(temporary);
+    #[cfg(unix)]
+    fs::File::open(root)?.sync_all()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use uuid::Uuid;
+
+    struct TemporaryRoot(PathBuf);
+
+    impl Drop for TemporaryRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1162,7 +1213,6 @@ mod tests {
     fn info(process_id: &str, state: ProcessState) -> ProcessInfo {
         let now = Utc::now();
         ProcessInfo {
-            agent_id: "agent".to_string(),
             process_id: process_id.to_string(),
             group: Some("group-a".to_string()),
             batch_id: None,
@@ -1207,19 +1257,160 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_fresh_openers_share_only_a_fully_initialized_database() {
+        let root = TemporaryRoot(root("concurrent-fresh"));
+        let paths = PrivateStatePaths::for_test(root.0.clone());
+        let start = std::sync::Arc::new(std::sync::Barrier::new(9));
+        let workers: Vec<_> = (0..8)
+            .map(|index| {
+                let paths = paths.clone();
+                let start = std::sync::Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    let store = ProcessHistoryStore::open(&paths);
+                    assert_eq!(store.health().status, HistoryHealthStatus::Healthy);
+                    let admission = info(&format!("writer-{index}"), ProcessState::Running);
+                    assert!(store.insert_admissions([&admission]).is_persisted());
+                })
+            })
+            .collect();
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let connection = Connection::open(root.0.join("process.sqlite3")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM processes", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            HISTORY_SCHEMA_VERSION
+        );
+        drop(connection);
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(root.0.join("process.sqlite3"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
     fn opens_fresh_process_database_without_touching_legacy_jobs_database() {
-        let root = root("fresh");
-        fs::create_dir_all(&root).unwrap();
-        let legacy = root.join("jobs.sqlite3");
+        let root = TemporaryRoot(root("fresh"));
+        fs::create_dir_all(&root.0).unwrap();
+        let legacy = root.0.join("jobs.sqlite3");
         fs::write(&legacy, b"user data must remain untouched").unwrap();
-        let store = ProcessHistoryStore::open(&PrivateStatePaths::for_test(root.clone()));
-        assert_eq!(store.path(), root.join("process.sqlite3"));
+        let store = ProcessHistoryStore::open(&PrivateStatePaths::for_test(root.0.clone()));
+        assert_eq!(store.path(), root.0.join("process.sqlite3"));
         assert_eq!(
             fs::read(&legacy).unwrap(),
             b"user data must remain untouched"
         );
         assert!(store.path().exists());
-        let _ = fs::remove_dir_all(root);
+        let admission = info("process_local_history", ProcessState::Running);
+        assert!(store.insert_admissions([&admission]).is_persisted());
+        let terminal = detail(info("process_local_history", ProcessState::Completed));
+        assert!(store
+            .upsert_terminal(&terminal, &ProcessOutputSnapshot::default())
+            .is_persisted());
+        let connection = Connection::open(store.path()).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            HISTORY_SCHEMA_VERSION
+        );
+        let (info_json, detail_json): (String, String) = connection
+            .query_row(
+                "SELECT info_json,detail_json FROM processes WHERE process_id=?1",
+                params![admission.process_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(!serde_json::from_str::<serde_json::Value>(&info_json)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("agentId"));
+        assert!(
+            !serde_json::from_str::<serde_json::Value>(&detail_json).unwrap()["process"]
+                .as_object()
+                .unwrap()
+                .contains_key("agentId")
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('processes') WHERE name='agent_id'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn unsupported_history_databases_are_rejected_without_modification() {
+        for version in [0, 1, 3] {
+            let root = TemporaryRoot(root("unsupported-schema"));
+            let paths = PrivateStatePaths::for_test(root.0.clone());
+            let path = root.0.join("process.sqlite3");
+            let legacy = Connection::open(&path).unwrap();
+            legacy
+                .execute_batch(
+                    "CREATE TABLE processes (
+                        process_id TEXT PRIMARY KEY,
+                        agent_id TEXT NOT NULL,
+                        info_json TEXT NOT NULL
+                    );
+                    INSERT INTO processes VALUES ('legacy-process','old-agent','legacy-evidence');",
+                )
+                .unwrap();
+            legacy.pragma_update(None, "user_version", version).unwrap();
+            drop(legacy);
+            let original = fs::read(&path).unwrap();
+
+            let store = ProcessHistoryStore::open(&paths);
+            assert!(store
+                .get("legacy-process")
+                .unwrap_err()
+                .to_string()
+                .starts_with("process_history_schema_migration_required:"));
+            assert_eq!(store.health().status, HistoryHealthStatus::Degraded);
+            drop(store);
+
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let connection = Connection::open(&path).unwrap();
+            assert_eq!(
+                connection
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
+            assert_eq!(
+                connection
+                    .query_row("SELECT agent_id,info_json FROM processes", [], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .unwrap(),
+                ("old-agent".to_string(), "legacy-evidence".to_string())
+            );
+        }
     }
 
     #[test]

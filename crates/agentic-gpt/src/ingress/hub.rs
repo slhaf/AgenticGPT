@@ -1,6 +1,7 @@
+use crate::process_model::ProcessInfo;
 use agentic_gpt_protocol::{
     AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, EventOrigin,
-    EventResponseDisposition, EventSource, HubCommand, HubCommandEnvelope, HubMessage, ProcessInfo,
+    EventResponseDisposition, EventSource, HubCommand, HubCommandEnvelope, HubMessage,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -518,7 +519,11 @@ pub(crate) fn report_run_event(
                 reason: reason.map(|value| bounded_reason(&value)),
                 arguments,
                 result,
-                process: if full { process } else { None },
+                process: if full {
+                    process.map(|info| info.into_wire(&state.transport_agent_id))
+                } else {
+                    None
+                },
             }),
         },
     );
@@ -586,14 +591,17 @@ fn reporting_detail(state: &AppState) -> String {
         .unwrap_or_else(|| "metadata".to_string())
 }
 
-fn process_for_reporting(state: &AppState, mut process: ProcessInfo) -> ProcessInfo {
+fn process_for_reporting(
+    state: &AppState,
+    mut process: ProcessInfo,
+) -> agentic_gpt_protocol::ProcessInfo {
     if reporting_detail(state) == "metadata" {
         process.program = Some("<redacted>".to_string());
         process.args.clear();
         process.working_directory = None;
         process.command_preview = Some("<redacted>".to_string());
     }
-    process
+    process.into_wire(&state.transport_agent_id)
 }
 
 fn try_send_reporting(state: &AppState, message: AgentMessage) {
@@ -1394,14 +1402,13 @@ mod reporting_tests {
         config.agent_id = "recovery-agent".to_string();
         config.workspace_root = root.join("workspace");
         config.ensure_workspace().expect("test workspace");
-        let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
-            root.join("private-state"),
-            config.agent_id.clone(),
-        );
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
         let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
         let event_store =
             crate::event_store::EventStore::open(&private_state).expect("event store");
         AppState {
+            transport_agent_id: config.agent_id.clone(),
             config_path: root.join("agent.json"),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             private_state,

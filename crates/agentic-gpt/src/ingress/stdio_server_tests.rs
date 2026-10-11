@@ -1,3 +1,4 @@
+use crate::process_model::ProcessDetail;
 use std::{
     collections::{BTreeSet, HashMap},
     io::Cursor,
@@ -1613,7 +1614,7 @@ async fn process_read_preserves_mcp_result_states_and_complete_values() -> anyho
             json!({"processId": "process_testboot_result", "waitSeconds": 0}),
         )
         .await?;
-    assert_eq!(retained["agentId"], retained_detail.process.agent_id);
+    assert_eq!(retained["agentId"], server.state.transport_agent_id);
     assert_eq!(retained["state"], "completed");
     assert_eq!(retained["mcpResult"]["status"], "included");
     assert_eq!(retained["mcpResult"]["value"], payload);
@@ -1839,10 +1840,9 @@ async fn denied_process_batch_creates_no_processes() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn test_terminal_process() -> agentic_gpt_protocol::ProcessInfo {
+fn test_terminal_process() -> crate::process_model::ProcessInfo {
     let now = Utc::now();
-    agentic_gpt_protocol::ProcessInfo {
-        agent_id: "agent".to_string(),
+    crate::process_model::ProcessInfo {
         process_id: "process_testboot_0123456789abcdef".to_string(),
         group: None,
         batch_id: None,
@@ -3044,14 +3044,13 @@ fn test_state(profile: CapabilityProfile) -> AppState {
             "---\nid: room\nkind: entrypoint\nname: Room Bootstrap\ndescription: Test bootstrap\nschemaVersion: 1\n---\n",
         )
         .expect("bootstrap entrypoint");
-    let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
-        root.join("private-state"),
-        config.agent_id.clone(),
-    );
+    let private_state =
+        crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
     let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
     let event_store = crate::event_store::EventStore::open(&private_state).expect("event store");
     AppState {
         config_path: PathBuf::from("stdio-test-config.json"),
+        transport_agent_id: config.agent_id.clone(),
         config: Arc::new(RwLock::new(config)),
         private_state,
         event_store,

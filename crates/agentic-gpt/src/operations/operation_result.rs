@@ -1,8 +1,9 @@
+use crate::process_model::{ProcessDetail, ProcessInfo};
 use agentic_gpt_protocol::{
     EventPanel, McpBatchToolChildResponse, McpBatchToolResponse, ProcessCancelResponse,
-    ProcessCaptureStatus, ProcessDetail, ProcessError, ProcessInfo, ProcessKind,
-    ProcessListResponse, ProcessMcpResult, ProcessMcpResultStatus, ProcessResponse, ProcessState,
-    MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES,
+    ProcessCaptureStatus, ProcessError, ProcessKind, ProcessListResponse, ProcessMcpResult,
+    ProcessMcpResultStatus, ProcessResponse, ProcessState, MAX_PROCESS_RESPONSE_BYTES,
+    MIN_PROCESS_RESPONSE_BYTES,
 };
 use anyhow::{anyhow, Result};
 
@@ -96,6 +97,7 @@ fn process_error(process: &ProcessInfo, detail: &ProcessDetail) -> Option<Proces
 
 fn mcp_batch_process_response(
     detail: &ProcessDetail,
+    agent_id: &str,
     result_omitted: bool,
     include_result: bool,
 ) -> ProcessResponse {
@@ -132,7 +134,7 @@ fn mcp_batch_process_response(
             .flatten(),
     });
     ProcessResponse {
-        agent_id: process.agent_id.clone(),
+        agent_id: agent_id.to_owned(),
         process_id: process.process_id.clone(),
         kind: process.kind,
         state: process.state,
@@ -328,7 +330,12 @@ pub(crate) fn slim_mcp_batch_response(
             .map(|child| McpBatchToolChildResponse {
                 index: child.index,
                 id: child.id.clone(),
-                process: mcp_batch_process_response(&child.process, child.result_omitted, false),
+                process: mcp_batch_process_response(
+                    &child.process,
+                    &batch.transport_agent_id,
+                    child.result_omitted,
+                    false,
+                ),
             })
             .collect(),
     };

@@ -199,7 +199,6 @@ pub(crate) async fn run(
     process::start_and_wait_skill_process(
         state,
         exec::ExecutionRequest::argv(
-            config.agent_id,
             request.group,
             program.to_string_lossy().to_string(),
             request.args.unwrap_or_default(),
@@ -814,15 +813,14 @@ mod tests {
         let root = std::env::temp_dir().join(format!("agentic-skills-{}", Uuid::new_v4().simple()));
         let mut config = Config::default_config().unwrap();
         config.workspace_root = root;
-        let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
-            std::env::temp_dir().join(format!(
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(std::env::temp_dir().join(format!(
                 "agentic-test-private-{}",
                 uuid::Uuid::new_v4().simple()
-            )),
-            config.agent_id.clone(),
-        );
+            )));
         AppState {
             config_path: PathBuf::from("test-config.json"),
+            transport_agent_id: config.agent_id.clone(),
             config: Arc::new(RwLock::new(config)),
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state: private_state.clone(),

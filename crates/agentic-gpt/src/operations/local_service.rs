@@ -1,8 +1,9 @@
+use crate::process_model::ProcessInfo;
 use std::collections::HashSet;
 
 use agentic_gpt_protocol::{
     normalize_process_group, EventResponseDisposition, EventSettleRequest, EventSourceKind,
-    HubCommand, ProcessBatchExecRequest, ProcessExecRequest, ProcessInfo, ProcessReadRequest,
+    HubCommand, ProcessBatchExecRequest, ProcessExecRequest, ProcessReadRequest,
 };
 use anyhow::Result;
 

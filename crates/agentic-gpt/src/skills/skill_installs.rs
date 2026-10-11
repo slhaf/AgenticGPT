@@ -1890,6 +1890,7 @@ mod tests {
         let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
         AppState {
             config_path: PathBuf::from("test-config.json"),
+            transport_agent_id: config.agent_id.clone(),
             config: Arc::new(RwLock::new(config)),
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state: private_state.clone(),

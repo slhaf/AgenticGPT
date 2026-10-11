@@ -1,3 +1,4 @@
+use crate::process_model::{ProcessDetail, ProcessInfo};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{
@@ -9,12 +10,11 @@ use std::sync::{
 use agentic_gpt_protocol::DEFAULT_PROCESS_RESPONSE_BYTES;
 use agentic_gpt_protocol::{
     normalize_process_group, EventOrigin, EventSource, ProcessBatchExecRequest,
-    ProcessBatchResponse, ProcessCancelResponse, ProcessCaptureStatus, ProcessCursor,
-    ProcessDetail, ProcessError, ProcessExecRequest, ProcessInfo, ProcessKind, ProcessListItem,
-    ProcessListRequest, ProcessListResponse, ProcessMcpResult, ProcessMcpResultStatus,
-    ProcessOutputEncoding, ProcessOutputGap, ProcessOutputPage, ProcessOutputSegment,
-    ProcessReadRequest, ProcessReadView, ProcessResponse, ProcessState, MAX_PROCESS_RESPONSE_BYTES,
-    MIN_PROCESS_RESPONSE_BYTES,
+    ProcessBatchResponse, ProcessCancelResponse, ProcessCaptureStatus, ProcessCursor, ProcessError,
+    ProcessExecRequest, ProcessKind, ProcessListItem, ProcessListRequest, ProcessListResponse,
+    ProcessMcpResult, ProcessMcpResultStatus, ProcessOutputEncoding, ProcessOutputGap,
+    ProcessOutputPage, ProcessOutputSegment, ProcessReadRequest, ProcessReadView, ProcessResponse,
+    ProcessState, MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES,
 };
 use anyhow::Result;
 use base64::{
@@ -327,7 +327,6 @@ pub(crate) struct ManagedProcessSpec {
 }
 
 pub(crate) struct ManagedMcpSpec {
-    pub(crate) agent_id: String,
     pub(crate) group: Option<String>,
     pub(crate) batch_id: Option<String>,
     pub(crate) batch_call_id: Option<String>,
@@ -536,7 +535,6 @@ pub(crate) async fn register_mcp_process(
     let process_id = state.new_process_id();
     let now = Utc::now();
     let info = ProcessInfo {
-        agent_id: spec.agent_id,
         process_id: process_id.clone(),
         group,
         batch_id: spec.batch_id.clone(),
@@ -671,7 +669,6 @@ pub(crate) async fn register_mcp_batch(
     for spec in specs {
         let group = validated_group(spec.group.as_deref())?;
         let info = ProcessInfo {
-            agent_id: spec.agent_id.clone(),
             process_id: state.new_process_id(),
             group,
             batch_id: spec.batch_id.clone(),
@@ -1466,6 +1463,7 @@ fn response_error(process: &ProcessInfo, detail: &ProcessDetail) -> Option<Proce
 
 fn process_response_base(
     observation: ProcessObservation,
+    agent_id: &str,
     view: ProcessReadView,
     wait_elapsed_ms: u64,
 ) -> (
@@ -1485,7 +1483,7 @@ fn process_response_base(
     let mcp_result =
         (include_artifacts && process.kind == ProcessKind::Mcp).then(|| process_mcp_result(detail));
     let response = ProcessResponse {
-        agent_id: process.agent_id.clone(),
+        agent_id: agent_id.to_owned(),
         process_id: process.process_id.clone(),
         kind: process.kind,
         state: process.state,
@@ -1513,13 +1511,14 @@ fn process_response_base(
 
 fn managed_response_from_observation(
     observation: ProcessObservation,
+    agent_id: &str,
     view: ProcessReadView,
     cursor: Option<ProcessCursor>,
     wait_elapsed_ms: u64,
     response_budget: usize,
 ) -> Result<ManagedProcessResponse, String> {
     let (mut response, process, output, fallback_result_preview) =
-        process_response_base(observation, view, wait_elapsed_ms);
+        process_response_base(observation, agent_id, view, wait_elapsed_ms);
     fit_process_response(
         &mut response,
         output.as_ref(),
@@ -1551,6 +1550,7 @@ async fn response_after_process_wait(
     };
     managed_response_from_observation(
         observation,
+        &state.transport_agent_id,
         ProcessReadView::Auto,
         None,
         started.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -1565,7 +1565,7 @@ pub(crate) async fn start_and_wait_process(
 ) -> Result<ManagedProcessResponse, String> {
     let group = validated_group(request.group.as_deref())?;
     ensure_process_response_fits(
-        &request.agent_id,
+        &state.transport_agent_id,
         group.as_deref(),
         ProcessKind::Command,
         &state.boot_generation,
@@ -1588,7 +1588,7 @@ pub(crate) async fn start_and_wait_skill_process(
 ) -> Result<ManagedProcessResponse, String> {
     let group = validated_group(request.group.as_deref())?;
     ensure_process_response_fits(
-        &request.agent_id,
+        &state.transport_agent_id,
         group.as_deref(),
         ProcessKind::Skill,
         &state.boot_generation,
@@ -1640,7 +1640,7 @@ pub(crate) async fn start_process_batch(
     }
     ensure_process_batch_response_fits(
         &batch_id,
-        &request.agent_id,
+        &state.transport_agent_id,
         group.as_deref(),
         &state.boot_generation,
         request.elements.len(),
@@ -1708,7 +1708,6 @@ pub(crate) async fn start_process_batch(
         .into_iter()
         .map(|element| ManagedProcessSpec {
             request: exec::ExecutionRequest {
-                agent_id: request.agent_id.clone(),
                 group: group.clone(),
                 execution: exec::ExecutionSpec::Shell {
                     command: element.command,
@@ -1747,8 +1746,12 @@ pub(crate) async fn start_process_batch(
         let observation = get_process_observation(&state, &process.process_id, true).await?;
         all_terminal &= observation.process.state.is_terminal();
         all_completed &= observation.process.state == ProcessState::Completed;
-        let (response, snapshot, output, _) =
-            process_response_base(observation, ProcessReadView::Auto, wait_elapsed_ms);
+        let (response, snapshot, output, _) = process_response_base(
+            observation,
+            &state.transport_agent_id,
+            ProcessReadView::Auto,
+            wait_elapsed_ms,
+        );
         response_processes.push(response);
         snapshots.push(snapshot);
         outputs.push(output);
@@ -2372,7 +2375,6 @@ fn process_info(
         ),
     };
     ProcessInfo {
-        agent_id: request.agent_id.clone(),
         process_id,
         group: validated_group(request.group.as_deref()).ok().flatten(),
         batch_id: None,
@@ -3784,6 +3786,7 @@ async fn get_process_read_with_budget(
     validate_read_cursor(&observation, cursor.as_ref())?;
     managed_response_from_observation(
         observation,
+        &state.transport_agent_id,
         request.view,
         cursor,
         started.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -4555,6 +4558,7 @@ mod tests {
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let mut config = Config::default_config().unwrap();
+        config.agent_id = "test-agent".to_string();
         config.workspace_root = workspace.clone();
         config.shell.init_file = crate::config::ShellInitFile::Disabled;
         config.limits.max_active_processes =
@@ -4579,6 +4583,7 @@ mod tests {
         let private_state =
             crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
         let state = AppState {
+            transport_agent_id: config.agent_id.clone(),
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
@@ -4662,7 +4667,6 @@ mod tests {
 
     fn mcp_spec(tool_name: &str) -> ManagedMcpSpec {
         ManagedMcpSpec {
-            agent_id: "test-agent".to_string(),
             group: Some("batch-group".to_string()),
             batch_id: Some("batch-test".to_string()),
             batch_call_id: Some(format!("call-{tool_name}")),
@@ -4691,7 +4695,6 @@ mod tests {
         let started_at = Some(created_at + chrono::Duration::milliseconds(1));
         let updated_at = created_at + chrono::Duration::milliseconds(2);
         ProcessInfo {
-            agent_id: "test-agent".to_string(),
             process_id: process_id.to_string(),
             group: group.map(str::to_string),
             batch_id: None,
@@ -5482,7 +5485,12 @@ mod tests {
             let observation = get_process_observation(&state, &child.process_id, true)
                 .await
                 .unwrap();
-            let (base, _, output, _) = process_response_base(observation, ProcessReadView::Auto, 0);
+            let (base, _, output, _) = process_response_base(
+                observation,
+                &state.transport_agent_id,
+                ProcessReadView::Auto,
+                0,
+            );
             *child = base;
             outputs.push(output);
         }

@@ -396,8 +396,8 @@ mod tests {
     #[tokio::test]
     async fn bind_rejects_symlink_runtime_directory() {
         let root = std::env::temp_dir().join(format!(
-            "agentic-local-mcp-symlink-{}",
-            uuid::Uuid::new_v4()
+            "alm-symlink-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..16]
         ));
         let target = root.join("target");
         let linked = root.join("linked");
