@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::process::CommandExt;
 use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -15,8 +16,10 @@ use uuid::Uuid;
 
 #[test]
 fn hidden_worker_recovers_stale_tunnel_session_before_first_call() {
-    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
+    let root =
+        PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
+    let _root_cleanup = RootCleanup(root.clone());
     let result = run_stdio_resume(&root);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
@@ -24,8 +27,10 @@ fn hidden_worker_recovers_stale_tunnel_session_before_first_call() {
 
 #[test]
 fn hidden_worker_reloads_policy_path_limit_and_mcp_without_restart() {
-    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
+    let root =
+        PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
+    let _root_cleanup = RootCleanup(root.clone());
     let result = run_live_reload(&root);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
@@ -33,8 +38,10 @@ fn hidden_worker_reloads_policy_path_limit_and_mcp_without_restart() {
 
 #[test]
 fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
-    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
+    let root =
+        PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
+    let _root_cleanup = RootCleanup(root.clone());
     let result = run_smoke(&root, "normal", false, false);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
@@ -42,8 +49,10 @@ fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
 
 #[test]
 fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
-    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
+    let root =
+        PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
+    let _root_cleanup = RootCleanup(root.clone());
     let result = run_smoke(&root, "room", true, false);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
@@ -51,8 +60,10 @@ fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
 
 #[test]
 fn supervised_journal_mode_omits_agentic_inner_timestamp() {
-    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
+    let root =
+        PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
+    let _root_cleanup = RootCleanup(root.clone());
     let result = run_smoke(&root, "normal", true, false);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
@@ -60,8 +71,10 @@ fn supervised_journal_mode_omits_agentic_inner_timestamp() {
 
 #[test]
 fn supervised_invalid_config_warning_is_supervisor_owned() {
-    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
+    let root =
+        PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
+    let _root_cleanup = RootCleanup(root.clone());
     let result = run_smoke(&root, "normal", true, true);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
@@ -90,9 +103,9 @@ fn run_smoke(
     let response_path = root.join("worker-response.jsonl");
     let worker_stderr_path = root.join("worker.stderr");
     let marker_path = root.join("tool-complete");
-    let agent_id = short_agent_id();
+    let agent_id = short_agent_id(root);
 
-    let init = Command::new(&binary)
+    let init = fixture_command(&binary, root)
         .args([
             "config",
             "--config",
@@ -148,6 +161,10 @@ fn run_smoke(
     .map_err(|error| error.to_string())?;
 
     let (health_port, stop_health, health_thread) = start_health_server()?;
+    let mut health_cleanup = HealthCleanup {
+        stop: stop_health,
+        thread: Some(health_thread),
+    };
     let script = fake_tunnel_script(
         health_port,
         &response_path,
@@ -158,7 +175,7 @@ fn run_smoke(
     fs::set_permissions(&fake_tunnel, fs::Permissions::from_mode(0o755))
         .map_err(|error| error.to_string())?;
 
-    let mut supervisor_command = Command::new(&binary);
+    let mut supervisor_command = fixture_command(&binary, root);
     supervisor_command
         .args(["run", "--config", config_path.to_str().unwrap()])
         .stdout(Stdio::null())
@@ -166,9 +183,11 @@ fn run_smoke(
     if journal_mode {
         supervisor_command.env("JOURNAL_STREAM", "9:9");
     }
-    let mut supervisor = supervisor_command
-        .spawn()
-        .map_err(|error| format!("supervisor failed to spawn: {error}"))?;
+    let mut supervisor = GuardChild(Some(
+        supervisor_command
+            .spawn()
+            .map_err(|error| format!("supervisor failed to spawn: {error}"))?,
+    ));
 
     if invalid_config_probe {
         thread::sleep(Duration::from_millis(300));
@@ -178,8 +197,7 @@ fn run_smoke(
 
     let completed = wait_for_marker(&mut supervisor, &marker_path);
     stop_supervisor(&mut supervisor);
-    stop_health.store(true, Ordering::Release);
-    let _ = health_thread.join();
+    health_cleanup.stop();
     let supervisor_stderr = supervisor
         .stderr
         .take()
@@ -271,7 +289,7 @@ fn run_stdio_resume(root: &Path) -> Result<(), String> {
 
     let config_path = root.join("config.json");
     let workspace = root.join("workspace");
-    let init = Command::new(&binary)
+    let init = fixture_command(&binary, root)
         .args([
             "config",
             "--config",
@@ -292,7 +310,7 @@ fn run_stdio_resume(root: &Path) -> Result<(), String> {
     let mut config: Value =
         serde_json::from_str(&fs::read_to_string(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-    config["agentId"] = Value::String(short_agent_id());
+    config["agentId"] = Value::String(short_agent_id(root));
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
     config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);
     config["tunnel"] = json!({
@@ -307,22 +325,24 @@ fn run_stdio_resume(root: &Path) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
 
     let token = "stdio-resume-token";
-    let mut worker = Command::new(&binary)
-        .args([
-            "stdio-worker",
-            "--config",
-            config_path.to_str().unwrap(),
-            "--profile",
-            "normal",
-            "--supervisor-token",
-            token,
-        ])
-        .env("AGENTIC_GPT_SUPERVISOR_TOKEN", token)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("worker failed to spawn: {error}"))?;
+    let mut worker = GuardChild(Some(
+        fixture_command(&binary, root)
+            .args([
+                "stdio-worker",
+                "--config",
+                config_path.to_str().unwrap(),
+                "--profile",
+                "normal",
+                "--supervisor-token",
+                token,
+            ])
+            .env("AGENTIC_GPT_SUPERVISOR_TOKEN", token)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("worker failed to spawn: {error}"))?,
+    ));
     let mut stdin = worker.stdin.take().ok_or("worker stdin unavailable")?;
     let stdout = worker.stdout.take().ok_or("worker stdout unavailable")?;
     let mut stdout = BufReader::new(stdout);
@@ -407,7 +427,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
 
     let config_path = root.join("config.json");
     let workspace = root.join("workspace");
-    let init = Command::new(&binary)
+    let init = fixture_command(&binary, root)
         .args([
             "config",
             "--config",
@@ -429,7 +449,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     let mut config: Value =
         serde_json::from_str(&fs::read_to_string(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-    let agent_id = short_agent_id();
+    let agent_id = short_agent_id(root);
     config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
     config["shell"]["initFile"] = Value::Null;
@@ -463,22 +483,24 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
 
     let token = "live-reload-token";
-    let mut worker = Command::new(&binary)
-        .args([
-            "stdio-worker",
-            "--config",
-            config_path.to_str().unwrap(),
-            "--profile",
-            "normal",
-            "--supervisor-token",
-            token,
-        ])
-        .env("AGENTIC_GPT_SUPERVISOR_TOKEN", token)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("worker failed to spawn: {error}"))?;
+    let mut worker = GuardChild(Some(
+        fixture_command(&binary, root)
+            .args([
+                "stdio-worker",
+                "--config",
+                config_path.to_str().unwrap(),
+                "--profile",
+                "normal",
+                "--supervisor-token",
+                token,
+            ])
+            .env("AGENTIC_GPT_SUPERVISOR_TOKEN", token)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("worker failed to spawn: {error}"))?,
+    ));
     let mut stdin = worker.stdin.take().ok_or("worker stdin unavailable")?;
     let stdout = worker.stdout.take().ok_or("worker stdout unavailable")?;
     let mut stdout = BufReader::new(stdout);
@@ -507,9 +529,9 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         }),
     )?;
 
-    let socket_path = local_socket_path(&agent_id)?;
+    let socket_path = local_socket_path(root, &agent_id)?;
     wait_for_unix_socket(&socket_path, Duration::from_secs(5))?;
-    let local_tools = Command::new(&binary)
+    let local_tools = fixture_command(&binary, root)
         .args(["local", "list-tools", "--config"])
         .arg(&config_path)
         .output()
@@ -529,7 +551,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         .iter()
         .all(|tool| tool["_meta"]["surface"] == "agent-local"));
 
-    let local_info = Command::new(&binary)
+    let local_info = fixture_command(&binary, root)
         .args(["local", "call", "agent.info", "--config"])
         .arg(&config_path)
         .args(["--arguments", "{}"])
@@ -946,14 +968,16 @@ fn start_health_server() -> Result<(u16, Arc<AtomicBool>, thread::JoinHandle<()>
 }
 
 fn respond_health(stream: &mut TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     let mut request = [0u8; 1024];
     let _ = stream.read(&mut request);
     let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
     let _ = stream.write_all(response);
 }
 
-fn short_agent_id() -> String {
-    let fixed_path_bytes = local_socket_path("x")
+fn short_agent_id(root: &Path) -> String {
+    let fixed_path_bytes = local_socket_path(root, "x")
         .expect("HOME is required")
         .as_os_str()
         .as_bytes()
@@ -969,9 +993,9 @@ fn short_agent_id() -> String {
     agent_id
 }
 
-fn local_socket_path(agent_id: &str) -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
-    Ok(PathBuf::from(home)
+fn local_socket_path(root: &Path, agent_id: &str) -> Result<PathBuf, String> {
+    Ok(root
+        .join("h")
         .join(".agentic_gpt/runtime/agent")
         .join(agent_id)
         .join("mcp.sock"))
@@ -1016,7 +1040,13 @@ fn stop_child_gracefully(child: &mut Child, duration: Duration) {
         }
         thread::sleep(Duration::from_millis(25));
     }
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
     let _ = child.kill();
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
     let _ = child.wait();
 }
 
@@ -1037,16 +1067,97 @@ fn wait_for_marker(supervisor: &mut Child, marker: &Path) -> Result<(), String> 
 fn stop_supervisor(supervisor: &mut Child) {
     if supervisor.try_wait().ok().flatten().is_none() {
         unsafe {
-            libc::kill(supervisor.id() as i32, libc::SIGINT);
+            libc::kill(-(supervisor.id() as i32), libc::SIGINT);
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if supervisor.try_wait().ok().flatten().is_some() {
+                unsafe {
+                    libc::kill(-(supervisor.id() as i32), libc::SIGKILL);
+                }
+                let _ = supervisor.wait();
                 return;
             }
             thread::sleep(Duration::from_millis(50));
         }
+        unsafe {
+            libc::kill(-(supervisor.id() as i32), libc::SIGKILL);
+        }
         let _ = supervisor.kill();
     }
+    unsafe {
+        libc::kill(-(supervisor.id() as i32), libc::SIGKILL);
+    }
     let _ = supervisor.wait();
+}
+
+fn fixture_command(binary: &Path, root: &Path) -> Command {
+    let mut command = Command::new(binary);
+    command.process_group(0);
+    for (name, directory) in [
+        ("HOME", "h"),
+        ("XDG_CONFIG_HOME", "c"),
+        ("XDG_DATA_HOME", "d"),
+        ("XDG_CACHE_HOME", "k"),
+        ("XDG_RUNTIME_DIR", "r"),
+        ("TMPDIR", "t"),
+    ] {
+        let path = root.join(directory);
+        fs::create_dir_all(&path).expect("fixture environment directory");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("private fixture environment directory");
+        command.env(name, path);
+    }
+    command.env_remove("TMUX");
+    command.env("TMUX_TMPDIR", root.join("r"));
+    command
+}
+
+struct RootCleanup(PathBuf);
+
+impl Drop for RootCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct GuardChild(Option<Child>);
+
+impl std::ops::Deref for GuardChild {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("owned child")
+    }
+}
+
+impl std::ops::DerefMut for GuardChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("owned child")
+    }
+}
+
+impl Drop for GuardChild {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            stop_child_gracefully(child, Duration::from_secs(2));
+        }
+    }
+}
+
+struct HealthCleanup {
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+impl HealthCleanup {
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+impl Drop for HealthCleanup {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }

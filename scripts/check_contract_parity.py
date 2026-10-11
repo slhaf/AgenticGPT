@@ -2903,7 +2903,7 @@ def run_hub_event_gate(
         lambda: normal_process.diagnostics().count("live config reloaded;") > reload_count,
         "Hub event producer policy", "the Agent to apply fixture policy", process=normal_process,
     )
-    event_db = Path(normal_env["HOME"]) / ".agentic_gpt" / "state" / "agent" / normal_id / "events.sqlite3"
+    event_db = Path(normal_env["HOME"]) / ".agentic_gpt" / "state" / "events.sqlite3"
 
     def start_event_process(name: str) -> str:
         response, started = hub_json(
@@ -3947,7 +3947,7 @@ def run_hub_feedback_delta_recovery_gate(
     }
     if not all(isinstance(value, str) and value for value in origin.values()):
         fail(scenario, f"actual process.batch envelope omitted its durable origin: {envelope}")
-    event_db_path = Path(env["HOME"]) / ".agentic_gpt" / "state" / "agent" / agent_id / "events.sqlite3"
+    event_db_path = Path(env["HOME"]) / ".agentic_gpt" / "state" / "events.sqlite3"
 
     def terminal_sources_awaiting() -> bool:
         rows = read_internal_source_rows(event_db_path, origin["runId"], origin["requestId"], origin["commandHash"])
@@ -4220,8 +4220,6 @@ def run_hub_agent_crash_recovery_gate(
         Path(env["HOME"])
         / ".agentic_gpt"
         / "state"
-        / "agent"
-        / agent_id
         / "events.sqlite3"
     )
 

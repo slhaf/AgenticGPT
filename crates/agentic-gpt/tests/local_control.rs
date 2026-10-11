@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
@@ -10,8 +11,10 @@ use uuid::Uuid;
 
 #[test]
 fn local_runtime_cli_exercises_real_unix_mcp_surface() {
-    let root = std::env::temp_dir().join(format!("agentic-local-control-e2e-{}", Uuid::new_v4()));
+    let root =
+        PathBuf::from("/tmp").join(format!("al-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
+    let _root_cleanup = RootCleanup(root.clone());
     let result = run_local_e2e(&root);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
@@ -22,7 +25,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     let config_path = root.join("config.json");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
-    command(&binary)
+    command(&binary, root)
         .args(["config", "--config"])
         .arg(&config_path)
         .args(["init", "--non-interactive"])
@@ -33,7 +36,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         .then_some(())
         .ok_or("config init failed")?;
 
-    let agent_id = format!("local-e2e-{}", Uuid::new_v4().simple());
+    let agent_id = format!("local-{}", &Uuid::new_v4().simple().to_string()[..16]);
     let mut config: Value =
         serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
@@ -63,11 +66,12 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     fs::write(workspace.join("ranged.txt"), "one\ntwo\nthree\nfour\n")
         .map_err(|error| error.to_string())?;
 
-    let socket_path = home_dir()
+    let socket_path = root
+        .join("h")
         .join(".agentic_gpt/runtime/agent")
         .join(&agent_id)
         .join("mcp.sock");
-    let mut server = command(&binary)
+    let mut server = command(&binary, root)
         .args(["run", "--config"])
         .arg(&config_path)
         .stdout(Stdio::null())
@@ -131,15 +135,17 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         return Err("agent.info local readiness mismatch".to_string());
     }
 
-    let mut ranged = command(&binary)
-        .args(["local", "--config"])
-        .arg(&config_path)
-        .args(["call", "file.read", "--arguments-file", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| error.to_string())?;
+    let mut ranged = GuardChild(Some(
+        command(&binary, root)
+            .args(["local", "--config"])
+            .arg(&config_path)
+            .args(["call", "file.read", "--arguments-file", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| error.to_string())?,
+    ));
     ranged
         .stdin
         .as_mut()
@@ -147,6 +153,9 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         .write_all(br#"{"path":"ranged.txt","startLine":2,"endLine":3}"#)
         .map_err(|error| error.to_string())?;
     let ranged = ranged
+        .0
+        .take()
+        .expect("owned CLI child")
         .wait_with_output()
         .map_err(|error| error.to_string())?;
     ensure_success(&ranged, "ranged local call")?;
@@ -319,7 +328,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         return Err("guarded local process was not rejected".to_string());
     }
 
-    let second = command(&binary)
+    let second = command(&binary, root)
         .args(["run", "--config"])
         .arg(&config_path)
         .output()
@@ -372,7 +381,7 @@ fn local_output_raw<const N: usize>(
     config: &Path,
     args: [&str; N],
 ) -> Result<Output, String> {
-    command(binary)
+    command(binary, config.parent().expect("fixture config parent"))
         .args(["local", "--config"])
         .arg(config)
         .args(args)
@@ -421,13 +430,16 @@ fn signal_and_wait(child: &mut Child, signal: i32, duration: Duration) -> Result
         }
         thread::sleep(Duration::from_millis(25));
     }
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
     let _ = child.kill();
     let _ = child.wait();
     Err("local runtime did not stop after shutdown signal".to_string())
 }
 
-fn command(binary: &Path) -> Command {
-    let mut command = Command::new(binary);
+fn command(binary: &Path, root: &Path) -> Command {
+    let mut command = fixture_command(binary, root);
     command.env_remove("AGENTIC_SUPERVISOR_TOKEN");
     command
 }
@@ -441,12 +453,6 @@ fn binary_path() -> PathBuf {
         })
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .expect("HOME is required for local control E2E")
-}
-
 struct LocalCleanup<'a> {
     child: &'a mut Child,
     socket_root: PathBuf,
@@ -457,10 +463,69 @@ impl Drop for LocalCleanup<'_> {
         if self.child.try_wait().ok().flatten().is_none() {
             // SAFETY: child.id() is the process owned by this guard.
             unsafe {
-                libc::kill(self.child.id() as i32, libc::SIGKILL);
+                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
             }
             let _ = self.child.wait();
         }
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        let _ = self.child.wait();
         let _ = fs::remove_dir_all(&self.socket_root);
+    }
+}
+
+fn fixture_command(binary: &Path, root: &Path) -> Command {
+    let mut command = Command::new(binary);
+    command.process_group(0);
+    for (name, directory) in [
+        ("HOME", "h"),
+        ("XDG_CONFIG_HOME", "c"),
+        ("XDG_DATA_HOME", "d"),
+        ("XDG_CACHE_HOME", "k"),
+        ("XDG_RUNTIME_DIR", "r"),
+        ("TMPDIR", "t"),
+    ] {
+        let path = root.join(directory);
+        fs::create_dir_all(&path).expect("fixture environment directory");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("private fixture environment directory");
+        command.env(name, path);
+    }
+    command.env_remove("TMUX");
+    command.env("TMUX_TMPDIR", root.join("r"));
+    command
+}
+
+struct RootCleanup(PathBuf);
+
+impl Drop for RootCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct GuardChild(Option<Child>);
+
+impl std::ops::Deref for GuardChild {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("owned child")
+    }
+}
+impl std::ops::DerefMut for GuardChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("owned child")
+    }
+}
+impl Drop for GuardChild {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }

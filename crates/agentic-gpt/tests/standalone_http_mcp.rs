@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -1321,9 +1322,9 @@ struct TempRoot {
 }
 
 impl TempRoot {
-    fn new(label: &str) -> Result<Self, String> {
-        let path =
-            std::env::temp_dir().join(format!("agentic-http-mcp-{label}-{}", Uuid::new_v4()));
+    fn new(_label: &str) -> Result<Self, String> {
+        let path = PathBuf::from("/tmp")
+            .join(format!("ah-{}", &Uuid::new_v4().simple().to_string()[..16]));
         fs::create_dir_all(&path).map_err(|error| error.to_string())?;
         Ok(Self { path })
     }
@@ -1441,7 +1442,7 @@ fn spawn_worker_with_public_url(
     }
     let config_path = root.join("config.json");
     let workspace = root.join("workspace");
-    let init = Command::new(&binary)
+    let init = fixture_command(&binary, root)
         .args([
             "config",
             "--config",
@@ -1460,7 +1461,7 @@ fn spawn_worker_with_public_url(
         ));
     }
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
-    let agent_id = format!("http-mcp-{}", Uuid::new_v4().simple());
+    let agent_id = format!("http-{}", &Uuid::new_v4().simple().to_string()[..16]);
     let mut config: Value =
         serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
@@ -1495,7 +1496,7 @@ fn spawn_worker_with_public_url(
     write_config(&config_path, &config)?;
 
     let supervisor_token = format!("supervisor-http-mcp-{}", Uuid::new_v4().simple());
-    let mut command = Command::new(&binary);
+    let mut command = fixture_command(&binary, root);
     command
         .args([
             "stdio-worker",
@@ -1516,9 +1517,11 @@ fn spawn_worker_with_public_url(
     for (name, value) in environment {
         command.env(name, value);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("worker failed to spawn: {error}"))?;
+    let mut child = GuardChild(Some(
+        command
+            .spawn()
+            .map_err(|error| format!("worker failed to spawn: {error}"))?,
+    ));
     let stdout = child
         .stdout
         .take()
@@ -1547,10 +1550,10 @@ fn spawn_worker_with_public_url(
         .stdin
         .take()
         .ok_or_else(|| "worker stdin unavailable".to_string())?;
-    let socket_path = local_socket_path(&agent_id)?;
+    let socket_path = local_socket_path(root, &agent_id)?;
     Ok((
         WorkerFixture {
-            child,
+            child: child.0.take().expect("owned fixture child"),
             stdin: Some(stdin),
             stdout: stdout_rx,
             stdout_thread: Some(stdout_thread),
@@ -2366,7 +2369,7 @@ fn wait_for_local_tools(binary: &Path, config_path: &Path) -> Result<Value, Stri
     let deadline = Instant::now() + OPERATION_TIMEOUT;
     let mut last_error = String::new();
     while Instant::now() < deadline {
-        match Command::new(binary)
+        match fixture_command(binary, config_path.parent().expect("fixture config parent"))
             .args(["local", "list-tools", "--config"])
             .arg(config_path)
             .output()
@@ -2468,9 +2471,9 @@ fn require(condition: bool, message: &str) -> Result<(), String> {
     }
 }
 
-fn local_socket_path(agent_id: &str) -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or_else(|| "HOME is unavailable".to_string())?;
-    Ok(PathBuf::from(home)
+fn local_socket_path(root: &Path, agent_id: &str) -> Result<PathBuf, String> {
+    Ok(root
+        .join("h")
         .join(".agentic_gpt/runtime/agent")
         .join(agent_id)
         .join("mcp.sock"))
@@ -2493,16 +2496,71 @@ fn wait_for_path_absent(path: &Path, duration: Duration) -> Result<(), String> {
 fn stop_child_gracefully(child: &mut Child, duration: Duration) {
     if child.try_wait().ok().flatten().is_none() {
         unsafe {
-            libc::kill(child.id() as i32, libc::SIGINT);
+            libc::kill(-(child.id() as i32), libc::SIGINT);
         }
         let deadline = Instant::now() + duration;
         while Instant::now() < deadline {
             if child.try_wait().ok().flatten().is_some() {
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.wait();
                 return;
             }
             thread::sleep(POLL_INTERVAL);
         }
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
         let _ = child.kill();
     }
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
     let _ = child.wait();
+}
+
+fn fixture_command(binary: &Path, root: &Path) -> Command {
+    let mut command = Command::new(binary);
+    command.process_group(0);
+    for (name, directory) in [
+        ("HOME", "h"),
+        ("XDG_CONFIG_HOME", "c"),
+        ("XDG_DATA_HOME", "d"),
+        ("XDG_CACHE_HOME", "k"),
+        ("XDG_RUNTIME_DIR", "r"),
+        ("TMPDIR", "t"),
+    ] {
+        let path = root.join(directory);
+        fs::create_dir_all(&path).expect("fixture environment directory");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("private fixture environment directory");
+        command.env(name, path);
+    }
+    command.env_remove("TMUX");
+    command.env("TMUX_TMPDIR", root.join("r"));
+    command
+}
+
+struct GuardChild(Option<Child>);
+
+impl std::ops::Deref for GuardChild {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("owned child")
+    }
+}
+
+impl std::ops::DerefMut for GuardChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("owned child")
+    }
+}
+
+impl Drop for GuardChild {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            stop_child_gracefully(child, Duration::from_secs(2));
+        }
+    }
 }

@@ -17,10 +17,10 @@
 - Status: complete
 ### 阶段 2：测试 HOME 隔离
 - 修复 local_control、standalone_http_mcp、standalone_supervisor 与 builder 测试；更新 parity 状态路径。
-- Status: in_progress
+- Status: complete
 ### 阶段 3：本地状态与模型去归属
 - 简化状态根、事件 schema，拆开本地 process 模型与 wire，调整持久化与边界映射。
-- Status: pending
+- Status: in_progress
 ### 阶段 4：独立迁移脚本与文档
 - 实现仅选当前旧目录的显式迁移、SQLite/JSON转换、目标存在不覆盖、失败清理、旧源保留、关联数据完整性；同步当前文档。
 - Status: pending
@@ -31,6 +31,6 @@
 
 ## 验收
 - 新 runtime 不再创建 state/agent/<key>、无 owner_fingerprint 或 local process agentId。
-- Hub payload 和身份校验保持原样；local API 输出不携带本地归属身份。
+- Hub payload、local API 的 wire 身份和身份校验保持原样；内部模型及落盘记录不携带本地归属身份。
 - 迁移脚本幂等：新版数据存在即跳过；失败不发布部分新版状态，源数据不变。
 - 运行测试后真实 HOME 无新增，所有临时服务/资源及时清理。
