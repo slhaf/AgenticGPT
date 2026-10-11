@@ -43,3 +43,27 @@ stdio_schema.rs:26-38 的 Toolset 过滤控制发现列表；stdio_server.rs:217
 - 通过该门不保证最终执行成功；命令、路径、确认、下游配置、资源等条件仍可能拒绝。
 - 本轮核查基线为 df529f2，只新增调查记录；未修改运行时代码、公开契约、用户文档，未新增或运行测试、未启动真实 Agent/Hub。
 - 已检查记录 diff 的格式与范围；没有将静态链路核查称为运行复现。
+
+## Profile 用途追加调查
+- 新问题：除工具集预设与 Hub 准入外，Profile 是否还有实际用途。
+- 初次当前源码搜索已发现 operations/policy.rs 中 Normal/Room 参与策略决策、stdio_server.rs 中传入终态事件 hook、ingress/hub.rs 中映射 role 并上报，以及 runtime startup/supervisor 中用于启动身份。
+- 尚需沿这些消费者核实可观察行为，不能仅由引用次数判断用途。
+
+### Agent 内已核实用途
+- operations/policy.rs:25-64 的 policy_decision_for_profile 调用按 Profile 选择的 builtin_rules；:147-194 中两种 Profile 的 deny 都为 su/mkfs/dd/ssh，Normal confirm 集更大（含 rm/mv/chmod/chown/docker/curl/wget 及 python -c、node -e 等），Room confirm 仅 sudo/mount/systemctl/service/scp。显式 config.policy 可覆盖，needConfirm 参与决策。
+- tmux/tmux.rs:270-288 的 tmux.exec 真正使用该决策拒绝或请求确认；不局限 Hub。Process Managed 的 Argv 执行（包括 Skills）也通过 managed.rs:2430-2443 消费 Profile 规则。
+- 注意 Process shell 特例：policy.rs:69-114 的 shell 决策会将未匹配显式 allow 的 Allow 提升到 Confirm；不能据内置列表宣称 Room 的 process.exec Shell 可无确认运行所有 rm/curl。
+- runtime/state.rs:108-140 按 transport + profile 派生 capabilities；除了已讨论 Skills，notifications 在 Local/Tunnel Normal 为 false，Room 为 true，Hub Normal 为 true。operation.rs:330-336 实际消费 notifications；agent_info.rs:181-185 上报全组能力，bootstrap/diary/notebook 能力字段不能直接等同实际授权。
+- runtime/startup.rs:86 worker 启动校验 profile；:296、:354 等对运行时选择变化拒绝热重载。supervisor.rs:284-290 检测 profile 变化提示重启；config.rs:1583 把 profile 列为 restart-required。
+- stdio_server.rs:2769-2806 中 Profile 仅作为终态事件消息的标签；不是另一组通知调度逻辑。
+- Agent info 的 profile/capabilities/builtin policy summary 是诊断用途，不等同 Toolset；工作区 ensure_workspace 并不按 Profile 创建不同目录（config.rs:1452-1454）。
+
+### Profile 映射的 Hub 角色用途（scout 独立追踪）
+- runtime/state.rs:29-47 把 Profile 映射为协议 AgentRole；ingress/hub.rs:96-104、257-265、356-364、735-744 的 Hello 上报该角色，包括 command-capable 与 reporting-only 连接。
+- Hub agents/lifecycle.rs:185-212、355-367 注册连接并保存 role；仅 command-capable 注册活动 Room。room/control.rs:28-59：Room role 可占据唯一 active_room（另一个 Agent 会冲突）；Normal role 可释放该 Agent 的原 active slot。
+- agents/dispatch.rs:241-248 的 request_room → lifecycle.rs:530-564 的 resolve_room_target 校验在线连接、Room role、command-capable、Hello-ready，发送前 :600-613 再检查 expected role。
+- Hub Apps MCP 的 Room、bootstrap、Skills 工具使用 request_active_room，例如 mcp_server.rs:1374-1388、1580-1606；room/http.rs 也定向到活动 Room。这是目标选择/调度用途，不只 Agent 侧准入。
+- 未发现 Hub AgentRole 驱动 Console 选择/展示；Hub agent.list（mcp_server.rs:385-411）不返回 role。role 保存在 live connection，registry.rs:139-193 的持久注册表不保存 role。Hub 自身 McpProfile Full/Coordinator 是另一套配置。
+
+### 本阶段结论
+Profile 不只是工具集初始化预设和 Hub 准入：它还选择内置命令确认策略、映射 Hub 活动 Room 角色、作为固定运行身份参与启动/热重载校验，并影响能力/日志诊断标志。前两项有实际行为意义，不能把全部 Profile 引用当作展示标签。全部结论为当前源码静态核查，未运行测试或服务、未改变实现。
