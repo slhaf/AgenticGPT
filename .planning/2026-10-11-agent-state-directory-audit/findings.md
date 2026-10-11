@@ -36,3 +36,43 @@
 - 用户拟取消 state/agent/<agentKey>，直接维护 .agentic_gpt/state；本轮授权先改 AGENTS.md 并分析影响。
 - AGENTS.md 新增临时 HOME 和清理要求，明确配置/workspace/agentId 不能替代 HOME 隔离；派生进程沿用隔离环境；禁止并行测试改全局 HOME；退出后先停进程再清理。
 - 两个只读子任务分别核对存储身份/恢复语义和测试/CI/文档影响。
+
+- 源码核对：当前 InstanceLock 按配置文件路径+suffix 锁（instance_lock.rs:21-40），不能阻止不同 --config 实例同时写同一 state 根。
+- prepare_at 现仅迁移 workspace/state 中 active-skills.json 与 skill-installs；改共享根还需考虑旧 state/agent/<key> 中 SQLite 与历史 jobs 数据。
+- migrate_file/migrate_directory 目标存在且源内容相同时会删除源；新布局应明确阻止源与目标是同一目录/文件的情形，尤其自定义 workspace_root 等于 .agentic_gpt 时。
+
+- process_history 当前只打开 process.sqlite3；opens_fresh_process_database_without_touching_legacy_jobs_database 明确保留旧 jobs.sqlite3，不把历史 jobs 自动视作新 process 数据可直接迁移。
+- 临时 HOME 新规范与工具链需区分：后续测试隔离应在 Agent 子进程或测试 runner 上实施，Cargo/Rustup 可保留显式工具链路径/缓存配置；禁止通过并发进程全局 set HOME 达成隔离。
+- 临时 HOME 夹具仍需短路径：Unix socket 有 100 字节上限；runtime/agent/<agentId>/mcp.sock 与 runtime/tunnel/<agentId> 不属于本次私有状态路径扁平化范围。
+- live parity 已隔离 HOME/XDG 并 finally 先停止进程后清理，但 check_contract_parity.py:2906/3950/4219-4225 事件库查询使用旧 per-agent 路径。
+- 文档待随实现更新：configuration.md 与 zh-CN 版:159；interfaces.md:181/183；operations.md:28-30；开发指南的 smoke 隔离内容需核对新规范，archive 保留历史语境。
+
+## 共享 state 根的候选设计（尚未实施）
+
+1. 私有根改为 .agentic_gpt/state，移除 agent_state_key；保留 agentId 的协议身份、历史记录、runtime/socket、确认与传输账本身份意义。
+2. 建议每个 HOME 下的共享 state 只有一个实际写入者；在迁移、数据库打开、process/event/skill recovery 前获取以 state 根为键的跨进程锁。supervisor 与 worker 要划分锁所有者，避免互相锁死；直接 worker 入口不能绕过。
+3. EventStore 的 owner fingerprint 与 HOME 持久状态归属脱钩；历史记录中的原 agentId 保留为来源信息。是否允许不同身份接续已有事件/未终态任务，需要在重构前明确，不能只删目录层级。
+4. 旧 per-agent 根迁移只选择明确来源，建议默认当前有效配置身份；不得扫描合并本机 1000 多个目录。目标已有数据时定义冲突/恢复规则，SQLite 在停止旧 writer 后完整迁移，兼顾 sidecar、备份、崩溃幂等性和权限；用户旧目录清理是另一个操作。
+5. 现有 workspace/state 的 skills 迁移/失败回退需改写或保留明确边界；禁止源目标相同后误删目标；当前 jobs.sqlite3 未被 process store 读取，不默认转换为新格式。
+6. 共享历史意味着新配置会见到旧身份 process/event/skill 状态，并可能参与恢复/通知/清理；workspace 更换还会改变同一 active skill ID 的解析和安装恢复目标。需把这些消费者可见行为写清。
+7. 测试先修隔离：每夹具独立 HOME 与派生环境，builder 注入状态根；parity 更新 DB 路径；验证共享状态跨身份续用、多实例拒绝、重启恢复、迁移失败/冲突/崩溃、临时资源清理和真实 HOME 无新增。优先真实内部链路/实际执行验证。
+
+此轮只做规范与分析；实现、用户状态迁移及旧目录清理均未执行。
+
+## 存储与恢复补证
+
+- EventStore: event_store.rs:191-234、903-932 通过 agentId hash 校验 owner，变更 ID 后现有库报 event_store_owner_mismatch；2021-2044 的具名测试需调整。event 查询240-270无行级 agentId 分区；local_service.rs:212-219/256-281请求 scope 和 cursor:1270-1303 属于外部连接身份契约，不能误作库隔离。
+- ProcessHistory: process_history.rs:275-297 保存旧 agent_id 与 info JSON；get/list:569-579/623-676 不按身份过滤。recover_active:679-725 会将全库 active 判为 UnknownAfterRestart 并生成 outbox；不同 config 并发会误终结仍运行实例记录。
+- Skill active: skills.rs:68-81 无 workspace 归属；同 HOME 更换 workspace 后共用激活列表，缺包标 missing。skills_writes 与 lease 都是进程内锁；读取:674-706也可能补默认项写回，原子 rename 不防丢更新。
+- Skill installs: skill_bootstrap.rs:417-425 记录没有 agentId/workspaceRoot/owner；skill_installs.rs:81-173 扫全部非终态、清 staging 后重排 worker，当前 config 决定目标；journal 的绝对 target 要经当前 skills root 校验。共享根意味着 workspace 接手规则、全根 idempotency、pruning 都需决定。750-761 固定 tmp 写入只有内存锁，多进程风险不能靠 SQLite 弥补。
+- Notification/source consistency: event_notifications.rs:282-337 drain process outbox 和安装终态；事件来源仅 kind+resource ID。迁移需把 events/process/install records/journals/outbox 作为关联状态集合，不得分别从多个旧身份拼凑。
+- Transport receipt: transport_ledger.rs:843-848 位于 HOME/transport-runs.jsonl，现有跨进程锁530-543；agentId 校验是可靠执行归属，应保留历史身份。hub.rs:995-1007 只重放当前 ID ledger，而964-990的 pending remote event source 回传在 owner 过滤前，共享 events 后旧 remote origin 是否允许送往新身份须明确，不能默认转移。
+
+## 建议实施顺序
+
+1. 先调整现有 fixture 的 HOME/环境传递、builder 注入、进程退出和临时资源清理，建立安全验证基础。
+2. 落实 HOME/state 单写入者和本地持久状态归属；保留外部 agentId scope、历史 identity 和原远程来源边界。
+3. 定义当前旧身份关联数据集到共享根的迁移和冲突恢复，结合 skills workspace 接手限制；再修改路径与文档/parity查询。
+4. 运行迁移、改身份重启、同 HOME 两配置竞争、异 HOME 隔离、process/event/skill recovery 与 remote origin 的真实链路回归，随后 workspace checks 和 live parity。
+
+尚待用户进一步确定的行为选择：是否明确限制同 HOME 单实例；旧身份关联状态迁移选择；更换 workspace 的 Skill 接手规则；更换 agentId 后旧 Hub origin 的处理。以上为影响分析与候选建议，本轮未实施。
