@@ -29,6 +29,10 @@
 - fmt/check/clippy/test/build 与 live contract parity；记录实际结果和限制。
 - Status: complete
 
+### 阶段 6：后续实际目录 smoke 核验
+- 新临时 HOME 下冷启动、写进程与 Skill 状态，检查实际目录树、SQLite schema/完整性及权限，终止等待后清理。
+- Status: complete
+
 ## 验收
 - 新 runtime 不再创建 state/agent/<key>、无 owner_fingerprint 或 local process agentId。
 - Hub payload、local API 的 wire 身份和身份校验保持原样；内部模型及落盘记录不携带本地归属身份。

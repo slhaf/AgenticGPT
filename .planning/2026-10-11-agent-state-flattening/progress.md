@@ -15,3 +15,7 @@
 - live contract parity gate PASS：Local Unix / stdio / standalone HTTP 的事件共享、持久重开、process read/batch/cancel、Skill install/run；Hub Full/Coordinator/ReportingOnly、远程回执重放、EventSettle、Room 与离线投影等均通过。门禁没有声称真实生产 tunnel executable；supplemental recovery 的部分交错仍是门禁已有 inference 限制。
 - 真实迁移回归验证旧源/其他 key/业务身份/传输账本保留；真实 local Agent 迁移历史与换身份重开、19 种语义损坏拒绝、rename 后异常与连续 SIGTERM 回滚均通过。未迁移或删除设备真实 HOME 状态。
 - 每个阶段已独立提交；临时 runner HOME 及 parity root 清理完成，收尾提交后工作区干净。
+
+- 后续 Local smoke：使用全新短临时 HOME/XDG/TMPDIR，真实 config init/run/local list-tools/agent.info、printf 进程、内联 Skill 安装并激活均通过。精简配置的两次 smoke 脚本构造错误（缺省 shell 字段、policy Rule 格式）修正后重跑通过；每次临时根均已清理。
+- 实际冷启动只生成 events.sqlite3 与 process.sqlite3；访问 Skills 后生成 active-skills.json，安装后生成 skill-installs/install-*.json 与 staging/。不存在 state/agent。两库 integrity_check=ok，版本分别4/2，事件owner metadata与进程SQL/JSON agentId均不存在。
+- 原生写入权限实测：state根0700，SQLite文件0600；active-skills.json和安装记录0644、skill-installs及staging0755（本次umask0022）。父state根0700限制外部用户访问；原生子项尚未统一600/700，独立迁移脚本的复制权限规则仍为600/700。本次仅核验并记录，不改权限实现。
