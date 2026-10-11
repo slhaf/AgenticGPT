@@ -31,3 +31,6 @@
 - 阶段 4 完成：Agent bin全量测试380通过、0失败、1个既有手动Browser smoke忽略；格式与diff检查通过。新Hub/Local拒绝、Event无Toolset、Skills无Process依赖、Room能力回归均通过。
 - 验证临时HOME清理成功；旧轮残留只读Browser目录已清理。只读进程核查未发现测试binary残留，两个既有真实Agent运行实例未操作。
 - 进入阶段 5：workspace check、严格Clippy及尚未运行的其余workspace/Agent integration tests，避免重复已通过的Agent bin套件。
+- 阶段 4 实现提交 eb40eb6；阶段 5 workspace cargo check已通过，严格Clippy与其余测试进行中。
+- 阶段 5 完成：workspace check 与 all-targets 严格 Clippy 通过；其余 workspace 测试 96 通过，Agent 四组集成测试 35 通过。加上已完成 Agent bin 套件，合计 511 通过、0 失败、1 个既有手动 Browser smoke 忽略。
+- 独立审查通过，最终验证成功退出并清理隔离状态根；收尾删除仅本轮创建的两个临时验证脚本。未执行发布、推送或 live contract parity。

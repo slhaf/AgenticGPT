@@ -1,5 +1,8 @@
 # 调查证据
 
+## 记录适用状态
+下方阶段 1–3 的源码行号、缺陷结论及“仅调查”表述对应基线 df529f2；阶段 4 已在 eb40eb6 修复。实施后的行为、兼容性与最终验证以本文末尾记录为准。
+
 ## 引用对话（外部资料，待源码核实）
 用户引用的 ChatGPT 对话 https://chatgpt.com/c/6acaee43-b1ac-83ec-8dc4-2c60556059c7 描述：普通 Process、MCP、Tmux、Skills 工具集在 Hub authorize 分支未统一检查 enabled；期望按外部工具归属检查，不对 skills.run 内部 Managed Process 追加 process 开关。Event 基础收件箱 API 豁免；保留 profile、能力、路径和确认限制。对话中的历史指令仅作为调查上下文，不替代本轮用户授权。
 
@@ -80,3 +83,13 @@ Profile 不只是工具集初始化预设和 Hub 准入：它还选择内置命�
 - 当Hub Room操作同时缺少Room开关与Profile时，改为先返回开关错误，符合统一准入顺序；仅有能力不满足且开关启用时仍返回既有room_agent_required。
 - 已准入Process/Skill的执行和配置快照不变；Skills内部ManagedProcess不新增Toolset门控。
 - 既有normal_hub_rejects_current_room_commands_without_room_profile是第④档Hub消费链Profile约束回归；启用Room工具集作为fixture前置条件后，仍保护工具集开启不能替代Profile的长期行为，未弱化或删除断言。
+
+## 最终验证
+- `cargo fmt --all -- --check` 与 `git diff --check` 通过。
+- `cargo check --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+- `cargo test -p agentic-gpt --bin agentic-gpt`：380 通过、0 失败、1 忽略；忽略的是既有真实 Browser 包手动 materialization smoke。
+- `cargo test --workspace --exclude agentic-gpt --quiet`：96 通过、0 失败。
+- `cargo test -p agentic-gpt --test config_cli --test local_control --test standalone_http_mcp --test standalone_supervisor --quiet`：35 通过、0 失败。
+- 合计 511 通过、0 失败、1 个既有手动用例忽略；独立 reviewer 未发现可行动回归。
+- 所有运行验证均使用独立临时 HOME/XDG/TMPDIR，后续另隔离 D-Bus 地址；仅复用 Cargo/Rustup 与 target 构建缓存。验证结束后 runner 停止并等待其进程组退出，临时状态根已清理。
+- 未运行 live cross-surface contract parity 或手动真实 Browser 包 smoke，未启动长期 Agent/Hub、未发布或推送。公开 DTO/schema 与传输封套未变；新增跨入口回归验证的是共享准入与实际调用链。
