@@ -16,3 +16,18 @@
 - 阶段 3 Agent 内核查：确认 Profile 参与本地命令默认确认规则与固定启动身份；事件 hook 中只是标签。委派 scout 追踪 Hub role 的真正消费者。
 - 查询一个假定存在的 setup/engine.rs 路径失败，已限定到实际 model/templates 文件；无代码或运行状态改动。
 - 阶段 3 完成：scout 确認 Profile→Role 参与 Hub 活动 Room 注册与目标路由；主代理核实默认确认策略、capabilities、重启要求与诊断。静态核查与 git diff --check 完成，未运行测试。
+- 用户确认普通 Toolset 统一准入及既有例外的修复方案可行合理；进入阶段 4 实施。
+- 回归编辑完成：新增一个 Hub/LocalUnix 共享调用链用例，扩展既有 Event 和 Skills 实际执行用例；worker 因共享 Git 元数据只读未提交，由主代理统一阶段提交。
+- 使用隔离临时 HOME/XDG/TMPDIR 验证 runner，确认固定 Rust 1.99.0 可用。为避免重复大型构建，复用项目已有 target 缓存；红回归构建进行中。
+- 文档草稿同步接口准入、配置说明双版本及开发指南双版本；记录工具集/能力同时禁用时工具集拒绝优先。
+- 第一轮旧代码回归失败：Hub Exec在开关禁用时进入process链路，先发过程消息，原recv_response helper假定首条消息为Response而panic。新增测试已改为有超时的局部接收循环，等待真实业务Response，再验证门控错误；正在重跑红回归。
+- 工作区 cargo fmt --all -- --check 通过（生产修复尚未应用）。
+- 修正接收器后，旧代码红回归按预期失败：process业务响应无toolset_required（Null），证明Toolset关闭未拦住Hub进入执行链路。
+- 已应用最小生产修复：移除Hub普通工具单独放行分支和重复Room Toolset helper；统一namespace/开关检查后保留原Hub Room Profile及Skills capability条件。
+- 用户收到两条must-not-run桌面确认，来自两次旧代码红回归；HOME已隔离，但会话DBus仍共享。用户接受此影响。为后续回归稳定性，新Hub用例显式清空确认channel，验证runner将DBus地址指向本次临时目录（不修改用户桌面设置或生产通知行为）。
+- 独立reviewer审查通过：未发现可行动回归，普通Hub别名与消费者均覆盖共享准入，例外及能力条件保持。
+- 修复后Agent全量bin测试首轮：377通过、3失败、1忽略。两个Unix socket用例受验证TMPDIR前缀过长影响（socket_path_too_long）；已缩短隔离目录。一个已有Hub Normal Room Profile用例同时关闭Room开关，与已确认的新优先顺序冲突；仅调整fixture启用Room，保留原room_agent_required断言继续保护独立Profile限制。
+- 部分Browser测试创建只读目录导致验证临时资源清理失败；runner清理先仅对本次根目录恢复用户写权限再删除，并处理本轮遗留目录，不改真实用户目录。
+- 阶段 4 完成：Agent bin全量测试380通过、0失败、1个既有手动Browser smoke忽略；格式与diff检查通过。新Hub/Local拒绝、Event无Toolset、Skills无Process依赖、Room能力回归均通过。
+- 验证临时HOME清理成功；旧轮残留只读Browser目录已清理。只读进程核查未发现测试binary残留，两个既有真实Agent运行实例未操作。
+- 进入阶段 5：workspace check、严格Clippy及尚未运行的其余workspace/Agent integration tests，避免重复已通过的Agent bin套件。

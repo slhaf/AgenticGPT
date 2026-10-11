@@ -323,7 +323,13 @@ async fn external_injection_waits_for_the_next_public_panel_exposure() -> anyhow
 
 #[tokio::test]
 async fn event_api_business_errors_keep_their_code_and_include_the_panel() -> anyhow::Result<()> {
-    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let state = test_state(CapabilityProfile::Normal);
+    let _cleanup = StdioTestRoots::for_state(&state).await;
+    let server = AgentMcpServer::new(state);
+    let mut config = server.state.config.read().await.clone();
+    config.toolsets.enabled.clear();
+    *server.state.config.write().await = config;
+
     let missing = server
         .call(
             CallToolRequestParams::new("event.get")
@@ -343,6 +349,30 @@ async fn event_api_business_errors_keep_their_code_and_include_the_panel() -> an
         .await?;
     assert_eq!(invalid_cursor["error"]["code"], "event_cursor_invalid");
     assert!(invalid_cursor["events"]["current"].is_string());
+
+    let ttl = server.state.config.read().await.events.low_ttl_seconds;
+    let event = server.state.event_store.inject(
+        &agentic_gpt_protocol::EventInjectRequest {
+            message: "event APIs remain available with toolsets disabled".into(),
+            severity: Some(agentic_gpt_protocol::EventSeverity::Low),
+            reference: "event-api-toolset-regression".into(),
+        },
+        ttl,
+    )?;
+    let listed = server.dispatch("event.list", json!({"limit": 20})).await?;
+    assert!(listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["eventId"] == event.event_id));
+    let fetched = server
+        .dispatch("event.get", json!({"eventId": event.event_id}))
+        .await?;
+    assert_eq!(fetched["eventId"], event.event_id);
+    let marked = server
+        .dispatch("event.mark", json!({"eventIds": [event.event_id]}))
+        .await?;
+    assert_eq!(marked["handledIds"][0], event.event_id);
     Ok(())
 }
 
@@ -1875,11 +1905,20 @@ fn test_terminal_process() -> crate::process_model::ProcessInfo {
 
 #[tokio::test]
 async fn local_skill_audit_uses_local_request_source() -> anyhow::Result<()> {
-    let server = AgentMcpServer::with_ingress(
-        test_state(CapabilityProfile::Room),
-        RequestIngress::LocalUnix,
-    );
+    let state = test_state(CapabilityProfile::Room);
+    let _cleanup = StdioTestRoots::for_state(&state).await;
+    state
+        .config
+        .write()
+        .await
+        .toolsets
+        .disable(crate::config::ToolNamespace::Process);
+    let server = AgentMcpServer::with_ingress(state, RequestIngress::LocalUnix);
     let workspace = server.state.config.read().await.workspace_root.clone();
+    let denied_process = server
+        .dispatch("process.exec", json!({"command": "true", "waitSeconds": 1}))
+        .await?;
+    assert_eq!(denied_process["error"]["code"], "toolset_required");
     let scripts = workspace.join("skills/demo/scripts");
     std::fs::create_dir_all(&scripts)?;
     std::fs::write(workspace.join("skills/demo/SKILL.md"), "# Demo\n")?;
@@ -1907,6 +1946,30 @@ async fn local_skill_audit_uses_local_request_source() -> anyhow::Result<()> {
     assert!(audit.contains("\"requestSource\":\"local:skills.run\""));
     assert!(!audit.contains("\"requestSource\":\"tunnel:skills.run\""));
     Ok(())
+}
+
+struct StdioTestRoots(Vec<PathBuf>);
+
+impl StdioTestRoots {
+    async fn for_state(state: &crate::state::AppState) -> Self {
+        let workspace = state
+            .config
+            .read()
+            .await
+            .workspace_root
+            .parent()
+            .expect("test workspace has a parent")
+            .to_path_buf();
+        Self(vec![workspace, state.private_state.root.clone()])
+    }
+}
+
+impl Drop for StdioTestRoots {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 #[tokio::test]

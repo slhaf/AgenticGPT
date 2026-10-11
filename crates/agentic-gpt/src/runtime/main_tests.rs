@@ -452,6 +452,144 @@ async fn hub_adapter_and_local_dispatcher_share_toolset_errors() {
 }
 
 #[tokio::test]
+async fn hub_commands_require_their_live_owner_toolset_before_dispatch() {
+    let workspace = unique_temp_dir("hub-live-toolset-admission");
+    let mut cleanup = TestRoots::new([workspace.clone()]);
+    let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
+    let private_state_root = state.private_state.root.clone();
+    cleanup.push(private_state_root);
+    let agent_id = {
+        let mut config = state.config.write().await;
+        config.confirmation_provider.channels.clear();
+        config.agent_id.clone()
+    };
+
+    let cases = [
+        (
+            config::ToolNamespace::Process,
+            HubCommand::Exec {
+                request_id: "disabled-process".into(),
+                payload: agentic_gpt_protocol::ProcessExecRequest {
+                    agent_id: agent_id.clone(),
+                    group: None,
+                    command: "agentic-test-command-must-not-run".into(),
+                    need_confirm: false,
+                    confirm_method: None,
+                    cwd: None,
+                    wait_seconds: Some(1),
+                },
+            },
+        ),
+        (
+            config::ToolNamespace::Mcp,
+            HubCommand::McpCallTool {
+                request_id: "disabled-mcp".into(),
+                payload: agentic_gpt_protocol::McpCallToolRequest {
+                    agent_id: agent_id.clone(),
+                    group: None,
+                    server_id: "missing-server".into(),
+                    tool_name: "must-not-be-looked-up".into(),
+                    arguments: serde_json::json!({}),
+                    wait_seconds: Some(1),
+                    timeout_seconds: Some(1),
+                },
+            },
+        ),
+        (
+            config::ToolNamespace::Tmux,
+            HubCommand::TmuxExec {
+                request_id: "disabled-tmux".into(),
+                payload: agentic_gpt_protocol::TmuxExecRequest {
+                    target: "missing-session".into(),
+                    program: "agentic-test-command-must-not-run".into(),
+                    args: Vec::new(),
+                    need_confirm: false,
+                    wait_ms: 1,
+                    capture_lines: 1,
+                },
+            },
+        ),
+        (
+            config::ToolNamespace::Skills,
+            HubCommand::SkillsRun {
+                request_id: "disabled-skills".into(),
+                payload: agentic_gpt_protocol::SkillRunRequest {
+                    id: "missing-skill".into(),
+                    path: "scripts/must-not-run.sh".into(),
+                    group: None,
+                    args: None,
+                    working_directory: None,
+                    wait_seconds: Some(1),
+                },
+            },
+        ),
+    ];
+
+    for (namespace, command) in cases {
+        let mut config = state.config.read().await.clone();
+        config.toolsets.disable(namespace);
+        *state.config.write().await = config;
+
+        let operation = operation::hub_command_name(&command);
+        let local = local_service::dispatch(
+            state.clone(),
+            command.clone(),
+            operation::RequestContext::new(operation::RequestIngress::LocalUnix, operation),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(local["error"]["code"], "toolset_required");
+
+        hub::handle_hub_command(state.clone(), command, None)
+            .await
+            .unwrap();
+        let data = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Some(AgentMessage::Response { data, .. }) => break data,
+                    Some(_) => continue,
+                    None => panic!("Hub adapter closed before returning a response"),
+                }
+            }
+        })
+        .await
+        .expect("Hub adapter must return a response within five seconds");
+        assert_eq!(
+            data["error"]["code"],
+            "toolset_required",
+            "{} must be rejected by the live owning toolset before dispatch",
+            namespace.as_str()
+        );
+        assert!(data["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(namespace.as_str()));
+        assert!(state.processes.lock().await.is_empty());
+    }
+}
+
+struct TestRoots(Vec<PathBuf>);
+
+impl TestRoots {
+    fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self(paths.into_iter().collect())
+    }
+
+    fn push(&mut self, path: PathBuf) {
+        self.0.push(path);
+    }
+}
+
+impl Drop for TestRoots {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+#[tokio::test]
 async fn hub_panel_failure_emits_live_event_source_without_terminal_response() {
     let workspace = unique_temp_dir("hub-panel-failure").join("workspace");
     fs::create_dir_all(&workspace).unwrap();
@@ -601,6 +739,12 @@ async fn normal_hub_rejects_current_room_commands_without_room_profile() {
     let workspace = unique_temp_dir("normal-room-command-rejected").join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
+    state
+        .config
+        .write()
+        .await
+        .toolsets
+        .enable(config::ToolNamespace::Room);
 
     hub::handle_hub_command(
         state,

@@ -67,3 +67,16 @@ stdio_schema.rs:26-38 的 Toolset 过滤控制发现列表；stdio_server.rs:217
 
 ### 本阶段结论
 Profile 不只是工具集初始化预设和 Hub 准入：它还选择内置命令确认策略、映射 Hub 活动 Room 角色、作为固定运行身份参与启动/热重载校验，并影响能力/日志诊断标志。前两项有实际行为意义，不能把全部 Profile 引用当作展示标签。全部结论为当前源码静态核查，未运行测试或服务、未改变实现。
+
+## 实施与测试保留价值评估
+- 长期行为：Toolset 关闭必须在任何外部 ingress 的所有者执行前拒绝；避免远端入口再次绕过、别名映射遗漏或热变更后使用过期准入。
+- 已有 hub_adapter_and_local_dispatcher_share_toolset_errors 仅检查同为 Hub ingress 的 Room bootstrap，不覆盖普通 Process/MCP/Tmux/Skills；changing_live_toolsets_updates_surface_and_authorization 只验证本地 Room 发现/调用变化。
+- 计划新增/扩展第④⑤档回归：真实 Hub adapter/shared dispatch 与本地入口的禁用行为、Event 存储链豁免、Skills 在 Process 关闭时仍能运行。以拒绝前无所有者副作用或真实完成为断言，避免仅测试 authorize/helper 或固定 namespace 表。
+- 保留值：发现入口遗漏、热配置读取遗漏、错误进入下游所有者、内部 Process 误加 Toolset 依赖；相同失败模式未被已有具名测试覆盖，新增数量保持最小。
+
+## 修复后的兼容性
+- 不改变DTO/schema、namespace集合、工具发现或传输封套；现有未知操作、CLI、Event、通知和private ingress分支保持。
+- Hub原先跳过的普通Toolset现在会返回toolset_required；Room仍用room_toolset_required。
+- 当Hub Room操作同时缺少Room开关与Profile时，改为先返回开关错误，符合统一准入顺序；仅有能力不满足且开关启用时仍返回既有room_agent_required。
+- 已准入Process/Skill的执行和配置快照不变；Skills内部ManagedProcess不新增Toolset门控。
+- 既有normal_hub_rejects_current_room_commands_without_room_profile是第④档Hub消费链Profile约束回归；启用Room工具集作为fixture前置条件后，仍保护工具集开启不能替代Profile的长期行为，未弱化或删除断言。
