@@ -114,7 +114,7 @@ async fn start_managed_call_with_origin(
     validate_tool_name(&payload.tool_name)?;
     let response_budget = state.config.read().await.limits.process_response_bytes;
     process::ensure_process_response_fits(
-        &payload.agent_id,
+        &state.transport_agent_id,
         payload.group.as_deref(),
         ProcessKind::Mcp,
         &state.boot_generation,

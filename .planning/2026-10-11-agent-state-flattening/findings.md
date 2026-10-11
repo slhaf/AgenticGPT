@@ -11,3 +11,6 @@
 - schema：事件 v4 去 owner metadata；进程 v2 去 processes.agent_id/info_json/detail_json.process.agentId；启动无旧版本DDL升级。
 - 首次全套回归暴露短 TMPDIR 下 socket symlink fixture 长度和旧测试 identity 假设，已缩短路径、明确配置身份；临时只读浏览器包使用临时根内 chmod 清理。
 - 独立迁移脚本实际回归 2 passed：真实 local Agent 读历史/输出，换连接身份重启保留同根状态；源不变、skip、不合并其他身份、错误拒绝与发布回滚。
+
+- 最终 wire 预算预检也使用启动连接身份，避免内部请求字段与输出身份的预算长度不一致。HTTP/OpenAPI、protocol crate、Hub runtime 均无修改，契约门禁通过。
+- 迁移只在显式脚本执行时发生。多对象发布无法在 SIGKILL/断电间保证整体原子；指南要求重启前核对完整性。未新增 startup legacy fallback 或生产身份隔离系统。

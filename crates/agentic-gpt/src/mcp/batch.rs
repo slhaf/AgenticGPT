@@ -160,7 +160,7 @@ async fn start_managed_batch_with_factory_budget(
         .collect::<Vec<_>>();
     if let Err(error) = crate::operation_result::ensure_mcp_batch_response_fits(
         &batch_id,
-        &payload.agent_id,
+        &state.transport_agent_id,
         payload.group.as_deref(),
         &response_calls,
         &state.boot_generation,

@@ -9,3 +9,9 @@
 
 - 阶段 4：独立脚本与当前文档完成，迁移测试新增 tier5 3 项通过。发布前记账并根据对象位置撤回，rollback 屏蔽可处理中断；实际 rename 后信号/再次信号注入均撤回。Process JSON 校验增加必需字段、枚举、日期、known optional 类型与 SQL ID 一致性，19 个坏语义 SQLite fixture 均拒绝且旧源不变。SIGKILL/断电多对象发布边界已记录，需要人工核对完整性。
 - fmt/check/clippy --workspace --all-targets -D warnings/build 均通过，live parity 正在执行。未对真实设备 HOME 运行迁移。
+
+- 阶段 5：完成。临时 HOME/XDG 下 fmt、workspace check、严格 Clippy、build 均通过；workspace 测试 522 passed / 0 failed / 1 ignored（原有手动真实浏览器包 smoke）。
+- 最终核对把 MCP 单调用与 batch 的预算预检统一使用 transport_agent_id，和最终 wire 响应一致；该两处调整后 MCP 20 项实际链路回归、严格 Clippy 和 build 通过。迁移日期校验规范化仅用于 Python 校验，不改原始 RFC3339 数据。
+- live contract parity gate PASS：Local Unix / stdio / standalone HTTP 的事件共享、持久重开、process read/batch/cancel、Skill install/run；Hub Full/Coordinator/ReportingOnly、远程回执重放、EventSettle、Room 与离线投影等均通过。门禁没有声称真实生产 tunnel executable；supplemental recovery 的部分交错仍是门禁已有 inference 限制。
+- 真实迁移回归验证旧源/其他 key/业务身份/传输账本保留；真实 local Agent 迁移历史与换身份重开、19 种语义损坏拒绝、rename 后异常与连续 SIGTERM 回滚均通过。未迁移或删除设备真实 HOME 状态。
+- 每个阶段已独立提交；临时 runner HOME 及 parity root 清理完成，收尾提交后工作区干净。

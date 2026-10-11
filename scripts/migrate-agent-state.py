@@ -221,7 +221,9 @@ def timestamp(value: object, field: str) -> None:
     # Chrono accepts RFC3339 leap seconds; datetime is used only to check the date,
     # time and offset after substituting :59 for the representable leap second.
     second = "59" if match[3] == "60" else match[3]
-    normalized = match[1] + "T" + match[2] + second + (match[4] or "") + zone.upper()
+    fraction = (match[4] or "")[:7]
+    normalized_zone = "+00:00" if zone in ("Z", "z") else zone
+    normalized = match[1] + "T" + match[2] + second + fraction + normalized_zone
     try:
         datetime.fromisoformat(normalized)
     except ValueError as error:

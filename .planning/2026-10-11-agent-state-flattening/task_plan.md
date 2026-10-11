@@ -27,10 +27,10 @@
 ### 阶段 5：整合验证
 - 实际迁移→新 Agent 读取、改变 agentId 状态续用、临时 HOME 互相独立、远程协议不变、重启恢复与清理。
 - fmt/check/clippy/test/build 与 live contract parity；记录实际结果和限制。
-- Status: in_progress
+- Status: complete
 
 ## 验收
 - 新 runtime 不再创建 state/agent/<key>、无 owner_fingerprint 或 local process agentId。
 - Hub payload、local API 的 wire 身份和身份校验保持原样；内部模型及落盘记录不携带本地归属身份。
-- 迁移脚本幂等：新版数据存在即跳过；失败不发布部分新版状态，源数据不变。
+- 迁移脚本幂等：新版数据存在即跳过；普通错误和可处理信号撤回已发布对象，源数据不变。SIGKILL/断电的多对象发布限制见迁移指南。
 - 运行测试后真实 HOME 无新增，所有临时服务/资源及时清理。
