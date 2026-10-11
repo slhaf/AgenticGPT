@@ -76,3 +76,22 @@
 4. 运行迁移、改身份重启、同 HOME 两配置竞争、异 HOME 隔离、process/event/skill recovery 与 remote origin 的真实链路回归，随后 workspace checks 和 live parity。
 
 尚待用户进一步确定的行为选择：是否明确限制同 HOME 单实例；旧身份关联状态迁移选择；更换 workspace 的 Skill 接手规则；更换 agentId 后旧 Hub origin 的处理。以上为影响分析与候选建议，本轮未实施。
+
+## 已确认边界（取代前轮待决建议）
+
+- 用户已确认：迁移是独立脚本运行时的操作；Agentic 启动只用 .agentic_gpt/state，没有旧路径探测、迁移或失败回退兼容行为。
+- 本地状态不再以 agentId 定义隔离/归属；不增加生产跨身份、多实例/多 workspace 隔离机制，测试实例按独立临时 HOME 调整。
+- agentId 配置、Hub 通道、传输回执、远程事件来源语义原样保留；不按字段名机械删除所有持久化 agentId。
+- 独立脚本仅在新版状态不存在时找当前有效 agentId 的旧目录，旧根 key 的合法原样/哈希规则由脚本承担；不自动合并其他旧身份。
+- 当前 ProcessInfo 是公共 wire DTO（protocol/process.rs:202-204），agent_id 为必填，process_history.rs 同时将其保存进 JSON 与索引列；需区分本地归属机制与远程/历史记录字段，不能直接删 JSON 字段使解析失败或改变远程契约。
+
+## 源码可行性结论
+
+- 目标明确，源码没有要求按 agentId 分开持久根的不可拆约束。路径工厂、EventStore owner metadata 与外部身份可分开重构；测试 HOME 隔离替代历史随机身份目录。
+- EventStore 真正归属机制：SCHEMA:96-100 event_store_metadata(owner_fingerprint)，open:192/223 与 ensure_store_owner:903-932。events/internal_sources 业务行无 agentId 分区；脚本可以移除 owner metadata 并转换成新 schema，保留远程 origin_run_id/request_id/command_hash。
+- EventStore open:217-223 当前包含 MIGRATE_V1_TO_V2 与 owner 检查；private_state prepare_at:31-104 包含 workspace/state skills 迁移及失败回退。按用户边界，本次旧格式转换放入独立脚本，Agentic 新布局初始化不保留上述旧布局兼容链路。
+- EventList/Get/Mark 的 local_service.rs:212-229/256-281 绑定当前连接身份；这是 Hub 目标校验耦合，需要区分接入层契约与存储归属，不机械删除。EventStore list 游标仍有请求 scope 绑定，应按保持远程行为的边界处理。
+- ProcessInfo.agent_id 为 wire 必填；process_history 的 info_json 被 recover_active 和读接口反序列化成该 DTO。直接删持久 JSON 中该字段会使解析失败并改变远程返回契约。实现可以保留来源字段而不当成 owner，或拆持久模型与 wire 模型；不能把去除归属等同去除全部 agentId 字段。
+- Skill CommitJournal (skill_installs.rs:37-43、1596-1614) 记录 target/archive 是 workspace 包路径，无 agentId；staging_path:1852-1853 由 records_root 相对派生，整树迁移可保留关联记录并由新根派生 staging，无须新增身份/多 workspace 隔离机制。
+- 独立脚本需在 Agent 停止时执行一致转换；识别新版状态文件而非 state 目录非空，既有新版状态不覆盖，只选择当前旧 key。旧 jobs.sqlite3 当前不被 process store 读取，脚本不得把它直接重命名冒充 process.sqlite3；新版缺少哪个当前格式 store，由正常新布局初始化处理，历史文件处理留脚本明确说明。
+- 下一步若用户授权实施，可据以上边界拆为测试隔离、状态去归属与启动清理、独立迁移脚本与文档/真实链路验证阶段。本轮仅核对与记录，没有实施或运行测试。
