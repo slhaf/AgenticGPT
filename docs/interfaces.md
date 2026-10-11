@@ -78,6 +78,8 @@ Hub 不持久保存上次取得的本地配置概要。本地确认提示可通�
 
 ### Hub Process 权威性、新鲜度与保留
 
+Agent 内部进程模型及本地进程数据库不保存 `agentId`；对外 Process 协议负载仍保留 `agentId`，由响应时的连接身份填充。Hub 使用该身份路由与缓存，连接身份不决定本地持久状态目录。
+
 Agent 的受管理进程历史是执行侧权威来源。Hub 进程状态条目和 Hub 进程缓存是用于路由和观察的投影；它们不能证明本地进程仍在运行，也不能证明副作用已撤销。Hub 缓存最多保留 4,096 个进程，在 `observedAt` 之后 15 分钟过期，并在 60 秒后标记为 `stale`。每 15 秒运行一次清理，移除已过期条目；容量淘汰最早观察到的条目。淘汰活动投影不会影响 Agent 进程或权威的 Hub 运行回执。
 
 Hub HTTP `process.read`、`process.list` 以及对应的 Apps MCP 进程检查响应会暴露 `freshness` 和 `observedAt` 元数据。创建端点直接返回的实时进程封套可能省略这些投影字段；其中的 Agent 进程负载仍具权威性。`live` 表示响应来自 Agent，`cached` 表示 Hub 投影仍在新鲜度窗口内且可用，`stale` 表示投影已较旧，`unknown` 表示当前没有可用事实（包括重启协调之后）。这些字段描述响应投影，不是 Agent 进程状态字段。只有缓存的状态响应属于降级证据，不是新的等待结果；Hub 不会为 Agent 发出的 cursor 臆造续页。Hub 缓存仅包含状态元数据，不能提供输出或结果内容。
@@ -99,7 +101,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 ## 持久事件收件箱
 
-每个 Agent 有独立、持久的事件收件箱；同一 Agent 的客户端共享事件和展示计数。事件 API 与 Process/Skill Install 的生命周期操作彼此独立。Standalone 的三个公开 MCP 工具 `event.list`、`event.get`、`event.mark` 不依赖 Process/Skills 工具集开关，也不新增可配置 namespace。Standalone 请求省略 `agentId` 时使用当前 Agent；若提供，则必须与当前 Agent 匹配，不作为跨 Agent 选择器。Hub Full 的三个工具要求显式 `agentId`；Coordinator 的八项工具保持不变，且不公开事件工具。
+事件收件箱持久化在 `~/.agentic_gpt/state/events.sqlite3`；使用同一 `HOME` 的客户端共享事件和展示计数，修改 `agentId` 不切换收件箱。需要独立收件箱的实例应使用独立 `HOME`。事件 API 与 Process/Skill Install 的生命周期操作彼此独立。Standalone 的三个公开 MCP 工具 `event.list`、`event.get`、`event.mark` 不依赖 Process/Skills 工具集开关，也不新增可配置 namespace。Standalone 请求省略 `agentId` 时使用当前 Agent；若提供，则必须与当前 Agent 匹配，不作为跨 Agent 选择器。Hub Full 的三个工具要求显式 `agentId`；Coordinator 的八项工具保持不变，且不公开事件工具。
 
 `EventSource.kind` 是创建时固定的事件来源类型，与入口/传输（如 Unix、stdio、HTTP、Hub）以及 Hub `RunReport` 相互独立：内部事件由服务端绑定 `process` 或 `skill_install` 和对应实体 ID；外部注入的来源种类固定为 `external`，来源引用由调用方通过 `ref` 提供。读取、筛选、标记或传输事件都不能改写来源。事件记录使用 camelCase 字段 `eventId`、`message`、`severity`（`low|medium|high`）、`createdAt`、`status`（`pending|handled|expired`）、`source: { kind, ref }`、`shownCount` 与可空 `expiresAt`。列表项以 `summary` 代替完整正文。
 
@@ -178,9 +180,9 @@ Standalone Tunnel 文档见 [`standalone-runtime.md`](standalone-runtime.md)。
 
 ntfy 确认回调路由有意不纳入 `openapi/hub.yaml`，仅供确认操作按钮使用。
 
-Room Skill 包在 workspace 下以 `<workspaceRoot>/skills/` 的形式可见；由工具管理的激活状态则作为私有持久状态存储在 `~/.agentic_gpt/state/agent/<agentId>/active-skills.json`。启动时，Agentic 会迁移无歧义的旧 `<workspaceRoot>/state/active-skills.json`；如果新旧副本内容不同，则以私有副本为准，并保留旧副本及一条警告。激活 Skill 不会运行它或授予权限；过期的活动条目会以 `missing` 状态继续显示，直到被显式停用。内置 `skill-installer` 指南默认处于激活状态，也可显式停用。
+Room Skill 包在 workspace 下以 `<workspaceRoot>/skills/` 的形式可见；由工具管理的激活状态则作为私有持久状态存储在 `~/.agentic_gpt/state/active-skills.json`。启动只使用当前私有状态根，不迁移旧目录；升级迁移见[运维指南](operations.md#私有状态布局迁移)。激活 Skill 不会运行它或授予权限；过期的活动条目会以 `missing` 状态继续显示，直到被显式停用。内置 `skill-installer` 指南默认处于激活状态，也可显式停用。
 
-安装任务持久化在 `~/.agentic_gpt/state/agent/<agentId>/skill-installs/` 下；在恢复安装前，旧的 `<workspaceRoot>/state/skill-installs/` 目录树会按相同的冲突保留规则迁移。安装记录保留终态七天（最多 100 条），且公开状态绝不暴露内联负载或 URL 查询/片段值。显式替换前，现有 Skill 会归档到 `skills/.archive/<id>/`。远程文件 URL 必须使用公开 HTTPS，并在 DNS 解析和重定向后重新验证；部署方可通过 `room.skills.allowedHosts` 收窄允许的主机。
+安装任务持久化在 `~/.agentic_gpt/state/skill-installs/` 下；激活状态和安装记录均不绑定 `agentId`，启动不会导入旧 `<workspaceRoot>/state/` 或按 Agent ID 分隔的目录。安装记录保留终态七天（最多 100 条），且公开状态绝不暴露内联负载或 URL 查询/片段值。显式替换前，现有 Skill 会归档到 `skills/.archive/<id>/`。远程文件 URL 必须使用公开 HTTPS，并在 DNS 解析和重定向后重新验证；部署方可通过 `room.skills.allowedHosts` 收窄允许的主机。
 
 ## Room 会话引导包
 

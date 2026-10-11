@@ -149,6 +149,8 @@ agentic-gpt run
 将 `profile` 设为 `room` 会选择启用所有 namespace 的 Room preset（例如
 `agentic-gpt config set profile room`）；如果存在 `toolsets.enabled`，则以它为准。
 
+私有持久状态不绑定 `agentId`。更改连接身份不会切换事件、进程历史或 Skill 激活/安装状态；需要独立持久状态的实例应使用独立 `HOME`。启动不会迁移旧目录；旧部署升级前按[私有状态布局迁移](operations.md#私有状态布局迁移)执行独立脚本。
+
 ## 顶层字段
 
 | 字段 | 用途 |
@@ -156,7 +158,7 @@ agentic-gpt run
 | `mode` | 权威运行时分派：`standalone`、`hub` 或 `local`。 |
 | `profile` | 默认能力/toolset preset：`normal` 或 `room`。 |
 | `toolsets` | 已启用的 tool namespace；显式 `enabled` 列表会覆盖配置档 preset。 |
-| `agentId` | 稳定本地 identity，也用于派生私有 runtime/socket 路径，以及 `~/.agentic_gpt/state/agent/<agentId>/` 下的 per-agent 持久状态根目录。 |
+| `agentId` | 本地连接身份，用于 Hub 路由、协议身份及 `~/.agentic_gpt/runtime/agent/<agentId>/` 下的 runtime/socket 路径；私有持久状态统一位于 `~/.agentic_gpt/state/`，不按此字段分目录。 |
 | `displayName` | summary/reporting 中的人类可读机器名称。 |
 | `workspaceRoot` | 主可写工作区，也是 `.agentic-gpt-audit.jsonl` 所在位置。 |
 | `backupLimit` | Agentic 管理配置写入时保留的备份数量。 |

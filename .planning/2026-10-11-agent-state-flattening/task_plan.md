@@ -23,11 +23,11 @@
 - Status: complete
 ### 阶段 4：独立迁移脚本与文档
 - 实现仅选当前旧目录的显式迁移、SQLite/JSON转换、目标存在不覆盖、失败清理、旧源保留、关联数据完整性；同步当前文档。
-- Status: in_progress
+- Status: complete
 ### 阶段 5：整合验证
 - 实际迁移→新 Agent 读取、改变 agentId 状态续用、临时 HOME 互相独立、远程协议不变、重启恢复与清理。
 - fmt/check/clippy/test/build 与 live contract parity；记录实际结果和限制。
-- Status: pending
+- Status: in_progress
 
 ## 验收
 - 新 runtime 不再创建 state/agent/<key>、无 owner_fingerprint 或 local process agentId。

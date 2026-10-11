@@ -25,26 +25,62 @@ loopback/私有主目录进程并在结束时清理；schema 验证与实时行�
 该检查序列用于验证包含 Agent 事件工具在内的契约；本文不表示 Hub parity 门禁已通过。
 通过一致性门禁不能替代前面的严格 Clippy 检查。
 
-Standalone HTTP MCP 集成测试夹具使用较短且 UUID 唯一的 Agent ID：其本地 Unix MCP
-套接字位于 `HOME/.agentic_gpt` 下，运行时拒绝长度超过 100 字节的套接字路径。
-修改测试夹具时，应按 CI 运行器的主目录检查完整套接字路径。
+真实 Agent 集成测试为每个夹具设置短且唯一的临时 `HOME`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`XDG_RUNTIME_DIR` 和 `TMPDIR`，子进程显式继承这些目录；不得通过修改测试进程的全局 `HOME` 隔离并行用例。runtime/socket 仍位于 `HOME/.agentic_gpt/runtime/agent/<agentId>/`，完整套接字路径不得超过 100 字节，长度应按夹具主目录计算。清理时先停止并等待拥有状态的进程退出，再删除临时根；失败和提前返回也应执行清理。
+
+## 私有状态布局迁移
+
+当前布局统一使用 `~/.agentic_gpt/state/` 保存 `events.sqlite3`、`process.sqlite3`、`active-skills.json` 和 `skill-installs/`；这些状态不绑定 Agent ID。runtime/socket 路径仍按 `agentId` 分隔，Hub 的连接身份、路由及传输账本所有者约束保持原有协议语义。
+
+升级旧布局时，先停止使用该 `HOME` 的所有 Agent（包括 supervisor、worker 和本地服务），保留旧目录，再从仓库运行：
+
+```bash
+python3 scripts/migrate-agent-state.py --config "$HOME/.agentic_gpt/config.json" --dry-run
+python3 scripts/migrate-agent-state.py --config "$HOME/.agentic_gpt/config.json"
+```
+
+`--config` 省略时读取 `$HOME/.agentic_gpt/config.json`；目标始终由本次命令的 `HOME` 决定，自定义配置路径不会改变目标 home。迁移 Process 数据库要求 Python 链接的 SQLite 版本至少为 3.35。`--dry-run` 会在临时目录复制、转换并验证，但不发布新状态。
+
+脚本仅选择配置中当前 `agentId` 对应的旧 `~/.agentic_gpt/state/agent/<旧目录键>/`，复制支持的事件、Process 和 Skill 状态并转换数据库布局，保留原目录供回退检查。它不会扫描或合并其他 Agent 目录，也不导入 `<workspaceRoot>/state/`；旧 `jobs.sqlite3` 及未知文件保留在原处，不导入新 Process 数据库。新版根中已有任一受支持的状态对象或数据库 sidecar 时，脚本返回 `skip`，不会覆盖或拼接新旧状态。启动过程本身不执行迁移；需要保留旧状态时，应在第一次启动新版 Agent 前执行脚本。
+
+脚本检查运行锁和当前身份的本地 socket；这些检查不能替代运维人员停止其他身份实例。迁移后再启动 Agent，并通过事件、Process 和 Skill 接口核对结果。迁移成功输出只证明脚本处理完成，不证明远程连接、tunnel 或外部副作用恢复。源目录选择、转换明细和回滚限制见[迁移指南](development/agent-state-migration.zh-CN.md)。
 
 ## 本地/Standalone 冒烟检查（主要路径）
 
 Tunnel 凭据不可用时设置 `mode=local`；要验证完整的推荐路径则使用
 `mode=standalone`。两种模式都从 `agentic-gpt run` 启动。
 
-```bash
-agentic-gpt --version
-agentic-gpt config init --mode local --profile normal --non-interactive
-agentic-gpt run
-```
-
-在另一个 shell 中运行：
+下面示例使用一次性目录检查 Local 入口；在子 shell 中执行，退出时先等待服务停止再删除目录。Standalone 冒烟也应使用相同隔离方式，并显式配置测试用 tunnel 凭据和客户端。
 
 ```bash
-agentic-gpt local list-tools
-agentic-gpt local call agent.info --arguments '{}'
+(
+  smoke_root=$(mktemp -d /tmp/as.XXXXXX)
+  smoke_pid=
+  cleanup() {
+    if [ -n "$smoke_pid" ]; then
+      kill "$smoke_pid" 2>/dev/null || true
+      wait "$smoke_pid" 2>/dev/null || true
+    fi
+    rm -rf "$smoke_root"
+  }
+  trap cleanup EXIT
+  export HOME="$smoke_root/h" XDG_CONFIG_HOME="$smoke_root/c"
+  export XDG_DATA_HOME="$smoke_root/d" XDG_CACHE_HOME="$smoke_root/k"
+  export XDG_RUNTIME_DIR="$smoke_root/r" TMPDIR="$smoke_root/t"
+  mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+  chmod 700 "$HOME" "$XDG_RUNTIME_DIR"
+  agentic-gpt --version
+  agentic-gpt config init --mode local --profile normal --non-interactive || exit
+  agentic-gpt run &
+  smoke_pid=$!
+  smoke_ready=false
+  for attempt in $(seq 1 100); do
+    if agentic-gpt local list-tools; then smoke_ready=true; break; fi
+    kill -0 "$smoke_pid" 2>/dev/null || exit 1
+    sleep 0.05
+  done
+  "$smoke_ready" || exit 1
+  agentic-gpt local call agent.info --arguments '{}'
+)
 ```
 
 预期结果：
@@ -53,8 +89,8 @@ agentic-gpt local call agent.info --arguments '{}'
 - 运行时目录权限为 `0700`、套接字权限为 `0600`，且只接受相同 UID。
 - 存在 `event.list`、`event.get`、`event.mark`，以及 `process.exec`、`process.batch`、`process.read`、`process.list`、`process.cancel`、`mcp.callTool` 和 `mcp.batch`。
 - 事件收件箱工具独立于工具集开关；隐藏事件不因此视为已处理。它们管理收件箱状态，不是进程控制接口。
-- Process 历史使用 `process.sqlite3`；事件历史使用独立的 `events.sqlite3`。现有 `jobs.sqlite3` 会有意保持原样且不可访问，不迁移或备份 Job 历史。
-- [持久事件收件箱](interfaces.md#持久事件收件箱)说明同一 Agent 的共享收件箱和提醒范围。
+- Process 历史使用 `~/.agentic_gpt/state/process.sqlite3`；事件历史使用独立的 `~/.agentic_gpt/state/events.sqlite3`。现有 `jobs.sqlite3` 会有意保持原样且不可访问，不迁移或备份 Job 历史。
+- [持久事件收件箱](interfaces.md#持久事件收件箱)说明同一私有状态根的共享收件箱和提醒范围。
 - 已移除的 v0.8 受管理生命周期名称不存在。
 
 Standalone 还应确认：
@@ -69,12 +105,40 @@ Standalone 还应确认：
 
 示例使用 loopback Hub 的固定测试值 `test-key`；这是公开且不含保密信息的本地测试值，只适用于此本地示例。它会出现在服务环境和 `curl` argv 中，绝不可将真实部署密钥替换到这里；真实密钥不要作为 argv 传递。
 
+先按仓库验证步骤构建二进制，再执行隔离示例；构建工具继续使用开发环境的 HOME，只有服务子 shell 使用临时 HOME。
+
 ```bash
-tmp=$(mktemp -d)
-cargo run -q -p agentic-gpt-hub -- --db "$tmp/hub.sqlite3" --config "$tmp/hub.json" init
-AGENTIC_GPT_API_KEY=test-key \
-  cargo run -q -p agentic-gpt-hub -- --db "$tmp/hub.sqlite3" --config "$tmp/hub.json" serve --bind 127.0.0.1:18787
-curl -fsS -H 'Authorization: Bearer test-key' http://127.0.0.1:18787/v1/info
+(
+  smoke_root=$(mktemp -d /tmp/hs.XXXXXX)
+  smoke_pid=
+  cleanup() {
+    if [ -n "$smoke_pid" ]; then
+      kill "$smoke_pid" 2>/dev/null || true
+      wait "$smoke_pid" 2>/dev/null || true
+    fi
+    rm -rf "$smoke_root"
+  }
+  trap cleanup EXIT
+  export HOME="$smoke_root/h" XDG_CONFIG_HOME="$smoke_root/c"
+  export XDG_DATA_HOME="$smoke_root/d" XDG_CACHE_HOME="$smoke_root/k"
+  export XDG_RUNTIME_DIR="$smoke_root/r" TMPDIR="$smoke_root/t"
+  mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+  chmod 700 "$HOME" "$XDG_RUNTIME_DIR"
+  target/debug/agentic-gpt-hub --db "$smoke_root/hub.sqlite3" --config "$smoke_root/hub.json" init || exit
+  AGENTIC_GPT_API_KEY=test-key target/debug/agentic-gpt-hub \
+    --db "$smoke_root/hub.sqlite3" --config "$smoke_root/hub.json" serve --bind 127.0.0.1:18787 &
+  smoke_pid=$!
+  smoke_ready=false
+  for attempt in $(seq 1 100); do
+    if curl -fsS -H 'Authorization: Bearer test-key' http://127.0.0.1:18787/v1/info; then
+      smoke_ready=true
+      break
+    fi
+    kill -0 "$smoke_pid" 2>/dev/null || exit 1
+    sleep 0.05
+  done
+  "$smoke_ready"
+)
 ```
 
 预期 JSON 包含 `service`、`version`、`remoteConfirmation`、`agents`、`counts` 和 `generatedAt`。
@@ -214,7 +278,7 @@ test ! -e "$HUB_DB-shm" || cp -a "$HUB_DB-shm" "$BACKUP_DIR/hub.sqlite3-shm"
 
 Hub SQLite 会在 `user_version=1` 执行事务式 schema 迁移。在迁移或压缩已完成结果的保留数据前，Hub 会在数据库旁创建私有一致性快照，文件名为 `.pre-migration.bak` 或 `.pre-retention.bak`。进行任何手动操作前，都应保留当前数据库及匹配的 `-wal`/`-shm` 文件。优先只回滚二进制，同时继续使用最新数据库；只有在比较 run 身份并保留较新数据库作为证据后，才可有意将旧快照用于数据恢复。恢复快照无法撤回已经发送给 Agent 的命令，也无法撤销外部副作用。
 
-Agent 进程历史持久存储在私有 `process.sqlite3` 中，并遵循该存储自己的保留规则。该进程存储会全新创建：旧 `jobs.sqlite3` 会有意保持原样，并且对新的进程生命周期不可访问。没有旧 Job 历史迁移或 `jobs.sqlite3` 迁移备份流程。
+Agent 进程历史持久存储在 `~/.agentic_gpt/state/process.sqlite3` 中，并遵循该存储自己的保留规则。没有迁移既有 Process 历史时，该存储会全新创建；旧 `jobs.sqlite3` 保持原样，不导入新 Process 数据库，也不能通过新的进程生命周期访问。既有 Process 数据库的布局转换使用前述独立迁移脚本。
 
 Agent 配置写入会在 `backups/` 下保留有界私有备份，并使用 setup journal 替换 secret 引用。如果 journal 中的哈希或文件类型不对应任何预期的变更前/变更后状态，启动会 fail closed 并报告恢复冲突。停止 Agent，保留 journal 和当前文件，并从经过验证的副本解决冲突；不要删除 journal、强行选择一侧，也不要在诊断信息中暴露 secret 内容。
 
