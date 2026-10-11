@@ -95,3 +95,12 @@
 - Skill CommitJournal (skill_installs.rs:37-43、1596-1614) 记录 target/archive 是 workspace 包路径，无 agentId；staging_path:1852-1853 由 records_root 相对派生，整树迁移可保留关联记录并由新根派生 staging，无须新增身份/多 workspace 隔离机制。
 - 独立脚本需在 Agent 停止时执行一致转换；识别新版状态文件而非 state 目录非空，既有新版状态不覆盖，只选择当前旧 key。旧 jobs.sqlite3 当前不被 process store 读取，脚本不得把它直接重命名冒充 process.sqlite3；新版缺少哪个当前格式 store，由正常新布局初始化处理，历史文件处理留脚本明确说明。
 - 下一步若用户授权实施，可据以上边界拆为测试隔离、状态去归属与启动清理、独立迁移脚本与文档/真实链路验证阶段。本轮仅核对与记录，没有实施或运行测试。
+
+## ProcessInfo 模型决定与 Hub 消费者
+
+- 用户此前倾向保留字段以收窄范围，本轮最终明确仍拆分 Agent 本地模型与协议 ProcessInfo，追求本地模型不含 agentId；远程协议保持原样。此决定取代“仅保留字段不拆模型”的讨论。
+- Agent 当前 runtime、process_history 和 wire 上报复用协议 ProcessInfo；Hub 是实际消费者而非仅名义共享。
+- Hub lifecycle.rs:249-264 接收 AgentMessage::ProcessUpdate，校验 process.agent_id 与连接 agent_id 一致，再传 ProcessCache.record。
+- Hub state.rs:37-49 ProcessCacheSnapshot / ProcessCacheEntry 保存协议 ProcessInfo；record_at:94 按 (agentId,processId) 缓存，携带连接ID、boot generation、observedAt、freshness。
+- Hub MCP mcp_server.rs:260-322 消费缓存，投影 ProcessListItem 或完整 ProcessInfo 并附加 freshness；HTTP routes 也通过 cached_process 消费共享缓存。缓存属于元数据投影，非本地进程权威历史数据库。
+- 后续实现应保留 Hub 使用的协议 ProcessInfo 与连接身份校验，Agent 本地模型在 ingress/reporting 边界转换。Protocol DTO、Hub 缓存与远程身份无需因本地状态去归属而去掉 agentId。

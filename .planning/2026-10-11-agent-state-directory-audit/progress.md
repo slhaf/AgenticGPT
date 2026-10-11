@@ -8,3 +8,4 @@
 - 2026-10-11 第二轮阶段 3 完成：更新临时 HOME 规范，git diff 人工核对；文档改动无须运行测试。
 - 第二轮阶段 4 完成：整合两个只读子任务，核对事件 owner、进程全表恢复、Skill workspace/并发、远程来源身份、迁移、测试和文档依赖；git diff --check 通过，无代码/用户状态改动。
 - 阶段 5 完成：按用户最终边界核实状态路径、owner metadata、wire ProcessInfo、事件目标校验与安装 journal；目标可行，无新需求澄清，git diff --check 通过。
+- 阶段 6 完成：确认用户最终选择拆本地模型，追踪 Hub 接收身份校验、内存 ProcessCache 与 HTTP/MCP 消费链路；只读核对，未实施代码重构。
