@@ -38,6 +38,11 @@
 - 保留既有用例的 HOME 隔离和接口适配；运行格式与全目标编译检查，独立提交。
 - Status: complete
 
+### 阶段 8：明确测试价值评估前置要求
+- 在 AGENTS.md 中要求新增、改写测试及追加断言前先评估长期保留价值；④⑤档不能替代评估。
+- 核对文档差异后独立提交。
+- Status: complete
+
 ## 验收
 - 新 runtime 不再创建 state/agent/<key>、无 owner_fingerprint 或 local process agentId。
 - Hub payload、local API 的 wire 身份和身份校验保持原样；内部模型及落盘记录不携带本地归属身份。
