@@ -31,3 +31,8 @@
 
 - Git 历史补证：7600e5a 的父版本 standalone_supervisor.rs:93/291/428 使用 standalone-e2e / stdio-resume-e2e / live-reload-e2e 前缀；e56332d 的父版本 standalone_http_mcp.rs:1470 使用 standalone-http-mcp 前缀。因此 1008 个六类前缀目录均与当前或历史集成测试身份格式对应，但未逐目录追溯实际执行者。
 - 最终结论：不限测试；实际加载其他配置、历史 agentId、临时手工实例都会通过同一 prepare 机制创建额外身份目录。没有找到生产代码自行生成随机 agentKey 或根据请求中的外部身份另建根的机制。安装记录只创建当次身份内部 skill-installs/staging 子目录。
+
+## 第二轮：规范与共享状态分析
+- 用户拟取消 state/agent/<agentKey>，直接维护 .agentic_gpt/state；本轮授权先改 AGENTS.md 并分析影响。
+- AGENTS.md 新增临时 HOME 和清理要求，明确配置/workspace/agentId 不能替代 HOME 隔离；派生进程沿用隔离环境；禁止并行测试改全局 HOME；退出后先停进程再清理。
+- 两个只读子任务分别核对存储身份/恢复语义和测试/CI/文档影响。
