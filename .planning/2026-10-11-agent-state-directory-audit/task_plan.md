@@ -9,7 +9,7 @@
 - Status: complete
 ### 阶段 2：只读核对本机目录并交付
 - 只读汇总目录名、文件类型与身份对应关系，区分已证实和推断。
-- Status: in_progress
+- Status: complete
 
 ## 约束
 不运行测试、不删除状态、不读取秘密；每阶段提交调查记录。
