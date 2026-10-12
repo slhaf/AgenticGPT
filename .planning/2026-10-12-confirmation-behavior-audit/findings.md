@@ -78,3 +78,10 @@
 - 旧配置提供显式迁移预览；策略默认结果（未匹配）建议统一并显式配置，当前Shell Confirm与argv Allow的差异需被决策。
 - 外部规则可换为单pattern字符串，内部仍逐invocation/argv匹配；建议小范围通配符语法并明确参数边界，避免整个原始脚本glob。
 - 建议实施拆分：确认流程、策略来源、匹配格式三步分别验收；本轮只完成可行性评估。
+
+## 用户后续确定的规则
+- 单独的 * 为全命令匹配规则，allow中的 * 也覆盖无法静态分析脚本的额外确认要求；已有匹配confirm/deny仍按配置优先级处理，主动批准可覆盖命令决策。
+- 其他pattern中的 * 按参数内通配符解释。
+- 用户称tmux pasteContext，按当前现有tmux.pasteText理解：该API单独默认acquire=true；可显式false关闭主动请求。
+- 建议省略整个对象、对象为空、仅提供method时都沿用本API的acquire=true，避免对象存在与否改变默认行为。
+- 用户确认paste主动确认必须获准；拒绝、超时、不可用、取消均终止，不回退到Allow。显式acquire=false仍表示不主动获取许可。
