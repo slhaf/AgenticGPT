@@ -24,7 +24,6 @@ pub(crate) struct Extraction {
 /// Unsupported constructs still contribute recognizable nested commands so policy
 /// can preserve deny precedence; callers may preflight only complete invocations.
 pub(crate) fn extract_literal_commands(script: &str) -> Extraction {
-    let crlf_offsets = crlf_line_break_offsets(script);
     let mut parser = Parser::new();
     if parser
         .set_language(&tree_sitter_bash::LANGUAGE.into())
@@ -43,6 +42,7 @@ pub(crate) fn extract_literal_commands(script: &str) -> Extraction {
     };
 
     let root = tree.root_node();
+    let crlf_offsets = crlf_line_break_offsets(script, root);
     let mut extraction = Extraction {
         commands: Vec::new(),
         complete: !root.has_error() && crlf_offsets.is_empty(),
@@ -87,19 +87,41 @@ pub(crate) fn extract_literal_commands(script: &str) -> Extraction {
     extraction
 }
 
-fn crlf_line_break_offsets(script: &str) -> Vec<usize> {
+fn crlf_line_break_offsets(script: &str, root: Node<'_>) -> Vec<usize> {
+    let mut literal_ranges = Vec::new();
+    collect_literal_ranges(root, &mut literal_ranges);
     let bytes = script.as_bytes();
     let mut offsets = Vec::new();
     let mut index = 0;
     while index + 2 < bytes.len() {
         if bytes[index] == b'\\' && bytes[index + 1] == b'\r' && bytes[index + 2] == b'\n' {
-            offsets.push(index);
+            let range_index = literal_ranges.partition_point(|range| range.end <= index);
+            if !literal_ranges
+                .get(range_index)
+                .is_some_and(|range| range.contains(&index))
+            {
+                offsets.push(index);
+            }
             index += 3;
         } else {
             index += 1;
         }
     }
     offsets
+}
+
+fn collect_literal_ranges(node: Node<'_>, ranges: &mut Vec<std::ops::Range<usize>>) {
+    if matches!(
+        node.kind(),
+        "raw_string" | "ansi_c_string" | "string_content" | "comment" | "heredoc_body"
+    ) {
+        ranges.push(node.byte_range());
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_literal_ranges(child, ranges);
+    }
 }
 
 fn bash_crlf_analysis_view(script: &str, offsets: &[usize]) -> Option<String> {
@@ -125,6 +147,13 @@ fn visit_node(node: Node<'_>, source: &str, commands: &mut Vec<LiteralCommand>) 
             collect_nested_commands(node, source, commands);
             complete
         }
+        "declaration_command" | "unset_command" => {
+            if let Some(command) = extract_builtin_command(node, source) {
+                commands.push(command);
+            }
+            collect_nested_commands(node, source, commands);
+            false
+        }
         _ => {
             collect_nested_commands(node, source, commands);
             false
@@ -149,9 +178,19 @@ fn visit_sequence(
         let gap = source
             .get(previous_end..child.start_byte())
             .unwrap_or_default();
-        let gap_is_plain = is_plain_word_separator(gap);
+        // A continuation can join '#' to the preceding word, while Tree-sitter
+        // incorrectly treats the rest of that line as a comment. Keep this
+        // unsupported boundary incomplete rather than silently dropping code.
+        let joins_comment =
+            child.kind() == "comment" && !gap.is_empty() && literal_word_gap(gap) == Some(false);
+        let gap_is_plain = is_sequence_separator(gap) && !joins_comment;
         if !gap_is_plain {
             complete = false;
+            if joins_comment {
+                if let Some(invocation) = commands.last_mut() {
+                    invocation.complete = false;
+                }
+            }
         }
 
         if child.is_named() {
@@ -186,7 +225,7 @@ fn visit_sequence(
     let trailing = source
         .get(previous_end..node.end_byte())
         .unwrap_or_default();
-    if !is_plain_word_separator(trailing) {
+    if !is_sequence_separator(trailing) {
         complete = false;
         if commands.len() > sequence_command_start {
             if let Some(invocation) = commands.last_mut() {
@@ -197,8 +236,25 @@ fn visit_sequence(
     complete
 }
 
-fn is_plain_word_separator(gap: &str) -> bool {
-    gap.chars().all(|character| matches!(character, ' ' | '\t'))
+fn is_sequence_separator(gap: &str) -> bool {
+    gap.chars()
+        .all(|character| matches!(character, ' ' | '\t' | '\n'))
+        || literal_word_gap(gap).is_some()
+}
+
+/// Tree-sitter treats Bash line continuations as extras, even within one word.
+/// Preserve whether the remaining gap separates argv words or joins fragments.
+fn literal_word_gap(gap: &str) -> Option<bool> {
+    let mut bytes = gap.as_bytes().iter().copied();
+    let mut separated = false;
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b' ' | b'\t' => separated = true,
+            b'\\' if bytes.next() == Some(b'\n') => {}
+            _ => return None,
+        }
+    }
+    Some(separated)
 }
 
 fn has_escaped_whitespace(gap: &str) -> bool {
@@ -208,9 +264,9 @@ fn has_escaped_whitespace(gap: &str) -> bool {
 }
 
 fn extract_command(node: Node<'_>, source: &str) -> (Option<LiteralCommand>, bool) {
-    let mut program = None;
+    let mut program: Option<String> = None;
     let mut program_is_reliable = true;
-    let mut args = Vec::new();
+    let mut args: Vec<String> = Vec::new();
     let mut args_are_prefix = true;
     let mut complete = !node.has_error();
     let mut previous_end = node.start_byte();
@@ -224,7 +280,8 @@ fn extract_command(node: Node<'_>, source: &str) -> (Option<LiteralCommand>, boo
         let gap = source
             .get(previous_end..child.start_byte())
             .unwrap_or_default();
-        if !is_plain_word_separator(gap) {
+        let word_gap = literal_word_gap(gap);
+        if word_gap.is_none() {
             complete = false;
             match field {
                 Some("name") => {
@@ -262,9 +319,22 @@ fn extract_command(node: Node<'_>, source: &str) -> (Option<LiteralCommand>, boo
             Some("argument") => {
                 if let Some(value) = literal_word(child, source) {
                     if args_are_prefix {
-                        args.push(value);
+                        if word_gap == Some(false) && !gap.is_empty() {
+                            if let Some(argument) = args.last_mut() {
+                                argument.push_str(&value);
+                            } else if let Some(program) = program.as_mut() {
+                                program.push_str(&value);
+                            }
+                        } else {
+                            args.push(value);
+                        }
                     }
                 } else {
+                    if word_gap == Some(false) && !gap.is_empty() && args_are_prefix {
+                        if args.pop().is_none() {
+                            program = None;
+                        }
+                    }
                     args_are_prefix = false;
                     complete = false;
                 }
@@ -278,7 +348,7 @@ fn extract_command(node: Node<'_>, source: &str) -> (Option<LiteralCommand>, boo
     let trailing = source
         .get(previous_end..node.end_byte())
         .unwrap_or_default();
-    if !is_plain_word_separator(trailing) {
+    if literal_word_gap(trailing).is_none() {
         complete = false;
     }
 
@@ -297,6 +367,60 @@ fn extract_command(node: Node<'_>, source: &str) -> (Option<LiteralCommand>, boo
     )
 }
 
+/// Special builtin statements remain unsupported for Allow, but their literal
+/// names and reliable argv prefixes must still participate in Deny matching.
+fn extract_builtin_command(node: Node<'_>, source: &str) -> Option<LiteralCommand> {
+    let keyword = node.child(0)?;
+    let keyword_text = keyword.utf8_text(source.as_bytes()).ok()?;
+    if !matches!(
+        keyword_text,
+        "declare" | "typeset" | "export" | "readonly" | "local" | "unset" | "unsetenv"
+    ) {
+        return None;
+    }
+    let mut program = keyword_text.to_string();
+    let mut args: Vec<String> = Vec::new();
+    let mut previous_end = keyword.end_byte();
+    for index in 1..node.child_count() {
+        let child = node.child(index)?;
+        let gap = source.get(previous_end..child.start_byte())?;
+        let Some(separated) = literal_word_gap(gap) else {
+            if !gap.starts_with([' ', '\t']) && args.pop().is_none() {
+                return None;
+            }
+            break;
+        };
+        let value = if child.kind() == "variable_name" {
+            Some(child.utf8_text(source.as_bytes()).ok()?.to_string())
+        } else {
+            literal_word(child, source)
+        };
+        let Some(value) = value else {
+            if !separated && !gap.is_empty() && args.pop().is_none() {
+                return None;
+            }
+            break;
+        };
+        if !separated && !gap.is_empty() {
+            if let Some(argument) = args.last_mut() {
+                argument.push_str(&value);
+            } else {
+                program.push_str(&value);
+            }
+        } else {
+            args.push(value);
+        }
+        previous_end = child.end_byte();
+    }
+    Some(LiteralCommand {
+        program,
+        args,
+        start_byte: node.start_byte(),
+        end_byte: node.end_byte(),
+        complete: false,
+    })
+}
+
 fn collect_nested_commands(node: Node<'_>, source: &str, commands: &mut Vec<LiteralCommand>) {
     for index in 0..node.child_count() {
         let Some(child) = node.child(index) else {
@@ -305,7 +429,10 @@ fn collect_nested_commands(node: Node<'_>, source: &str, commands: &mut Vec<Lite
         if !child.is_named() {
             continue;
         }
-        if child.kind() == "command" {
+        if matches!(
+            child.kind(),
+            "command" | "declaration_command" | "unset_command"
+        ) {
             let _ = visit_node(child, source, commands);
         } else {
             collect_nested_commands(child, source, commands);
@@ -396,7 +523,7 @@ fn decode_double_quoted(text: &str) -> Option<String> {
             }
         } else {
             match character {
-                '$' if chars.peek().is_some() => return None,
+                '$' if starts_double_quoted_expansion(chars.clone()) => return None,
                 '$' => output.push('$'),
                 '`' => return None,
                 _ => output.push(character),
@@ -404,4 +531,22 @@ fn decode_double_quoted(text: &str) -> Option<String> {
         }
     }
     Some(output)
+}
+
+fn starts_double_quoted_expansion(mut chars: std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    // Bash removes unescaped line continuations before recognizing expansions.
+    // A dollar followed by a continuation and HOME is still "$HOME".
+    loop {
+        match chars.next() {
+            Some('\\') if chars.next() == Some('\n') => continue,
+            Some(next) => {
+                return next.is_ascii_alphanumeric()
+                    || matches!(
+                        next,
+                        '_' | '*' | '@' | '#' | '?' | '-' | '$' | '!' | '{' | '(' | '['
+                    );
+            }
+            None => return false,
+        }
+    }
 }

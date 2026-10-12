@@ -1484,6 +1484,217 @@ async fn process_shapes_are_compact_and_keep_group_filters() -> anyhow::Result<(
 }
 
 #[tokio::test]
+async fn room_process_exec_preserves_literal_shell_syntax_across_newlines() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
+    let _cleanup = TestStateCleanup::for_server(&server).await;
+    {
+        let mut config = server.state.config.write().await;
+        config.confirmation_provider.channels.clear();
+        config
+            .policy
+            .allow
+            .extend(
+                ["printf", "cat", "true"]
+                    .into_iter()
+                    .map(|program| crate::config::Rule {
+                        program: program.to_string(),
+                        args_prefix: Vec::new(),
+                    }),
+            );
+    }
+
+    let cases = [
+        ("printf 'plain\\n'\nprintf 'next\\n'", "plain\nnext\n"),
+        ("printf 'trailing-lf\\n'\n", "trailing-lf\n"),
+        (
+            "printf 'before\\n' # comment\nprintf 'after\\n'",
+            "before\nafter\n",
+        ),
+        ("true &&\nprintf 'and\\n'", "and\n"),
+        ("printf 'pipe\\n' |\ncat", "pipe\n"),
+        (
+            "pri\\\nntf 'program continuation\\n'",
+            "program continuation\n",
+        ),
+        (
+            "printf \\\n'argument continuation\\n'",
+            "argument continuation\n",
+        ),
+        ("printf '%s' foo\\\nbar", "foobar"),
+        ("printf '%s|%s' \"$:\" \"$/\"", "$:|$/"),
+        ("printf '%s' 'left\\\r\nright'", "left\\\r\nright"),
+        ("printf '%s' \"left\\\\\r\nright\"", "left\\\r\nright"),
+    ];
+
+    for (command, expected) in cases {
+        let (response, stdout) = room_process_exec_output(&server, command).await?;
+        assert_eq!(
+            response["state"], "completed",
+            "command: {command:?}; response: {response}"
+        );
+        assert_eq!(stdout, expected, "command: {command:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn room_process_exec_preserves_deny_and_confirmation_boundaries() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
+    let _cleanup = TestStateCleanup::for_server(&server).await;
+    let marker = server
+        .state
+        .config
+        .read()
+        .await
+        .workspace_root
+        .join("must-not-exist");
+    let marker_text = marker.to_string_lossy().into_owned();
+    {
+        let mut config = server.state.config.write().await;
+        config.confirmation_provider.channels.clear();
+        config.policy.allow.push(crate::config::Rule {
+            program: "printf".to_string(),
+            args_prefix: Vec::new(),
+        });
+        config.policy.deny.extend(
+            [
+                ("printf", vec!["blocked".to_string()]),
+                ("export", Vec::new()),
+                ("unset", Vec::new()),
+                ("declare", Vec::new()),
+            ]
+            .into_iter()
+            .map(|(program, args_prefix)| crate::config::Rule {
+                program: program.to_string(),
+                args_prefix,
+            }),
+        );
+    }
+
+    let denied_commands = [
+        format!("printf allowed > '{marker_text}'; printf blocked"),
+        format!("printf blocked > '{marker_text}'"),
+        format!("pri\\\nntf blocked > '{marker_text}'"),
+        format!("printf \\\nblocked > '{marker_text}'"),
+        format!("printf bl\\\nocked > '{marker_text}'"),
+        "export AGENTIC_DENY_TEST=value".to_string(),
+        "unset AGENTIC_DENY_TEST".to_string(),
+        "declare AGENTIC_DENY_TEST=value".to_string(),
+    ];
+    for command in denied_commands {
+        let (response, _) = room_process_exec_output(&server, &command).await?;
+        assert_eq!(
+            response["state"], "rejected",
+            "command: {command:?}; response: {response}"
+        );
+        assert_eq!(
+            response["error"]["code"], "policy_denied",
+            "command: {command:?}"
+        );
+        assert!(
+            !marker.exists(),
+            "denied command created the marker: {command:?}"
+        );
+    }
+
+    for command in [
+        "printf '%s' \"$HOME\"".to_string(),
+        "printf '%s' \"$\\\nHOME\"".to_string(),
+        "printf bl\\\n\"$HOME\"".to_string(),
+        format!("printf marker > '{marker_text}'"),
+    ] {
+        let (response, _) = room_process_exec_output(&server, &command).await?;
+        assert_eq!(
+            response["state"], "rejected",
+            "command: {command:?}; response: {response}"
+        );
+        assert_eq!(
+            response["error"]["code"], "process_confirmation_unavailable",
+            "ambiguous syntax must still require confirmation: {command:?}"
+        );
+        assert!(
+            !marker.exists(),
+            "unconfirmed command created the marker: {command:?}"
+        );
+    }
+
+    let continuation_before_comment = "printf a\\\n#b; printf blocked";
+    let (response, stdout) = room_process_exec_output(&server, continuation_before_comment).await?;
+    assert_eq!(
+        response["state"], "rejected",
+        "continuation adjacent to a comment must not hide a later denied command: {response}"
+    );
+    assert!(stdout.is_empty(), "unsupported script executed a prefix");
+
+    server
+        .state
+        .config
+        .write()
+        .await
+        .policy
+        .deny
+        .iter_mut()
+        .find(|rule| rule.program == "unset")
+        .expect("unset deny rule")
+        .args_prefix = vec!["blocked".to_string()];
+    let (response, _) = room_process_exec_output(&server, "unset bl\\\nocked").await?;
+    assert_eq!(response["error"]["code"], "policy_denied");
+    for command in [
+        "unset blocked\\\n\"$HOME\"",
+        "unset\\\nfoo",
+        "export\\\nfoo",
+    ] {
+        let (response, _) = room_process_exec_output(&server, command).await?;
+        assert_eq!(
+            response["error"]["code"], "process_confirmation_unavailable",
+            "partial builtin words must not spuriously match deny: {command:?}; {response}"
+        );
+    }
+    Ok(())
+}
+
+async fn room_process_exec_output(
+    server: &AgentMcpServer,
+    command: &str,
+) -> anyhow::Result<(Value, String)> {
+    let started = server
+        .dispatch(
+            "process.exec",
+            json!({"command": command, "waitSeconds": 5}),
+        )
+        .await?;
+    let process_id = started["processId"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("process.exec did not return a processId: {started}"))?;
+    let output = server
+        .dispatch(
+            "process.read",
+            json!({"processId": process_id, "waitSeconds": 1}),
+        )
+        .await?;
+    if matches!(
+        output["state"].as_str(),
+        Some("queued" | "waiting_confirmation" | "starting" | "running" | "cancel_requested")
+    ) {
+        server
+            .dispatch("process.cancel", json!({"processId": process_id}))
+            .await?;
+        server
+            .dispatch(
+                "process.read",
+                json!({"processId": process_id, "view": "status", "waitSeconds": 30}),
+            )
+            .await?;
+        anyhow::bail!("short fixture command did not finish: {command:?}; {output}");
+    }
+    let stdout = output["output"]["stdout"]["data"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("process.read did not return stdout: {output}"))?
+        .to_string();
+    Ok((started, stdout))
+}
+
+#[tokio::test]
 async fn process_read_preserves_raw_byte_offsets_and_utf8_output() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     allow_test_printf(&server).await;
@@ -3134,6 +3345,26 @@ fn test_state(profile: CapabilityProfile) -> AppState {
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(SkillLeaseManager::new()),
         skill_installs: Arc::new(InstallManager::new()),
+    }
+}
+
+struct TestStateCleanup(PathBuf);
+
+impl TestStateCleanup {
+    async fn for_server(server: &AgentMcpServer) -> Self {
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        Self(
+            workspace
+                .parent()
+                .expect("test workspace parent")
+                .to_path_buf(),
+        )
+    }
+}
+
+impl Drop for TestStateCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
