@@ -79,29 +79,131 @@
     }
   },
   "pathPolicy": {
-    "writeRoots": [
+    "read": {
+      "defaultAction": "deny",
+      "allow": [
+        "~/.cache/**",
+        "~/.local/share/**",
+        "/etc/os-release/**",
+        "/proc/meminfo/**",
+        "/proc/cpuinfo/**",
+        "/proc/loadavg/**",
+        "/proc/uptime/**",
+        "/sys/class/power_supply/**",
+        "/sys/class/thermal/**",
+        "/home/your-user/.agentic_gpt/workspace/**",
+        "~/Documents/**",
+        "~/Downloads/**",
+        "~/Projects/**",
+        "/tmp/**"
+      ],
+      "confirm": [],
+      "deny": [
+        "~/.ssh/**",
+        "~/.gnupg/**",
+        "~/.local/share/keyrings/**",
+        "~/.password-store/**",
+        "~/.mozilla/**",
+        "~/.config/google-chrome/**",
+        "~/.config/chromium/**",
+        "~/.npmrc/**",
+        "~/.pypirc/**",
+        "~/.cargo/credentials/**",
+        "~/.docker/config.json/**",
+        "~/.kube/**",
+        "~/.aws/**",
+        "~/.config/gcloud/**",
+        "~/.config/gh/**"
+      ]
+    },
+    "write": {
+      "defaultAction": "deny",
+      "allow": [
+        "/home/your-user/.agentic_gpt/workspace/**",
+        "~/Documents/**",
+        "~/Downloads/**",
+        "~/Projects/**",
+        "/tmp/**"
+      ],
+      "confirm": [],
+      "deny": [
+        "~/.ssh/**",
+        "~/.gnupg/**",
+        "~/.local/share/keyrings/**",
+        "~/.password-store/**",
+        "~/.mozilla/**",
+        "~/.config/google-chrome/**",
+        "~/.config/chromium/**",
+        "~/.npmrc/**",
+        "~/.pypirc/**",
+        "~/.cargo/credentials/**",
+        "~/.docker/config.json/**",
+        "~/.kube/**",
+        "~/.aws/**",
+        "~/.config/gcloud/**",
+        "~/.config/gh/**"
+      ]
+    }
+  },
+  "policy": {
+    "defaultAction": "confirm",
+    "allow": [],
+    "confirm": [
+      "sudo **",
+      "rm **",
+      "mv **",
+      "chmod **",
+      "chown **",
+      "mount **",
+      "systemctl **",
+      "service **",
+      "docker **",
+      "scp **",
+      "curl **",
+      "wget **",
+      "bash **",
+      "sh **",
+      "zsh **",
+      "fish **",
+      "perl **",
+      "ruby **",
+      "python -c **",
+      "node -e **"
+    ],
+    "deny": [
+      "su **",
+      "mkfs **",
+      "dd **",
+      "ssh **"
+    ]
+  },
+  "sandbox": {
+    "enabled": false,
+    "bubblewrapPath": "bwrap",
+    "requiredRuntimePaths": [
+      "/usr",
+      "/bin",
+      "/lib",
+      "/lib64",
+      "/etc/ssl"
+    ],
+    "readPaths": [
+      "~/.cache",
+      "~/.local/share",
+      "/etc/os-release",
+      "/proc/meminfo",
+      "/proc/cpuinfo",
+      "/proc/loadavg",
+      "/proc/uptime",
+      "/sys/class/power_supply",
+      "/sys/class/thermal"
+    ],
+    "writePaths": [
       "/home/your-user/.agentic_gpt/workspace",
       "~/Documents",
       "~/Downloads",
       "~/Projects",
       "/tmp"
-    ],
-    "denyRoots": [
-      "~/.ssh",
-      "~/.gnupg",
-      "~/.local/share/keyrings",
-      "~/.password-store",
-      "~/.mozilla",
-      "~/.config/google-chrome",
-      "~/.config/chromium",
-      "~/.npmrc",
-      "~/.pypirc",
-      "~/.cargo/credentials",
-      "~/.docker/config.json",
-      "~/.kube",
-      "~/.aws",
-      "~/.config/gcloud",
-      "~/.config/gh"
     ]
   }
 }

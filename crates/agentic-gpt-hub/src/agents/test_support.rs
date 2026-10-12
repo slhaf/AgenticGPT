@@ -106,21 +106,14 @@ pub(super) fn test_running_process(process_id: &str) -> ProcessInfo {
 pub(super) fn test_config_summary() -> SafeConfigSummary {
     serde_json::from_value(json!({
         "workspaceRoot": "configured",
-        "sandbox": {"enabled": false, "mode": "disabled"},
+        "sandbox": {"enabled": false, "mode": "disabled", "readPaths": [], "writePaths": []},
         "pathPolicy": {
-            "writeRootCount": 1,
-            "readOnlyRootCount": 0,
-            "denyRootCount": 0,
-            "writeRoots": [{"path": "workspace", "source": "workspace"}],
-            "readOnlyRoots": [],
-            "denyRoots": []
+            "read": {"defaultAction": "deny", "allow": ["workspace/**"], "confirm": [], "deny": []},
+            "write": {"defaultAction": "deny", "allow": ["workspace/**"], "confirm": [], "deny": []}
         },
         "policyRuleCounts": {"allow": 0, "confirm": 0, "deny": 0},
         "policyRules": {
-            "allow": [],
-            "confirm": [],
-            "deny": [],
-            "builtins": {"confirm": [], "deny": []}
+            "defaultAction": "confirm", "allow": [], "confirm": [], "deny": []
         },
         "confirmationProvider": "none"
     }))

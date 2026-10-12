@@ -106,7 +106,11 @@ pub struct TmuxPasteTextRequest {
     pub text: String,
     #[serde(default)]
     pub submit: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::deserialize_no_scope_confirmation"
+    )]
     pub acquire_confirmation: Option<AcquireConfirmation>,
 }
 
@@ -117,7 +121,11 @@ pub struct TmuxExecRequest {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::deserialize_no_scope_confirmation"
+    )]
     pub acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default = "default_tmux_exec_wait_ms")]
     pub wait_ms: u64,
@@ -138,7 +146,11 @@ fn default_tmux_exec_capture_lines() -> u32 {
 pub struct TmuxCreateSessionRequest {
     pub name: String,
     pub cwd: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::deserialize_no_scope_confirmation"
+    )]
     pub acquire_confirmation: Option<AcquireConfirmation>,
 }
 
@@ -146,7 +158,11 @@ pub struct TmuxCreateSessionRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TmuxCloseSessionRequest {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::deserialize_no_scope_confirmation"
+    )]
     pub acquire_confirmation: Option<AcquireConfirmation>,
 }
 

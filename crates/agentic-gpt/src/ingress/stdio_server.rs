@@ -1882,7 +1882,10 @@ struct EmptyArgs {}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileReadArgs {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default)]
     path: Option<String>,
@@ -1911,7 +1914,10 @@ struct FileReadRequestArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileSearchArgs {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default)]
     path: Option<String>,
@@ -1964,7 +1970,10 @@ struct FileSearchRequestArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileEditArgs {
     patch: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
 }
 #[derive(Debug, Deserialize)]
@@ -2174,7 +2183,10 @@ struct TmuxSessionsArgs {
     name: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
 }
 
@@ -2197,7 +2209,10 @@ struct TmuxExecArgs {
     program: String,
     #[serde(default)]
     args: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default)]
     wait_ms: Option<u64>,
@@ -2212,7 +2227,10 @@ struct TmuxPasteArgs {
     text: String,
     #[serde(default)]
     submit: bool,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
 }
 

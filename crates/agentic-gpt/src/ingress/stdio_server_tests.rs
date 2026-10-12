@@ -1203,6 +1203,34 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
             .expect_err("Removed lifecycle aliases must not be callable");
         assert_eq!(removed.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
     }
+    for (tool, mut arguments) in [
+        ("file.read", json!({"path":"."})),
+        ("file.search", json!({"path":".", "query":"value"})),
+        (
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** End Patch"}),
+        ),
+        ("tmux.exec", json!({"target":"pane", "program":"true"})),
+        ("tmux.pasteText", json!({"target":"pane", "text":"value"})),
+        (
+            "tmux.sessions",
+            json!({"action":"create", "name":"scope-test", "cwd":"."}),
+        ),
+    ] {
+        for field in ["read", "write"] {
+            arguments["acquireConfirmation"] = json!({field: []});
+            let error = server
+                .call(
+                    CallToolRequestParams::new(tool)
+                        .with_arguments(arguments.as_object().unwrap().clone()),
+                )
+                .await
+                .expect_err(
+                    "file/tmux confirmation objects reject scope fields, including empty arrays",
+                );
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        }
+    }
 }
 
 #[tokio::test]

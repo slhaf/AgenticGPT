@@ -15,23 +15,22 @@ const PATCH_SCHEMA_DESCRIPTION: &str =
     "以 *** Begin Patch 开始、*** End Patch 结束；支持新增、删除、更新和移动文件。";
 
 fn acquire_confirmation_schema(allow_scope: bool, default: bool) -> Value {
-    let mut scope = json!({"type":"array", "items":{"type":"string"}, "default":[]});
-    if !allow_scope {
-        scope["maxItems"] = json!(0);
+    let mut properties = json!({
+        "acquire":{"type":"boolean","default":default,"description":if default { "是否主动请求确认；此操作要求主动确认成功，拒绝、超时或提供方不可用时不执行。" } else { "是否主动请求确认；获准可单次覆盖策略拒绝；明确拒绝中止，超时/过期/不可用回退配置策略，仅 Allow 可继续。" }},
+        "method":{"type":"string","enum":["ntfy","freedesktop"],"description":"可选确认提供方；省略沿用配置。"},
+    });
+    if allow_scope {
+        properties["read"] = json!({"type":"array", "items":{"type":"string"}, "default":[]});
+        properties["write"] = json!({"type":"array", "items":{"type":"string"}, "default":[]});
     }
     json!({
         "type":"object", "additionalProperties":false,
         "description": if allow_scope {
             "可选单次确认。read/write 临时路径范围仅适用于本次命令，必须同时 acquire=true；不改变持久配置。"
         } else {
-            "可选单次确认。不接受非空 read/write 范围；确认仅作用于本次操作，不改变持久配置。"
+            "可选单次确认。仅接受 acquire/method，不接受 read/write 字段；确认仅作用于本次操作，不改变持久配置。"
         },
-        "properties": {
-            "acquire":{"type":"boolean","default":default,"description":"是否主动请求确认；确认可单次覆盖策略拒绝，提供方不可用或拒绝时不执行。"},
-            "method":{"type":"string","enum":["ntfy","freedesktop"],"description":"可选确认提供方；省略沿用配置。"},
-            "read":scope.clone(),
-            "write":scope,
-        }
+        "properties": properties
     })
 }
 

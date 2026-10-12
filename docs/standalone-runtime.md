@@ -192,7 +192,7 @@ Agentic 会报告 `detached` 并附带有界的终止证据，而不会声称已
 包含 server/tool 名称、有界的 argument key 子集及其总数、字节数和 hash、配置 revision、结果大小/hash 和终态证据，但绝不包含原始
 arguments 或原始结果。
 
-Standalone worker 不接受 Tunnel 命令封套中的 `agentId` 或 `confirmMethod` 字段，意外的旧版字段仍会被拒绝；事件工具另有明确的可选 `agentId` 输入，且只接受匹配当前 worker 身份的值，不会据此选择其他 Agent。worker 使用已配置的本地 Agent 身份处理调用。`bootstrap` 仅限 Room。托管 process 准入工具（`process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 和
+Standalone worker 不接受 Tunnel 命令封套中的 `agentId` 字段；旧 `needConfirm`／`confirmMethod` 已移除，意外的旧版字段仍会被拒绝；事件工具另有明确的可选 `agentId` 输入，且只接受匹配当前 worker 身份的值，不会据此选择其他 Agent。worker 使用已配置的本地 Agent 身份处理调用。`bootstrap` 仅限 Room。托管 process 准入工具（`process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 和
 `mcp.batch`）接受可选且经过校验的可读 `group`；batch 子项继承父项的 group。`process.exec` 使用必填原始 Bash 脚本 `command` 和可选 `cwd`；`process.batch` 每个元素使用 `command`，可在批次级提供 `cwd` 并由元素覆盖。旧 `program`/`args`/`workingDirectory` 不是可接受的执行输入。响应保持精简，并将 `processId` 作为后续查询状态、输出、
 结果或取消的稳定句柄。丰富但有界的 provenance 保留在内部/持久记录中，不会在每个响应里重复。
 
@@ -266,9 +266,9 @@ Tunnel、HTTP 和本地 Unix 入口不会暴露 Hub 汇总或通知工具。它�
 每项的 JSON envelope（若有图像则包含其 metadata）后面紧跟该项 image block；GIF 帧按时间顺序排列。纯文本响应及其现有响应边界不变。Search
 batch 除每次搜索自身的限制外，还保留 20,000 个文件和 128 MiB 的汇总扫描上限。
 
-`file.edit` 只接受 `patch` 和可选的 `needConfirm`。
+`file.edit` 接受 `patch` 和可选的 `acquireConfirmation`。`file.read`／`file.search` 也接受同一确认对象；file 工具根据实际请求确定批准范围，不接受其中的 `read`／`write` 字段。主动批准可覆盖本次路径策略，拒绝终止；超时或不可用按配置回退，Confirm 复用失败结果而不会重复请求。
 patch 使用 Codex apply-patch 语法，可一次新增、更新、删除或移动多个文件。所有源路径和目标路径都会依据现有路径策略解析，以确定性顺序加锁，
-并检查是否为 UTF-8 及是否不超过 8 MiB；所有变更会先暂存并验证，然后才可进行一次可选确认。对于 `Add File`，仅当请求路径通过既有路径策略时，
+并检查是否为 UTF-8 及是否不超过 8 MiB；操作在读取源内容、创建父目录和暂存前，对全部源路径、目标路径及需创建的父目录统一判定策略并按需取得一次批准。批准后重新核对目标身份，再读取、暂存和验证变更。对于 `Add File`，仅当请求路径通过既有路径策略时，
 才可创建缺失的父目录。新建的空父目录会被跟踪；若 preflight 拒绝请求或确认未继续，会清理这些目录。这不会改变 `Move` 行为，也不能消除路径检查中的
 竞态。提交前会重新验证源文件快照。第一次实际写入提交开始前发生失败时，不会写入任何文件内容；提交开始后，不保证跨文件回滚。正常成功响应只包含已提交的
 请求路径和操作；部分失败会保留有序的状态/错误证据。Diff、解析后的路径、变更行数和 revision 仅供确认与审计使用，不对外返回。

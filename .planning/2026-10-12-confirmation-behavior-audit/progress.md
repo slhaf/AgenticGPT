@@ -65,3 +65,9 @@
 - 新增具长期价值的实际链路回归：Process批准/拒绝/失败回退一次；真实bwrap批准child写但parent只读；file批准覆盖Deny及拒绝无写、等待时symlink切换拒绝、search filters授权一致；已批准Deny批次仍受kernel argv整批预检。既有具名测试不覆盖新增失败模式，无独立低档pattern测试。
 - 隔离验证：Agent suite386 passed/1 ignored（新增kernel用例定点1 passed），stdio50 passed，真实bwrap1 passed，严格Clippy先通过后末次guard修复待最终重跑。完整workspace继续至CLI集成旧fixture失败，已纳入阶段三迁移。
 - 第一阶段提交b6bb483；没有自动迁移真实配置，runtime smoke均使用隔离HOME/XDG/TMP/D-Bus。
+
+- 阶段二提交a3e09c1。阶段三完成配置示例、公开契约、文档及独立CLI/Hub summary fixtures迁移；file/tmux仅acquire/method，空read/write字段也严格拒绝，Process保留scope。
+- 手动迁移脚本默认脱敏预览；写入共享.config.lock、0600备份/原子替换，拒绝变化、symlink/FIFO，失败清理。已验证锁等待/释放、exact backup、idempotency、scope字面转义及fake secret不出日志；未触碰真实配置。
+- 最终隔离cargo test --workspace：518 passed /0 failed /1 ignored；严格cargo clippy --workspace --all-targets -- -D warnings、fmt、diffcheck通过。Agent/Hub隔离build通过。
+- 真实tmux smoke确认paste默认强制批准不可用不发送，显式false按Allow发送；已清理专属server/worker。桌面通知真实用户动作未触发。
+- Live parity修正新默认Confirm下script fixture显式allow以及启动前配置snapshot，空stdout分页不锁定编码时序；最终gate仍在运行，尚不宣称PASS。

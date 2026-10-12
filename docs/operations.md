@@ -343,3 +343,43 @@ agentic-gpt local call mcp.batch \
 - 有界的 Hub/HTTP/MCP 等待超时只结束本地等待，不会停止远程 Process。迟到的远程信息仍可能更新运行回执；`not_sent` 仅表示已证实的通道发送失败，且不会重放。
 - Standalone 上报功能为可选项，且仅用于上报；它绝不是隐藏的共享命令依赖。
 - 无效的实时配置会保留最后一个有效子集；启动身份变更需要重启。
+
+## 确认与策略格式迁移
+
+本次不兼容升级移除 needConfirm/confirmMethod、program/argsPrefix 规则对象及 writeRoots/readOnlyRoots/denyRoots。
+运行时不自动转换旧格式；命令及路径策略采用显式 defaultAction 和字符串模式数组，固定 deny > confirm > allow 优先级。
+请求调用方改用 acquireConfirmation，具体范围和默认值见[配置说明](configuration.zh-CN.md#单次主动确认)。下游 MCP 审批合同保持原有语义。
+
+仓库提供手动脚本 [migrate-confirmation-policy.py](../scripts/migrate-confirmation-policy.py)。先停止不遵守配置锁的编辑器及其他写者，再明确指定输入文件：
+
+```bash
+# 默认只预览授权相关变更，并隐藏命令参数；不输出 Hub／tunnel／MCP 密钥或其他配置内容。
+python3 scripts/migrate-confirmation-policy.py /path/to/old-config.json --home /home/replace-user
+# 输出新文件；已有目标先备份。核对预览中的假设和冲突后再执行。
+python3 scripts/migrate-confirmation-policy.py /path/to/old-config.json --home /home/replace-user --output /path/to/new-config.json
+# 或备份后原子替换明确指定的输入。
+python3 scripts/migrate-confirmation-policy.py /path/to/old-config.json --home /home/replace-user --write
+```
+
+脚本不读取默认 HOME，不自动查找配置，也不调用 Agent runtime。旧路径含 `~` 或缺失的历史预设需要 `--home`；
+缺少 workspaceRoot 时可用 `--workspace /path/to/workspace`，否则使用显式 --home 下的历史初始化工作区并报告假设。
+使用环境变量或相对根路径的配置必须先明确其具体绝对路径。未知／混合规则形状、重复 JSON 字段及符号链接配置文件会失败。
+缺失的旧稀疏策略只在此手动脚本内按历史初始化预设恢复，所有补齐均出现在报告中；新运行时加载不恢复这些历史预设。
+
+默认预览中，旧命令规则只显示规则索引、程序名称和参数数量，新命令模式显示 `[redacted]`；冲突引用规则索引及内置规则名称，不输出命令参数。参数可能包含凭据，因此检查完整规则时先用 `--output` 生成权限为 `0600` 的私有配置文件，再在本地审阅该文件，不将其内容贴入日志。
+
+脚本将旧 argv 前缀转换为转义后的字面参数模式，并追加 `**`；按旧 profile 将原内置 confirm/deny 写成显式规则。
+旧配置 allow／confirm 曾可覆盖内置规则，迁移后固定优先级可能重新要求确认或拒绝；报告列出这些冲突，须人工决定是否调整显式规则。
+未匹配命令采用新默认 confirm。workspace 自动可写改为显式 read/write allow，路径根规范化为包含根本身的子树模式，原根字段删除。
+符号链接目标会在迁移机器上规范化；跨机器部署前须复核路径。对已有新格式再次迁移不会重复追加内置预设。
+
+sandbox.readPaths/writePaths 从旧具体读取／写入根生成，不从全局通配规则推导；显式已有挂载列表会保留并规范化。
+路径策略与 OS 挂载是独立边界：拒绝模式不代表宿主目录从 sandbox namespace 消失，须复核挂载范围及实际执行用户权限。
+迁移不会依据全局策略通配符新增宿主根挂载，也不为 tmux、MCP 或 Browser 增加通用沙箱。
+
+实际写入会对规范化目标路径加同一把 `<目标>.config.lock` Linux `flock` 配置锁，与 Agent／配置 CLI 写者协调；持锁贯穿写前字节校验、备份、临时写入、原子替换和目录 fsync，关闭文件描述符时释放。锁文件使用 `0600`，拒绝符号链接或非普通文件；完成后保留锁文件，预览不创建锁。`--output` 只锁输出目标，`--write` 在持锁后再次核对输入字节；不遵守该锁的写者仍需先停止。
+
+每次实际写入先创建权限为 0600 的 `.backup.<UTC时间>.<随机标识>.json` 备份，再在目标目录写临时文件并原子替换；
+失败会清理临时文件，已创建备份保留用于恢复。新输出文件也保留输入快照备份；已有输出则备份原输出。
+其他配置字段原样保留在输出，备份及输出可能包含凭据，应按私有配置保管。
+迁移后使用显式 `--config` 验证配置，在隔离 HOME 中做冒烟检查，再恢复部署；不要把真实 HOME 用作测试目录。

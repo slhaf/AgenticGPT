@@ -107,7 +107,10 @@ pub(crate) struct TmuxExecActionRequest {
     program: String,
     #[serde(default)]
     args: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default = "default_tmux_exec_wait_ms")]
     wait_ms: u64,
@@ -131,7 +134,10 @@ pub(crate) struct TmuxPasteActionRequest {
     text: String,
     #[serde(default)]
     submit: bool,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
 }
 
@@ -141,7 +147,10 @@ pub(crate) struct TmuxCreateActionRequest {
     agent_id: String,
     name: String,
     cwd: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
 }
 
@@ -150,7 +159,10 @@ pub(crate) struct TmuxCreateActionRequest {
 pub(crate) struct TmuxCloseActionRequest {
     agent_id: String,
     name: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "agentic_gpt_protocol::deserialize_no_scope_confirmation"
+    )]
     acquire_confirmation: Option<AcquireConfirmation>,
 }
 

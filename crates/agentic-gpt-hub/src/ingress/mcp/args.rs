@@ -32,7 +32,9 @@ impl From<AcquireConfirmationMethodArgs> for AcquireConfirmationMethod {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct AcquireConfirmationArgs {
     #[serde(default)]
-    #[schemars(description = "是否主动请求确认；省略为 false。策略仍可要求确认或拒绝。")]
+    #[schemars(
+        description = "是否主动请求确认；省略为 false。获准可单次覆盖拒绝；明确拒绝中止，超时／过期／不可用回退配置策略，未获准路径范围不生效。"
+    )]
     acquire: Option<bool>,
     #[serde(default)]
     #[schemars(description = "确认提供方；省略沿用 Agent 配置。")]
@@ -65,18 +67,12 @@ impl From<AcquireConfirmationArgs> for AcquireConfirmation {
 pub(super) struct AcquireConfirmationNoScopeArgs {
     #[serde(default)]
     #[schemars(
-        description = "是否主动请求确认；默认值由操作决定。确认可单次覆盖操作策略与路径策略，不改变配置。"
+        description = "是否主动请求确认；默认值由操作决定。获准可单次覆盖策略，不改配置。tmux.pasteText 要求主动确认严格成功；其他操作在主动确认超时／过期／不可用时回退配置，明确拒绝中止。"
     )]
     acquire: Option<bool>,
     #[serde(default)]
     #[schemars(description = "确认提供方；省略沿用 Agent 配置。")]
     method: Option<AcquireConfirmationMethodArgs>,
-    #[serde(default)]
-    #[schemars(length(max = 0), description = "此操作不接受临时读取范围；只能为空。")]
-    read: Vec<String>,
-    #[serde(default)]
-    #[schemars(length(max = 0), description = "此操作不接受临时写入范围；只能为空。")]
-    write: Vec<String>,
 }
 
 impl From<AcquireConfirmationNoScopeArgs> for AcquireConfirmation {
@@ -84,8 +80,7 @@ impl From<AcquireConfirmationNoScopeArgs> for AcquireConfirmation {
         Self {
             acquire: value.acquire,
             method: value.method.map(Into::into),
-            read: value.read,
-            write: value.write,
+            ..Self::default()
         }
     }
 }
@@ -505,7 +500,7 @@ pub(super) struct TmuxCreateSessionArgs {
     )]
     pub(super) cwd: String,
     #[serde(default)]
-    #[schemars(description = "可选单次确认请求；省略不主动请求；不接受 read/write 范围。")]
+    #[schemars(description = "可选单次确认请求；省略不主动请求；不接受 read/write 字段。")]
     pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
 }
 

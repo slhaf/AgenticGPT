@@ -211,9 +211,7 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     )?;
 
     let mut config = read_config(&config_path)?;
-    config["policy"]["deny"] = json!([
-        { "program": "/usr/bin/printf", "argsPrefix": [] }
-    ]);
+    config["policy"]["deny"] = json!(["/usr/bin/printf **"]);
     write_config(&config_path, &config)?;
     thread::sleep(RELOAD_WAIT);
     let (_, denied) = http_call(
@@ -1470,10 +1468,9 @@ fn spawn_worker_with_public_url(
     config["profile"] = json!("normal");
     config["agentId"] = json!(agent_id.clone());
     config["workspaceRoot"] = json!(workspace.to_string_lossy().into_owned());
+    set_fixture_path_policy(&mut config, &[&workspace]);
     config["shell"]["initFile"] = Value::Null;
-    config["policy"]["allow"] = json!([
-        { "program": "/usr/bin/printf", "argsPrefix": [] }
-    ]);
+    config["policy"]["allow"] = json!(["/usr/bin/printf **"]);
     config["toolsets"]["enabled"] = json!(["agent", "file", "mcp", "process", "skills", "tmux"]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_http_mcp_integration",
@@ -2519,6 +2516,26 @@ fn stop_child_gracefully(child: &mut Child, duration: Duration) {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
     let _ = child.wait();
+}
+
+fn set_fixture_path_policy(config: &mut Value, roots: &[&Path]) {
+    let paths = roots
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let patterns = paths
+        .iter()
+        .map(|root| {
+            let literal = root.replace('\\', "\\\\").replace('*', "\\*");
+            format!("{}/**", literal.trim_end_matches('/'))
+        })
+        .collect::<Vec<_>>();
+    config["pathPolicy"] = json!({
+        "read": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []},
+        "write": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []}
+    });
+    config["sandbox"]["readPaths"] = json!(paths);
+    config["sandbox"]["writePaths"] = json!(paths);
 }
 
 fn fixture_command(binary: &Path, root: &Path) -> Command {

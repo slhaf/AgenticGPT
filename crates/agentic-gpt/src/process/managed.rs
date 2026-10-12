@@ -2586,6 +2586,15 @@ async fn run_async_process(
     let authorization = match authorization {
         Ok(value) => value,
         Err(reason) => {
+            // Preserve the public path rejection category when only the path
+            // decision denied the operation. Acquisition still runs first.
+            let reason = if reason == "policy_denied"
+                && execution_policy_decision(&config, &request.execution) != PolicyDecision::Deny
+            {
+                "path_denied".to_string()
+            } else {
+                reason
+            };
             set_confirmation_result(&state, &process_id, reason.clone()).await;
             let terminal = if cancel_requested.load(Ordering::Acquire) {
                 ProcessState::Cancelled

@@ -29,6 +29,30 @@ pub struct AcquireConfirmation {
     pub write: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AcquireConfirmationNoScope {
+    #[serde(default)]
+    acquire: Option<bool>,
+    #[serde(default)]
+    method: Option<AcquireConfirmationMethod>,
+}
+
+pub fn deserialize_no_scope_confirmation<'de, D>(
+    deserializer: D,
+) -> Result<Option<AcquireConfirmation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<AcquireConfirmationNoScope>::deserialize(deserializer).map(|value| {
+        value.map(|value| AcquireConfirmation {
+            acquire: value.acquire,
+            method: value.method,
+            ..AcquireConfirmation::default()
+        })
+    })
+}
+
 impl AcquireConfirmation {
     pub fn effective_acquire(&self, default: bool) -> bool {
         self.acquire.unwrap_or(default)

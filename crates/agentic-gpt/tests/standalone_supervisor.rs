@@ -136,11 +136,9 @@ fn run_smoke(
     };
     config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
+    set_fixture_path_policy(&mut config, &[&workspace]);
     config["shell"]["initFile"] = Value::Null;
-    config["policy"]["allow"] = json!([
-        { "program": "/usr/bin/printf", "argsPrefix": [] }
-    ]);
-    config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);
+    config["policy"]["allow"] = json!(["/usr/bin/printf **"]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_local_integration",
         "apiKey": format!("file:{}", key_path.display()),
@@ -312,7 +310,7 @@ fn run_stdio_resume(root: &Path) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     config["agentId"] = Value::String(short_agent_id(root));
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
-    config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);
+    set_fixture_path_policy(&mut config, &[&workspace]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_stdio_resume_test",
         "apiKey": "env:AGENTIC_TEST_TUNNEL_KEY",
@@ -452,22 +450,16 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     let agent_id = short_agent_id(root);
     config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
+    set_fixture_path_policy(&mut config, &[&workspace]);
     config["shell"]["initFile"] = Value::Null;
-    config["pathPolicy"]["writeRoots"] =
-        json!([workspace.to_string_lossy(), path_root.to_string_lossy()]);
+    set_fixture_path_policy(&mut config, &[&workspace, &path_root]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_live_reload_test",
         "apiKey": "env:AGENTIC_TEST_TUNNEL_KEY",
         "hubReporting": { "enabled": false, "detail": "metadata" }
     });
-    config["policy"]["allow"] = json!([
-        { "program": "/usr/bin/printf", "argsPrefix": [] },
-        { "program": "/bin/sleep", "argsPrefix": [] },
-        { "program": "/usr/bin/touch", "argsPrefix": [] }
-    ]);
-    config["policy"]["deny"] = json!([
-        { "program": "/usr/bin/printf", "argsPrefix": [] }
-    ]);
+    config["policy"]["allow"] = json!(["/usr/bin/printf **", "/bin/sleep **", "/usr/bin/touch **"]);
+    config["policy"]["deny"] = json!(["/usr/bin/printf **"]);
     config["limits"]["maxActiveProcesses"] = json!(1);
     config["mcpServers"] = json!({
         "primary": {
@@ -656,7 +648,9 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     }));
 
     let path_target = path_root.join("reload-path-denied");
-    config["pathPolicy"]["denyRoots"] = json!([path_root.to_string_lossy()]);
+    let denied_root = format!("{}/**", path_root.to_string_lossy());
+    config["pathPolicy"]["read"]["deny"] = json!([denied_root]);
+    config["pathPolicy"]["write"]["deny"] = json!([denied_root]);
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let path_denied = call_tool(
@@ -673,7 +667,8 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         path_denied["result"]["structuredContent"]["error"]["code"],
         json!("path_denied")
     );
-    config["pathPolicy"]["denyRoots"] = json!([]);
+    config["pathPolicy"]["read"]["deny"] = json!([]);
+    config["pathPolicy"]["write"]["deny"] = json!([]);
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let path_allowed = call_tool(
@@ -692,9 +687,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     );
     assert!(path_target.exists());
 
-    config["policy"]["deny"] = json!([
-        { "program": "/usr/bin/printf", "argsPrefix": [] }
-    ]);
+    config["policy"]["deny"] = json!(["/usr/bin/printf **"]);
     config["mcpServers"]["primary"]["transport"] = json!("sse");
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
@@ -1089,6 +1082,26 @@ fn stop_supervisor(supervisor: &mut Child) {
         libc::kill(-(supervisor.id() as i32), libc::SIGKILL);
     }
     let _ = supervisor.wait();
+}
+
+fn set_fixture_path_policy(config: &mut Value, roots: &[&Path]) {
+    let paths = roots
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let patterns = paths
+        .iter()
+        .map(|root| {
+            let literal = root.replace('\\', "\\\\").replace('*', "\\*");
+            format!("{}/**", literal.trim_end_matches('/'))
+        })
+        .collect::<Vec<_>>();
+    config["pathPolicy"] = json!({
+        "read": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []},
+        "write": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []}
+    });
+    config["sandbox"]["readPaths"] = json!(paths);
+    config["sandbox"]["writePaths"] = json!(paths);
 }
 
 fn fixture_command(binary: &Path, root: &Path) -> Command {

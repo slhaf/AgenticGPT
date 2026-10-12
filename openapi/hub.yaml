@@ -3737,7 +3737,7 @@ components:
     AcquireConfirmation:
       type: object
       additionalProperties: false
-      description: 可选单次确认；确认可覆盖本次命令策略和所请求路径范围，不改变持久配置。非空 read/write 必须同时 acquire=true。
+      description: 可选单次确认；获准可覆盖本次命令策略和所请求路径范围，不改变持久配置。明确拒绝中止；超时、过期或不可用回退配置策略，未获准范围不生效。非空 read/write 必须同时 acquire=true。
       anyOf:
         - required: [acquire]
           properties:
@@ -3772,7 +3772,7 @@ components:
     AcquireConfirmationNoScope:
       type: object
       additionalProperties: false
-      description: 可选单次确认；tmux.pasteText 缺省主动请求确认，其他 tmux 操作缺省不主动请求。不接受非空 read/write 范围。
+      description: 可选单次确认；tmux.pasteText 缺省主动请求并要求确认严格成功，其他 tmux 操作缺省不主动请求。明确拒绝中止；非严格主动确认超时、过期或不可用时回退配置策略。仅接受 acquire/method，不接受 read/write 字段。
       properties:
         acquire:
           type: boolean
@@ -3781,18 +3781,6 @@ components:
           type: string
           enum: [ntfy, freedesktop]
           description: 确认提供方；省略沿用 Agent 配置。
-        read:
-          type: array
-          maxItems: 0
-          default: []
-          items:
-            type: string
-        write:
-          type: array
-          maxItems: 0
-          default: []
-          items:
-            type: string
     ProcessExecRequest:
       type: object
       required:
