@@ -172,3 +172,11 @@
 - sandbox基础具体挂载与pathPolicy通配符判定分开；不能把任意glob扩大到父目录以冒充精确执行限制。
 - read/write建议用于Process范围申请；file.*由具体请求路径/搜索目录/patch确定范围，无需重复填写。
 - 建议非空read/write必须与acquire=true一起使用，否则报参数错误，避免静默忽略；此为接口细节提案。
+
+## 用户确认scope字段约束与文件API应用说明
+- 用户批注接受：method省略默认fallback，Process read/write可省略、具体目录覆盖子树、只对本次进程临时生效；非空read/write必须配合acquire=true，否则参数错误。
+- file.*只需acquire/method；请求本身确定文件批准范围，不由调用方重复传read/write。建议文件API schema不暴露read/write，额外字段报错，避免扩大本次文件操作之外的范围。
+- file.read批准请求的文件读取；file.search批准指定目录递归范围并遵守请求过滤；file.edit批准完整patch中的实际读写路径及必要父目录。
+- 先确定真实目标/校验结构，再取得一次主动许可，批准覆盖本次路径策略；拒绝/取消终止，超时/不可用按既定策略回退，Confirm复用失败，默认Deny仍拒绝。
+- acquire=false时按路径规则正常处理：Allow执行，Confirm一次确认，Deny拒绝；不改变全局配置、不缓存文件临时通用授权。
+- 文件身份、revision/竞态、保留runtime路径、大小限制、资源清理仍生效，批准不等于跳过完整性校验。

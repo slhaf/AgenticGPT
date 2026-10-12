@@ -33,3 +33,5 @@
 用户明确新约束：路径策略改为通配符，主动批准覆盖配置路径限制；撤销先前不覆盖路径策略的约定。
 
 阶段九完成：file读写默认deny、搜索许可覆盖递归范围；Process采用本次read/write范围批准，字段归入acquireConfirmation。尚未实现。
+
+10. 接受Process scope约束并说明file.*批准生效方式（完成；文件API不接收scope字段为提案）。

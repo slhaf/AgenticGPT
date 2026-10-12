@@ -49,3 +49,5 @@
 
 - 用户接受Process临时read/write范围方案，并要求归入acquireConfirmation；新增路径范围设计完成，保留调查记录，结束后提交。
 - 本轮无运行代码或真实配置变更，git diff --check通过。
+
+- 用户通过批注接受Process scope字段约束；补充file.*授权生效方式说明，仍为设计阶段，无运行代码变更。
