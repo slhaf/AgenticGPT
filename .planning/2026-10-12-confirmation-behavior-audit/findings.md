@@ -45,3 +45,26 @@
 - Hub 回调检查 token 摘要，错误 token 保持 pending，已解决回调拒绝重复处理；绑定连接代际，断连/替换只失效对应代际的请求。
 - Hub resolved 确认记录仅标记终态并取走 sender，不从 HashMap删除，保留到进程结束。
 - 子代理额外只读核对了本机已有规则是否属于默认值；最终说明仅以当前源码规则为依据，不引用本机配置内容。
+
+## 调整方案待核实事项
+- acquireConfirmation 的许可只覆盖本次命令决策，必须明确是否仍保留路径/Toolset/参数/容量校验。
+- 移除 builtin 将使旧配置失去未显式写入的限制，初始化模板与旧配置迁移需区分。
+- 通配符须明确匹配原始脚本还是逐条解析命令；args.join 会丢失参数边界。
+
+## 用户确认的调整语义
+- MCP 提到修改为笔误，保持全部批准行为现状。
+- acquireConfirmation 为可省略对象；acquire 省略 false；method 单渠道 ntfy/freedesktop，省略走默认fallback。
+- 主动批准后覆盖命令 allow/confirm/deny；明确拒绝终止；超时/不可用回配置规则。
+- 回退到配置 Confirm 时复用主动确认失败结果并终止，不二次等待。
+
+## 本轮代码核对
+- config.rs:1176-1194 普通load确实从default_config合成再merge；1702起sparse_defaults/prune会裁默认字段。因此初始化preset须独立于加载缺省值，避免隐式重建规则源。
+- 初始化仅seed新配置；旧配置合并builtin时不能直接追加，因为旧allow原本能覆盖builtin confirm/deny，追加进同一分类后会改变效果。
+- 移除builtin的消费者还包含agent.info builtinConfirm/builtinDeny、safe_summary builtins及protocol/OpenAPI公开字段。
+- exec.rs:122起对交互凭据、TTY及路径的检查是执行能力/路径边界，不应被主动命令批准当成allow/confirm/deny绕过。
+- 桌面确认目前timeout/关闭/非allow动作映射deny，必须拆分明确拒绝、超时、不可用、取消；MCP语义保持原状。
+- tmux paste/close旧默认true，替换为acquire默认false会改变省略参数行为，应明确说明。
+- 通配符可简化公开rule表示，但仍需逐命令判定和参数边界；原始整脚本glob会扩大规则覆盖。
+
+## 调查纠错
+- 初始化子代理早期错误认为普通load不合并默认值、配置deny非优先；根agent通过config.rs:1176-1194和policy.rs:49-66核对并收到子代理修正。最终结论采用源码证据。
