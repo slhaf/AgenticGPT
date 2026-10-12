@@ -86,7 +86,7 @@
 - 建议省略整个对象、对象为空、仅提供method时都沿用本API的acquire=true，避免对象存在与否改变默认行为。
 - 用户确认paste主动确认必须获准；拒绝、超时、不可用、取消均终止，不回退到Allow。显式acquire=false仍表示不主动获取许可。
 
-## 配置格式提案（未实现，尚未获用户确认）
+## 用户已接受的配置格式（未实现）
 ```json
 {
   "policy": {
@@ -110,9 +110,26 @@
 }
 ```
 
-- 保留allow/confirm/deny分类，将Rule对象替换为pattern字符串；defaultAction可取allow/confirm/deny，建议初始化confirm，但用户尚未决定。
+- 保留allow/confirm/deny分类，将Rule对象替换为pattern字符串；defaultAction可取allow/confirm/deny，用户接受初始化confirm及其未命中回退含义。
 - 单独 * 为全命令规则；其它pattern中的 * 匹配单个token内字符，尾部 ** 匹配零或多个剩余参数。
 - 无 ** 的pattern要求参数数量完整匹配；规则匹配的是解析后的单条命令，不是整段脚本。
 - 冲突优先级固定deny>confirm>allow，不根据顺序/长度变化；主动批准覆盖命令决策。
 - 全局allow *覆盖无法静态分析脚本的额外确认要求，不代表可以识别动态展开后的所有执行行为。
 - 初始化preset作为显式配置内容保存，运行时只从配置读取；建议以确认流程、单源初始化、字符串pattern三个步骤实施。
+
+## 实施前假设核对
+- 核心运行语义已确定，无需再次确认；用户选择全面升级，不保留旧格式/旧字段的兼容执行。
+- 现有执行路径Deny在确认前退出（managed.rs:1660,2524）；新逻辑须在主动获取后才最终拒绝。
+- 现有桌面结果混合拒绝和超时；普通主动获取的新回退依赖区分，paste保持严格失败终止，MCP不能因此改变。
+- Runtime builtin及默认加载/稀疏保存假设需调整；初始化策略必须显式保存并只由初始化seed。
+- defaultAction=confirm将改变当前argv未命中时Allow的行为，已作为新方案统一默认。
+- 无法解析脚本的默认保护准确说法是至少Confirm；若defaultAction=Deny应保持Deny，不因该保护降为Confirm。allow的全局*按用户决定可解除解析不完整的额外确认，命中其他配置规则仍按优先级。
+- 旧argsPrefix应迁移为token转义后的pattern加尾部**，而非裸join；旧配置allow覆盖builtin的效果不能用直接append保持。
+- 策略声明/匹配不承担执行能力：Toolset、路径、资源、TTY与交互凭据限制不被批准覆盖。
+
+## 用户最终升级约束
+- 全面升级、彻底重构，不保留旧needConfirm/confirmMethod或program+argsPrefix的兼容运行路径。
+- 升级交付包含独立迁移脚本，现有配置由用户额外手动运行迁移；启动/load/reload不自动迁移。
+- 脚本按新语义转换规则，提供备份/预览/变更与冲突说明；不读取或修改真实配置作为本轮调查副作用。
+- 核心语义已确定；初始化模板按profile、method仅主动获取、路径/能力限制不覆盖等按既定方案实施。
+- 尚未开始实现，当前阶段为完成设计核对；与旧实现的差异是明确改造范围，不存在已知架构阻塞。
