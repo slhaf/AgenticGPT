@@ -68,3 +68,13 @@
 
 ## 调查纠错
 - 初始化子代理早期错误认为普通load不合并默认值、配置deny非优先；根agent通过config.rs:1176-1194和policy.rs:49-66核对并收到子代理修正。最终结论采用源码证据。
+
+## 方案建议（尚未实现）
+- 统一获取许可入口，内部区分 approved/denied/timeout/unavailable/cancelled，不用布尔值覆盖原始证据。
+- acquire=true：批准跳过本次命令决策；拒绝/取消终止；timeout/unavailable回policy，Allow执行、Deny拒绝、Confirm复用失败终止。
+- acquire=false：正常配置决策；method建议仅控制主动获取，不隐式切换策略触发的默认确认渠道。
+- 主动批准仍绑定完整操作请求：脚本、cwd、batch全部元素、pane/粘贴内容、patch有效变更；不形成命令通用许可。取消/路径/能力/文件冲突检查继续有效。
+- 策略初始化使用独立preset seed，显式写入policy且禁止sparse裁掉；运行时仅认配置。profile建议只影响初始模板，后续不自动改规则。
+- 旧配置提供显式迁移预览；策略默认结果（未匹配）建议统一并显式配置，当前Shell Confirm与argv Allow的差异需被决策。
+- 外部规则可换为单pattern字符串，内部仍逐invocation/argv匹配；建议小范围通配符语法并明确参数边界，避免整个原始脚本glob。
+- 建议实施拆分：确认流程、策略来源、匹配格式三步分别验收；本轮只完成可行性评估。
