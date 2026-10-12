@@ -1738,7 +1738,6 @@ pub(crate) async fn start_process_batch(
                 },
                 request.acquire_confirmation.as_ref(),
             )?;
-            element.decision = PolicyDecision::Allow;
         }
         config = Arc::new(granted);
     }
@@ -2029,16 +2028,16 @@ pub(crate) async fn start_prepared_managed_batch(
     }
     for (index, spec) in specs.iter().enumerate() {
         validated_group(spec.request.group.as_deref())?;
-        if spec.decision != PolicyDecision::Deny {
-            if let Some(reason) = exec::kernel_argument_limit_error(
-                &config,
-                Some(&spec.working_directory),
-                &spec.request.execution,
-            ) {
-                return Err(format!(
-                    "process_batch_element_rejected; index={index}; reason={reason}"
-                ));
-            }
+        // Authorization may override a recorded Deny. Physical resource
+        // limits apply to every element before any registration or spawn.
+        if let Some(reason) = exec::kernel_argument_limit_error(
+            &config,
+            Some(&spec.working_directory),
+            &spec.request.execution,
+        ) {
+            return Err(format!(
+                "process_batch_element_rejected; index={index}; reason={reason}"
+            ));
         }
     }
     let requested = specs.len();
@@ -2255,6 +2254,10 @@ async fn start_managed_process_inner(
                             == PolicyDecision::Deny
                     });
                 !denied
+                    || request
+                        .acquire_confirmation
+                        .as_ref()
+                        .is_some_and(|a| a.effective_acquire(false))
             })
     } else {
         None
@@ -4847,6 +4850,203 @@ mod tests {
         }
     }
 
+    // This executes the admission -> transport confirmation -> process chain.
+    // It protects authority and side effects, rather than the helper's truth table.
+    #[tokio::test]
+    async fn acquisition_controls_process_effects_and_reuses_failed_confirmation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Responder(tokio::task::JoinHandle<()>);
+        impl Drop for Responder {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        for (decision, response, expected, should_write) in [
+            (
+                PolicyDecision::Deny,
+                "allow_once",
+                ProcessState::Completed,
+                true,
+            ),
+            (PolicyDecision::Allow, "deny", ProcessState::Rejected, false),
+            (
+                PolicyDecision::Allow,
+                "timeout",
+                ProcessState::Completed,
+                true,
+            ),
+            (
+                PolicyDecision::Confirm,
+                "timeout",
+                ProcessState::Rejected,
+                false,
+            ),
+            (
+                PolicyDecision::Deny,
+                "provider_unavailable",
+                ProcessState::Rejected,
+                false,
+            ),
+        ] {
+            let (state, workspace) = test_state(1).await;
+            {
+                let mut config = state.config.write().await;
+                config.policy = crate::config::PolicyConfig {
+                    default_action: decision,
+                    ..Default::default()
+                };
+                config.path_policy = crate::config::PathPolicyConfig::default();
+                config.path_policy.read.default_action = decision;
+                config.path_policy.write.default_action = decision;
+                config.confirmation_provider.channels =
+                    vec![crate::config::ConfirmationChannel::Ntfy];
+            }
+            let marker = workspace.join("effect.txt");
+            let mut request = exec_request(&format!("touch {}", marker.display()), &workspace);
+            request.wait_seconds = Some(3);
+            request.acquire_confirmation =
+                Some(serde_json::from_value(serde_json::json!({"acquire":true})).unwrap());
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            *state.hub_sender.lock().await = Some(sender);
+            let count = Arc::new(AtomicUsize::new(0));
+            let responder_state = state.clone();
+            let responder_count = count.clone();
+            let marker_before = marker.clone();
+            let responder = Responder(tokio::spawn(async move {
+                while let Some(message) = receiver.recv().await {
+                    if let agentic_gpt_protocol::AgentMessage::ConfirmationRequest {
+                        request_id,
+                        payload,
+                        ..
+                    } = message
+                    {
+                        assert!(!marker_before.exists(), "process ran before approval");
+                        assert!(payload.command_preview.contains("touch"));
+                        responder_count.fetch_add(1, Ordering::SeqCst);
+                        if let Some(sender) = responder_state
+                            .pending_confirmations
+                            .lock()
+                            .await
+                            .remove(&request_id)
+                        {
+                            let _ = sender.send(response.to_string());
+                        }
+                    }
+                }
+            }));
+            let result = start_and_wait_process(
+                state.clone(),
+                request,
+                ProcessOptions::for_source("test"),
+                8192,
+            )
+            .await
+            .unwrap();
+            if !result.response.state.is_terminal() {
+                let _ = cancel_process(&state, &result.response.process_id).await;
+            }
+            assert_eq!(result.response.state, expected, "{decision:?}/{response}");
+            assert_eq!(marker.exists(), should_write, "{decision:?}/{response}");
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "failed acquisition prompted again"
+            );
+            assert!(state.pending_confirmations.lock().await.is_empty());
+            assert_eq!(
+                state.config.read().await.path_policy.write.default_action,
+                decision
+            );
+            let _ = wait_output_capture(&state, &result.response.process_id).await;
+            responder.0.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn acquired_write_mount_remains_writable_under_readonly_parent() {
+        // Optional system integration dependency. A present but broken bwrap
+        // must fail the test; an installation without bwrap has no such surface.
+        if std::process::Command::new("bwrap")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("bubblewrap unavailable; skipping mount integration");
+            return;
+        }
+        let (state, workspace) = test_state(1).await;
+        let writable = workspace.join("approved");
+        fs::create_dir(&writable).unwrap();
+        {
+            let mut config = state.config.write().await;
+            config.sandbox.enabled = true;
+            config.sandbox.read_paths = vec![workspace.clone()];
+            config.sandbox.write_paths.clear();
+            config.policy.allow.clear();
+            config.policy.deny = vec!["*".into()];
+            config.path_policy = crate::config::PathPolicyConfig::default();
+            config.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
+        }
+        let marker = writable.join("effect.txt");
+        let forbidden = workspace.join("unapproved.txt");
+        let mut request = exec_request(
+            &format!(
+                "touch {}; touch {}; test -f {} && test ! -e {}",
+                marker.display(),
+                forbidden.display(),
+                marker.display(),
+                forbidden.display()
+            ),
+            &workspace,
+        );
+        request.wait_seconds = Some(3);
+        request.acquire_confirmation = Some(
+            serde_json::from_value(
+                serde_json::json!({"acquire":true,"write":[writable.to_string_lossy()]}),
+            )
+            .unwrap(),
+        );
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        *state.hub_sender.lock().await = Some(sender);
+        let responder_state = state.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(message) = receiver.recv().await {
+                if let agentic_gpt_protocol::AgentMessage::ConfirmationRequest {
+                    request_id, ..
+                } = message
+                {
+                    if let Some(sender) = responder_state
+                        .pending_confirmations
+                        .lock()
+                        .await
+                        .remove(&request_id)
+                    {
+                        let _ = sender.send("allow_once".to_string());
+                    }
+                    break;
+                }
+            }
+        });
+        let result = start_and_wait_process(
+            state.clone(),
+            request,
+            ProcessOptions::for_source("test"),
+            8192,
+        )
+        .await
+        .unwrap();
+        if !result.response.state.is_terminal() {
+            let _ = cancel_process(&state, &result.response.process_id).await;
+        }
+        responder.await.unwrap();
+        let output = wait_output_capture(&state, &result.response.process_id).await;
+        assert_eq!(result.response.state, ProcessState::Completed, "{output:?}");
+        assert_eq!(result.response.exit_code, Some(0), "{output:?}");
+        assert!(marker.exists());
+        assert!(!forbidden.exists());
+        assert!(state.config.read().await.sandbox.write_paths.is_empty());
+    }
+
     #[tokio::test]
     async fn exec_waits_for_terminal_state_after_early_output() {
         let (state, workspace) = test_state(1).await;
@@ -5618,6 +5818,43 @@ mod tests {
             .unwrap();
         assert!(actual_argument_bytes > max_argument_bytes);
         assert!(reason.contains(&format!("max={max_argument_bytes}")));
+        assert!(!marker.exists());
+        assert!(state.processes.lock().await.is_empty());
+        assert!(history_rows_after_reopen(&state).is_empty());
+    }
+
+    // Response-budget rejection has its own test. This protects the distinct
+    // kernel-resource barrier after authorization has overridden a policy Deny.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn approved_denied_batch_still_preflights_all_kernel_arguments() {
+        let (state, workspace) = test_state(2).await;
+        let marker = workspace.join("must-not-run");
+        let argument_limit =
+            usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap() * 32;
+        let specs = [
+            format!("touch {}", marker.display()),
+            format!("true {}", "x".repeat(argument_limit)),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, command)| ManagedProcessSpec {
+            request: exec_request(&command, &workspace).into(),
+            working_directory: workspace.clone(),
+            decision: PolicyDecision::Deny,
+            confirmation_result: Some("allow_once".to_string()),
+            batch_id: Some("approved-batch".to_string()),
+            batch_index: Some(index),
+            request_source: "test:process.batch".to_string(),
+            terminal_event_hook: None,
+            event_origin: None,
+        })
+        .collect();
+        let config = Arc::new(state.config.read().await.clone());
+        let error = start_prepared_managed_batch(state.clone(), config, specs)
+            .await
+            .unwrap_err();
+        assert!(error.contains("index=1; reason=process_kernel_argument_too_large"));
         assert!(!marker.exists());
         assert!(state.processes.lock().await.is_empty());
         assert!(history_rows_after_reopen(&state).is_empty());

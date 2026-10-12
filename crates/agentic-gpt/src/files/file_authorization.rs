@@ -127,7 +127,7 @@ pub(super) async fn authorize_read_requests(
     config: &Config,
     requests: &[ReadRequest],
     acquisition: Option<&AcquireConfirmation>,
-    recursive: bool,
+    searches: Option<&[SearchRequest]>,
 ) -> std::result::Result<Config, FileError> {
     if let Some(a) = acquisition {
         a.validate_scope(false)
@@ -137,7 +137,7 @@ pub(super) async fn authorize_read_requests(
     let proactive = acquisition.is_some_and(|a| a.effective_acquire(false));
     let mut targets = Vec::new();
     let mut roots = Vec::new();
-    for request in requests {
+    for (index, request) in requests.iter().enumerate() {
         let resolved = match resolve_path(&unrestricted, &request.path, Access::Read) {
             Ok(p) => p,
             Err(_) => continue,
@@ -149,9 +149,18 @@ pub(super) async fn authorize_read_requests(
             continue;
         }
         targets.push((resolved.path.clone(), Access::Read));
-        if recursive && !proactive && action == PolicyDecision::Allow {
+        if let Some(search) = searches
+            .and_then(|searches| searches.get(index))
+            .filter(|_| !proactive && action == PolicyDecision::Allow)
+        {
+            let include = compile_globs(&search.include)?;
+            let exclude = compile_globs(&search.exclude)?;
             let filter_config = config.clone();
             let walker = WalkBuilder::new(&resolved.path)
+                .hidden(!search.hidden)
+                .git_ignore(search.respect_gitignore)
+                .git_global(search.respect_gitignore)
+                .git_exclude(search.respect_gitignore)
                 .follow_links(false)
                 .filter_entry(move |entry| {
                     let Ok(path) = entry.path().canonicalize() else {
@@ -167,6 +176,21 @@ pub(super) async fn authorize_read_requests(
                     let Ok(path) = entry.path().canonicalize() else {
                         continue;
                     };
+                    let relative = if resolved.path.is_file() {
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    } else {
+                        path.strip_prefix(&resolved.path)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .replace(std::path::MAIN_SEPARATOR, "/")
+                    };
+                    if include.as_ref().is_some_and(|set| !set.is_match(&relative))
+                        || exclude.as_ref().is_some_and(|set| set.is_match(&relative))
+                    {
+                        continue;
+                    }
                     if crate::policy::path_policy_decision(config, &path, false)
                         .map_err(|r| FileError::new("path_policy_error", &r))?
                         == PolicyDecision::Confirm
@@ -184,7 +208,7 @@ pub(super) async fn authorize_read_requests(
             state,
             config,
             acquisition,
-            if recursive {
+            if searches.is_some() {
                 "file.search (recursive search scope)"
             } else {
                 "file.read"
@@ -216,7 +240,7 @@ pub(crate) async fn read_request_with_images(
         &base,
         std::slice::from_ref(request),
         acquisition.as_ref(),
-        false,
+        None,
     )
     .await?;
     let resolved = resolve_path(&config, &request.path, Access::Read)?;

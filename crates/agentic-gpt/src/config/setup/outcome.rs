@@ -812,6 +812,8 @@ mod tests {
         let old = serde_json::json!({
             "mode": "local",
             "profile": "normal",
+            "policy": crate::config::PolicyConfig::default(),
+            "pathPolicy": crate::config::PathPolicyConfig::default(),
             "hubUrl": "https://legacy.example.com",
             "hubTransport": "sse",
             "agentSecret": "legacy-secret",

@@ -858,13 +858,14 @@ fn path_policy_allows_write_root_and_blocks_readonly_write() {
 }
 
 #[test]
-fn deny_roots_override_read_and_write() {
+fn deny_patterns_override_read_and_write() {
     let root = unique_temp_dir("path-deny");
     let workspace = root.join("workspace");
     let downloads = root.join("Downloads");
     let secret = downloads.join("secret");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&secret).unwrap();
+    fs::write(secret.join("token"), "secret").unwrap();
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;

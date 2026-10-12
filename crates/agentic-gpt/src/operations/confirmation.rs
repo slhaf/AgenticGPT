@@ -42,6 +42,7 @@ pub(crate) struct OperationAuthorization {
     pub(crate) result: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn authorize_operation(
     state: &AppState,
     config: &Config,
@@ -165,10 +166,10 @@ pub(crate) async fn request_confirmation_cancellable(
 ) -> String {
     for channel in confirmation_channels(config, confirm_method) {
         let result = match channel {
-            ConfirmationChannel::Freedesktop => tokio::select! {
-                result = request_freedesktop_confirmation(config, program, args) => result,
-                _ = wait_for_cancellation(cancel_requested.clone()) => "cancelled".to_string(),
-            },
+            ConfirmationChannel::Freedesktop => {
+                request_freedesktop_confirmation(config, program, args, cancel_requested.clone())
+                    .await
+            }
             ConfirmationChannel::Ntfy => {
                 request_hub_confirmation_cancellable(
                     state,
@@ -191,6 +192,7 @@ async fn request_freedesktop_confirmation(
     config: &Config,
     program: &str,
     args: &[String],
+    cancelled: Arc<AtomicBool>,
 ) -> String {
     let supports_actions = crate::notify::freedesktop_supports_actions().await;
     if !supports_actions {
@@ -230,9 +232,10 @@ async fn request_freedesktop_confirmation(
     match provider {
         Ok(handle) => {
             let mut selected = "provider_unavailable".to_string();
-            let waited = timeout(
-                Duration::from_secs(CONFIRM_TIMEOUT_SECS),
-                handle.wait_for_action_async(|response| {
+            let waited = tokio::select! {
+                result = timeout(
+                    Duration::from_secs(CONFIRM_TIMEOUT_SECS),
+                    handle.wait_for_action_async(|response| {
                     selected = match response {
                         notify_rust::ActionResponse::Custom("allow_once") => "allow_once",
                         notify_rust::ActionResponse::Custom("deny") => "deny",
@@ -245,9 +248,13 @@ async fn request_freedesktop_confirmation(
                         _ => "provider_unavailable",
                     }
                     .to_string();
-                }),
-            )
-            .await;
+                    }),
+                ) => result.map(|_| ()),
+                _ = wait_for_cancellation(cancelled) => {
+                    selected = "cancelled".to_string();
+                    Ok(())
+                },
+            };
             let _ = timeout(Duration::from_secs(2), handle.close_async()).await;
             if waited.is_err() {
                 "timeout".to_string()
@@ -266,15 +273,22 @@ async fn request_hub_confirmation_cancellable(
     args: &[String],
     cancel_requested: Arc<AtomicBool>,
 ) -> String {
+    let preview = command_preview(program, args);
+    // The Hub's notification surface displays at most 1000 characters. Never
+    // obtain authority from a preview that omits part of the operation/scope.
+    if preview.chars().count() > 1000 {
+        log_warn("confirmation preview exceeds notification display limit".to_string());
+        return "provider_unavailable".to_string();
+    }
     let payload = ConfirmationPayload {
         program: program.to_string(),
         args: args.to_vec(),
-        command_preview: truncate_chars(&command_preview(program, args), 1000),
+        command_preview: preview,
         risk_level: risk_level(program),
         reason: if confirmation_language_is_zh(config) {
-            format!("命令匹配确认策略：{program}")
+            format!("请求批准本次操作及所示访问范围：{program}")
         } else {
-            format!("Command matched confirmation policy: {program}")
+            format!("Approve this operation and its displayed access scope: {program}")
         },
         kind: None,
         server_id: None,
@@ -304,7 +318,11 @@ async fn request_hub_confirmation_payload_cancellable(
     let config = state.config.read().await.clone();
     let message = AgentMessage::ConfirmationRequest {
         request_id: request_id.clone(),
-        agent_id: config.agent_id,
+        agent_id: if payload.kind.is_none() {
+            state.transport_agent_id.clone()
+        } else {
+            config.agent_id
+        },
         timeout_seconds: CONFIRM_TIMEOUT_SECS,
         payload,
     };

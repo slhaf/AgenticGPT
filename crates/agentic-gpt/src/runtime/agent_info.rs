@@ -539,7 +539,7 @@ mod tests {
             .restart_required_fields
             .iter()
             .any(|field| field == "browser"));
-        assert!(!health
+        assert!(health
             .issues
             .iter()
             .any(|issue| issue == &"config_live_subset_not_applied"));

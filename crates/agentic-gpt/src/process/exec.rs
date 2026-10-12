@@ -405,14 +405,18 @@ pub(crate) fn build_command(
             .arg(working_directory);
         let mut created_dirs = HashSet::new();
         let mut mounts = std::collections::BTreeMap::new();
-        for path in normalize_roots(
-            config
-                .sandbox
-                .required_runtime_paths
-                .iter()
-                .chain(&config.sandbox.read_paths)
-                .map(PathBuf::as_path),
-        )? {
+        // Preserve runtime aliases such as /lib64: executable loaders refer to
+        // these namespace paths even when their host source is a symlink.
+        for path in &config.sandbox.required_runtime_paths {
+            let path = expand_pathbuf(path)?;
+            if !path.is_absolute() {
+                anyhow::bail!("sandbox_runtime_path_must_be_absolute");
+            }
+            if path.exists() {
+                mounts.insert(path, "--ro-bind");
+            }
+        }
+        for path in normalize_roots(config.sandbox.read_paths.iter().map(PathBuf::as_path))? {
             if path.exists() {
                 mounts.insert(path, "--ro-bind");
             }

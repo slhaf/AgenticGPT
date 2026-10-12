@@ -1341,7 +1341,7 @@ pub(crate) async fn read_batch_with_images(
     acquisition: Option<AcquireConfirmation>,
 ) -> ReadBatchOutput {
     let base = state.config.read().await.clone();
-    let config = match authorize_read_requests(state, &base, requests, acquisition.as_ref(), false)
+    let config = match authorize_read_requests(state, &base, requests, acquisition.as_ref(), None)
         .await
     {
         Ok(config) => config,
@@ -1445,21 +1445,26 @@ pub(crate) async fn search_batch(
             end_line: None,
         })
         .collect::<Vec<_>>();
-    let config =
-        match authorize_read_requests(state, &base, &read_requests, acquisition.as_ref(), true)
-            .await
-        {
-            Ok(config) => config,
-            Err(error) => {
-                return finalize_read_search_batch(
-                    requests
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| envelope(i, Err(FileError::new(&error.code, &error.message))))
-                        .collect(),
-                )
-            }
-        };
+    let config = match authorize_read_requests(
+        state,
+        &base,
+        &read_requests,
+        acquisition.as_ref(),
+        Some(requests),
+    )
+    .await
+    {
+        Ok(config) => config,
+        Err(error) => {
+            return finalize_read_search_batch(
+                requests
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| envelope(i, Err(FileError::new(&error.code, &error.message))))
+                    .collect(),
+            )
+        }
+    };
     let mut scanned_files = 0usize;
     let mut scanned_bytes = 0u64;
     let mut results = Vec::with_capacity(requests.len());
@@ -1669,7 +1674,12 @@ async fn apply_patch_inner(
     let mut targets = Vec::new();
     let mut requested_targets = Vec::new();
     for hunk in &parsed.hunks {
-        let input = hunk.path().to_string_lossy();
+        let source_path = match hunk {
+            Hunk::AddFile { path, .. }
+            | Hunk::DeleteFile { path }
+            | Hunk::UpdateFile { path, .. } => path,
+        };
+        let input = source_path.to_string_lossy();
         match hunk {
             Hunk::AddFile { .. } => {
                 let (target, parents) = resolve_absent_add_path(&unrestricted, &input)?;
@@ -2718,7 +2728,10 @@ mod tests {
     fn config(root: &Path) -> Config {
         let mut config = Config::default_config().unwrap();
         config.workspace_root = root.to_path_buf();
-        config.path_policy = crate::config::seed_path_policy(root);
+        config.path_policy = crate::config::PathPolicyConfig::default();
+        let scope = crate::config::path_subtree_pattern(root);
+        config.path_policy.read.allow.push(scope.clone());
+        config.path_policy.write.allow.push(scope);
         config
     }
 
@@ -2819,7 +2832,7 @@ mod tests {
             check_policy(&config, &read_resolved.path, Access::Write)
                 .unwrap_err()
                 .code,
-            "path_readonly"
+            "path_denied"
         );
         assert_eq!(
             resolve_path(

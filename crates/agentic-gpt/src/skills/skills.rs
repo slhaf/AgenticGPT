@@ -1254,6 +1254,21 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        {
+            let mut config = state.config.write().await;
+            let script_program = script
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            config
+                .policy
+                .allow
+                .push(format!("'{}' **", script_program.replace('\'', "'\\''")));
+            let root_pattern = crate::config::path_subtree_pattern(&root);
+            config.path_policy.read.allow = vec![root_pattern.clone()];
+            config.path_policy.write.allow = vec![root_pattern];
+        }
         activate(
             &state,
             SkillActivationRequest {

@@ -289,13 +289,14 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
         args: request.args.clone(),
     };
     let mut decision = command_policy_decision(&config, &request.program, &request.args);
+    let mut cd_target = None;
     let path_decision = if request.program == "cd" {
         match cd_target_arg(&request.args).and_then(|target| {
             exec::resolve_working_directory(
                 &permissive,
                 Some(
                     &{
-                        let expanded = exec::expand_path(&target)
+                        let expanded = exec::expand_path(target)
                             .map_err(|_| "working_directory_invalid".to_string())?;
                         if expanded.is_absolute() {
                             expanded
@@ -307,7 +308,15 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
                 ),
             )
         }) {
-            Ok(target) => crate::policy::path_policy_decision(&config, &target, true),
+            Ok(target) => {
+                let identity = match directory_identity(&target) {
+                    Ok(i) => i,
+                    Err(reason) => return TmuxError::new(&reason, &reason).value(),
+                };
+                let decision = crate::policy::path_policy_decision(&config, &target, true);
+                cd_target = Some((target, identity));
+                decision
+            }
             Err(reason) => return TmuxError::new(&reason, &reason).value(),
         }
     } else {
@@ -317,12 +326,18 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
         Ok(d) => decision = decision.max(d),
         Err(reason) => return TmuxError::new(&reason, &reason).value(),
     }
-    let preview = vec![
-        request.target.clone(),
-        format!("cwd: {}", cwd.display()),
-        request.program.clone(),
-        request.args.join(" "),
-    ];
+    let identity = match exec::scope_identity(&cwd, &execution, None) {
+        Ok(i) => i,
+        Err(reason) => return TmuxError::new(&reason, &reason).value(),
+    };
+    let mut preview = match exec::approval_preview(&cwd, &execution, None) {
+        Ok(p) => p,
+        Err(reason) => return TmuxError::new(&reason, &reason).value(),
+    };
+    preview.insert(0, format!("pane: {}", request.target));
+    if let Some((target, _)) = &cd_target {
+        preview.push(format!("cd target: {}", target.display()));
+    }
     if let Err(error) = authorize_tmux(
         state,
         &config,
@@ -351,8 +366,35 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
             .value()
         }
     }
+    if exec::scope_identity(&cwd, &execution, None).ok().as_ref() != Some(&identity) {
+        return TmuxError::new(
+            "tmux_target_changed",
+            "operation scope changed while awaiting approval",
+        )
+        .value();
+    }
+    if let Some((target, identity)) = &cd_target {
+        let input = exec::expand_path(cd_target_arg(&request.args).unwrap_or_default());
+        let current = input.ok().and_then(|p| {
+            let path = if p.is_absolute() { p } else { cwd.join(p) };
+            path.canonicalize().ok()
+        });
+        if current.as_ref() != Some(target)
+            || directory_identity(target).ok().as_ref() != Some(identity)
+        {
+            return TmuxError::new(
+                "tmux_target_changed",
+                "cd target changed while awaiting approval",
+            )
+            .value();
+        }
+    }
     let mut command = shell_quote(&request.program);
-    for arg in &request.args {
+    let args = cd_target
+        .as_ref()
+        .map(|(p, _)| vec![p.to_string_lossy().into_owned()])
+        .unwrap_or_else(|| request.args.clone());
+    for arg in &args {
         command.push(' ');
         command.push_str(&shell_quote(arg));
     }
@@ -448,6 +490,10 @@ pub(crate) async fn create_session(
         Ok(p) => p,
         Err(reason) => return TmuxError::new(&reason, &reason).value(),
     };
+    let identity = match directory_identity(&resolved) {
+        Ok(i) => i,
+        Err(reason) => return TmuxError::new(&reason, &reason).value(),
+    };
     let decision = match crate::policy::path_policy_decision(&config, &resolved, true) {
         Ok(d) => d,
         Err(reason) => return TmuxError::new(&reason, &reason).value(),
@@ -472,6 +518,7 @@ pub(crate) async fn create_session(
         .ok()
         .as_ref()
         != Some(&resolved)
+        || directory_identity(&resolved).ok().as_ref() != Some(&identity)
     {
         return TmuxError::new(
             "tmux_target_changed",
@@ -611,7 +658,7 @@ pub(crate) async fn close_session(
             false,
             PolicyDecision::Allow,
             "tmux.closeSession",
-            &[name.clone()],
+            std::slice::from_ref(&name),
             false,
         )
         .await
@@ -835,6 +882,19 @@ fn is_likely_shell(command: &str) -> bool {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn directory_identity(path: &std::path::Path) -> Result<(u64, u64), String> {
+    let metadata = std::fs::metadata(path).map_err(|_| "working_directory_invalid".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok((metadata.len(), 0))
+    }
 }
 
 fn cd_target_arg(args: &[String]) -> std::result::Result<&str, String> {

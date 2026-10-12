@@ -60,3 +60,8 @@
 - 验证：cargo check --workspace和--tests通过；Protocol隔离既有测试4 passed，config_cli全部24测试跨全量+定点修复运行通过；尚未宣称全部运行时验证通过。
 - 使用find-docs/Context7确认notify-rust关闭原因接口，并核对本地锁定4.17.0源码；通用确认改为类型化async动作，不改MCP批准路径。
 - 迁移脚本与文档已准备，将在后续阶段审查交付；没有运行真实配置迁移。
+
+- 阶段二完成：修复Move源/目标预检、显式fixtures、保留原策略audit、搜索过滤授权一致、tmux目录与scope身份绑定、桌面取消统一close、ntfy超长不可用回退。
+- 新增具长期价值的实际链路回归：Process批准/拒绝/失败回退一次；真实bwrap批准child写但parent只读；file批准覆盖Deny及拒绝无写、等待时symlink切换拒绝、search filters授权一致；已批准Deny批次仍受kernel argv整批预检。既有具名测试不覆盖新增失败模式，无独立低档pattern测试。
+- 隔离验证：Agent suite386 passed/1 ignored（新增kernel用例定点1 passed），stdio50 passed，真实bwrap1 passed，严格Clippy先通过后末次guard修复待最终重跑。完整workspace继续至CLI集成旧fixture失败，已纳入阶段三迁移。
+- 第一阶段提交b6bb483；没有自动迁移真实配置，runtime smoke均使用隔离HOME/XDG/TMP/D-Bus。
