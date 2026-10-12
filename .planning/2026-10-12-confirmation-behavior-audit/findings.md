@@ -133,3 +133,42 @@
 - 脚本按新语义转换规则，提供备份/预览/变更与冲突说明；不读取或修改真实配置作为本轮调查副作用。
 - 核心语义已确定；初始化模板按profile、method仅主动获取、路径/能力限制不覆盖等按既定方案实施。
 - 尚未开始实现，当前阶段为完成设计核对；与旧实现的差异是明确改造范围，不存在已知架构阻塞。
+
+## 路径策略范围补充（以此取代早前相关约定）
+- 用户明确file.*路径策略属于本次重构范围，不仅command policy。
+- 路径策略也改为通配符规则；主动acquire批准可覆盖denyRoots、readonly、outside allowed roots等配置路径限制。
+- 先前“批准不覆盖路径策略”的建议已撤销；Toolset、执行能力、容量、文件一致性等独立边界不因此变化。
+- 需要联动file.read/search/edit、Process/tmux cwd/arg预检、bubblewrap实际挂载、配置初始化/CLI/摘要/迁移脚本。
+- 不实现或迁移真实配置；正在补充只读路径执行链核对。
+
+## 路径执行链补充证据
+- file_ops.rs:174路径canonicalize后立即配置权限检查，read/search尚无确认入口；新增批准覆盖需要把规范化/完整性校验与配置裁决分开。
+- file_ops.rs:382检查write/read/deny roots；file.search目前只校验起点，walker逐文件读取没有再次策略检查，通配符策略需校验实际递归访问。
+- file.edit批准应覆盖全部Add/Delete/Update/Move源/目标及新父目录；等待后复核canonical目标和revision保留。
+- process/exec.rs:433-490 bwrap仅按write/read-only roots及required_runtime_paths做bind；没有精确实现deny子目录mask。通配符规则不能直接当成目录bind。
+- tmux.exec在既有pane提交命令，不调用Process build_command/bwrap；共享路径预检而非共享OS隔离。
+- 新pathPolicy拟按read/write分区采用allow/confirm/deny patterns，未匹配默认及glob范围需要补齐；这是提案而非已确认字段。
+- command allow=*不自动解除路径决策；主动一次批准拟覆盖本请求命令和路径策略，避免重复通知。
+- 明确动态脚本的路径授权范围是新增设计问题：不能承诺从脚本文本识别其运行时全部文件访问，或静默扩大整个文件系统访问。
+
+## 路径通配符与实际隔离的边界
+- 工程复核支持pathPolicy.read/write各defaultAction/allow/confirm/deny，匹配规范化绝对路径；具体字段与默认值为后续提案。
+- 路径 *不跨目录、**跨目录，单独*全路径；不能按命令参数通配符的token语义直接实现路径匹配。
+- search批准应说明搜索根与递归范围，未批准时逐实际候选路径校验；edit授权全patch范围，保留文件身份和revision复核。
+- bwrap为静态路径/子树bind计划，任意glob不等价于可精确编译的挂载规则；现有参数预检不完整分析动态脚本。
+- 已向用户询问Process批准后的sandbox访问范围：可选read/write scope临时开放（建议）、仅准入覆盖原mount不变、或者本次进程全文件系统访问。
+- 该选择待答；不得自行扩大sandbox到/、关闭sandbox或承诺批准后任意动态访问一定成功。
+
+## 用户确定的文件路径默认与搜索批准范围
+- file.*读/写路径未匹配任何规则时，defaultAction=deny。
+- file.search主动获准后，覆盖本次请求指定目录及递归搜索范围，仍遵守include/exclude、hidden、respectGitignore等请求过滤条件；确认提示必须明确该范围。
+- 文件部分行为选择已齐：read/write规则分别配置，acquire默认false；命中配置Confirm仍确认；主动批准覆盖配置路径限制；edit批准覆盖完整补丁范围，保留路径身份与revision复核。
+- Process/bubblewrap批准后的实际访问范围选择仍待用户回复；本次文件选择不代替该选择。
+
+## 用户接受Process范围授权，调整参数归属
+- 用户接受保留bubblewrap并以本次read/write范围临时开放实际文件访问的方案。
+- 用户要求read/write放入acquireConfirmation，不另设独立accessScope参数；建议直接使用acquireConfirmation.read/write数组。
+- Process批准范围绑定脚本、cwd与具体读写文件/目录，目录表示子树；仅本次生效，不修改全局配置。未声明动态访问仍受sandbox限制。
+- sandbox基础具体挂载与pathPolicy通配符判定分开；不能把任意glob扩大到父目录以冒充精确执行限制。
+- read/write建议用于Process范围申请；file.*由具体请求路径/搜索目录/patch确定范围，无需重复填写。
+- 建议非空read/write必须与acquire=true一起使用，否则报参数错误，避免静默忽略；此为接口细节提案。
