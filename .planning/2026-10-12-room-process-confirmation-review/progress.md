@@ -1,0 +1,42 @@
+# 进展
+
+## 2026-10-12
+- 读取 planning-with-files skill、开发指南和文档标准。
+- 查阅记忆中的 Room 排障边界；历史现象不当作当前部署事实。
+- 建立独立审查计划，不提交。
+- 委派只读 scout 独立核对 shell 策略与文档，主代理追踪入口默认值与确认提供者。
+- 一次 room* 路径 glob 无匹配，已改为按符号定位，不重试相同路径。
+- 只读尝试搜索 Room 的本次进程审计记录，file.search 明确返回 file_reserved_path；不绕过路径策略，等待用户提供记录。
+- 准备复用既有 parity MCP harness，在临时 HOME 和临时工作区做真实链路冒烟，未新增持久测试或修改实现。
+- 当前 Agent 编译通过（25.21s）；首次隔离冒烟因 tunnel_config_required 失败，已清理所有进程/临时资源。
+- 第二次改用既有 fixture 的假 tunnel 配置（不会连接外部 tunnel），Room stdio MCP 五组请求完成，发现 LF 拒绝而分号成功的差异。未新增持久测试，所有 fixture 清理完成。
+- 更新 scout 请求，要求核对生成 parser token 的可见性，并更正先前 LF 推断。
+- 用户补充 live 原始参数与 32ms 失败响应，与主代理只读状态查询一致。
+- scout 更正 grammar 推断，独立定位 sequence gap 的 LF 处理问题；以真实链路复现作为结论依据。
+- 完成审查；保留本任务三份 planning 文件，恢复开始时的共享 .active_plan 指针；未修改源码、远程配置、未提交。
+- 用户追加解析器潜在问题审查；延续原计划。
+- 委派安全审查检查嵌套 deny 提取，scout 检查字面参数/引号/CRLF；主代理负责 sequence 边界与真实 MCP 验证。
+- 完成 48 次隔离真实 Room MCP 请求；额外用普通 Bash 对照确认续行的实际 argv 以及 `$:`/`$/`、单引号 CRLF 内容的字面语义。
+- 48 次请求均完成，所有 fixture 子进程已停止并等待退出、临时 HOME 已清理；只保留审查 planning。
+- 独立安全审查确认续行和 declaration/unset 特殊节点的 deny→Confirm 路径；字面审查确认双引号 `$` 判断保守过度，没有证据表明未知语法无确认 Allow。
+- 初版实现使用AST gap保留字面续行语义，不规范化整段source；builtin仅补deny提取，仍不允许作为完整语法自动放行；CRLF扫描使用AST literal范围保护。
+- 定点测试首轮：字面输出通过，确认边界fixture未显式清空通道，导致结果受本机provider影响；已修fixture清空通道并纠正error code。删除一个unused helper warning。
+- 独立方案审查发现续行紧邻comment的AST/Bash歧义；添加保守不放行门限和负向入口回归，避免LF放宽误丢弃脚本内容。
+- 迭代定点验证均通过2项新入口测试；reviewer发现的 `$` 后续行动态展开与builtin partial前缀问题已修，并追加到同一长期行为测试。
+- reviewer最新仅余escaped-space候选，实际AST显示完整word/ordinary command，无该候选缺陷；整体审查无未处理的已验证finding。
+- 一次apply_patch因rustfmt后数组布局变化未匹配，改为定点更新；未损坏文件。
+- 阶段7完成并提交 8f564fa：解析器+两项真实链路回归，定点2测试及fmt/diff检查通过。
+- 默认沙箱写.git被只读挂载阻止；按已授权阶段提交在自动审批允许后完成，planning仍未提交。
+- 阶段8开始：更新配置双语页面及接口引用，执行完整Rust验证与真实MCP冒烟。
+- 全workspace check通过；严格Clippy报告新增nested if可合并，按建议作等价布尔短路重写，未放宽门禁。
+- 完整验证继续：fmt、strict clippy、workspace test、Agent/Hub build；文档及等价Clippy修正将作为阶段8提交。
+- fmt、workspace check和strict Clippy通过。
+- 首次workspace suite：Agent 380通过/2失败/1忽略；失败均为既有local_control socket路径>100字节，原因是本次TMPDIR前缀过长。改短隔离根后重跑，不修改产品上限/测试。
+- 首次清理遇只读browser fixture目录，按本次创建根进行不跟随symlink的目录权限恢复后清理；后续trap加入相同清理逻辑。
+- 短隔离根下完整workspace suite通过：513 passed / 0 failed / 1 existing ignored；Agent/Hub构建通过。
+- 修复后真实Room stdio MCP 9组冒烟通过：原始date LF rg成功，字面续行输出正确，续行/特殊builtin deny为policy_denied，字面$和quote CRLF成功，$+续行动态变量与glob仍要求确认，deny脚本前缀未创建marker。
+- 全检查均使用隔离HOME/XDG/TMPDIR；已等待派生进程退出并清理fixture。正在执行live cross-surface contract parity。
+- live parity首轮在Hub delayed-response gate失败：relay未截获对应Agent response。OpenAPI、local/stdio/HTTP及已连接Normal/Room gate通过；正在用只读诊断包装器重跑现有gate，区分本次parser回归和环境/既有链路问题，不修改checker。
+- live parity诊断重跑全部通过，包含首轮失败的Hub late response场景；未修改checker。首轮失败的精确触发原因未确证，不宣称已修复独立Hub故障。
+- 阶段8文档和等价Clippy整理已提交；源码、文档均已提交，planning保留未提交。
+- 完成标准：无新增依赖/无wire或schema变更；fmt、workspace check、strict Clippy、513 Rust tests/1 existing ignored、9个真实Room MCP smoke、cross-surface live parity均通过。未更新生产Room，需部署新构建后生效。
