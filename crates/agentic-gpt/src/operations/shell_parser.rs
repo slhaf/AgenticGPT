@@ -330,10 +330,12 @@ fn extract_command(node: Node<'_>, source: &str) -> (Option<LiteralCommand>, boo
                         }
                     }
                 } else {
-                    if word_gap == Some(false) && !gap.is_empty() && args_are_prefix {
-                        if args.pop().is_none() {
-                            program = None;
-                        }
+                    if word_gap == Some(false)
+                        && !gap.is_empty()
+                        && args_are_prefix
+                        && args.pop().is_none()
+                    {
+                        program = None;
                     }
                     args_are_prefix = false;
                     complete = false;

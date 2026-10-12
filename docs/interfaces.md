@@ -34,7 +34,7 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 
 - `GET /v1/info`：安全的 Hub 运行时概要。
 - `GET /v1/agents`：启用的本地 Agent、其在线状态和安全配置概要。
-- `POST /v1/process/exec`：启动一个受策略控制的 Bash 命令并短暂等待。请求必须提供 `agentId`、原始 shell 脚本 `command` 和 `needConfirm`；可选 `cwd`（工作目录）、`group`（1–32 个字符）和 `waitSeconds`（默认 5 秒，最多 30 秒）。策略针对完整提交脚本预检：任一命令被拒绝就拒绝整段脚本；无法静态判定的脚本需要整段确认。响应为扁平的 `ProcessResponse`，统一受 `limits.processResponseBytes` 预算约束。
+- `POST /v1/process/exec`：启动一个受策略控制的 Bash 命令并短暂等待。请求必须提供 `agentId`、原始 shell 脚本 `command` 和 `needConfirm`；可选 `cwd`（工作目录）、`group`（1–32 个字符）和 `waitSeconds`（默认 5 秒，最多 30 秒）。策略针对完整提交脚本预检：支持 LF 命令分隔和可静态确定的字面续行；任一命令被拒绝就拒绝整段脚本，无法静态判定的脚本需要整段确认。具体语法与边界见[配置说明](configuration.zh-CN.md#bash-命令与-shell-初始化文件)。响应为扁平的 `ProcessResponse`，统一受 `limits.processResponseBytes` 预算约束。
 - `POST /v1/process/batch`：原子准入一批受管理 Bash 命令。请求必须提供 `agentId`、`elements`（每项含 `command`）和 `needConfirm`；可选批次级 `cwd`，元素可覆盖工作目录，以及由子进程继承的可选 `group` 和 `waitSeconds`（默认 5 秒，最多 30 秒）。全部元素先完成预检，再通过一次聚合确认；准入后不回滚已启动命令。响应为 `ProcessBatchResponse`，整个批次共用统一响应预算。
 - `GET /v1/process?agentId=...`：列出活动或近期保留的进程元数据，可选用 `group`、kind、state、limit 和 cursor 筛选。`limit` 默认值为 50，上限为 100。Agent 不可用时，Hub 可以为第一页返回缓存元数据，但不会从缓存继续使用 Agent 发出的 cursor。
 - `GET /v1/process/{processId}/read?agentId=...&waitSeconds=...&view=auto|status&cursor=...&maxBytes=...`：统一读取进程状态和捕获输出。wait 默认 5 秒、最大 30 秒、0 表示立即返回；auto 有 backlog 时立即返回，否则有界等待输出、终态/采集结算或期限；status 只等待执行终态/期限，不因输出提前返回。`maxBytes` 省略时使用 `limits.processResponseBytes`，显式值范围为 4096..1048576。

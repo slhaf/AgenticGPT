@@ -489,9 +489,16 @@ agentic-gpt config path deny add ~/.secrets
 Process 命令由普通 Bash 以 `--noprofile --norc` 非登录、非交互方式执行原始脚本；启用 `pipefail`，
 初始化完成后重置该选项，并保持 `set +e`，不会自动启用 `set -e`。每次调用相互独立，不提供 PTY、
 stdin 或持久 Shell session。命令策略只分析提交的脚本，不分析初始化文件：只识别 tree-sitter-bash
-可解析的字面量命令调用及 `&&`、`||`、`;`、`|` 组合。命中 deny 会在执行任何脚本前拒绝整段命令；
-不完整、无法识别或不支持的语法需要对整段脚本确认，缺少可用确认通道时 fail closed。不要把
-`bash -c` 加入广泛 allow：这会显式授权任意 shell 代码，不能作为默认放宽策略。
+可解析的字面量命令调用及 LF 换行、`&&`、`||`、`;`、`|` 组合，包括命令末尾和注释后的换行。
+字面词片段之间的反斜杠加 LF 按 Bash 续行语义拼接后匹配策略；双引号里的 `$:`、`$/` 等不会
+引入展开的内容仍是字面值，引号内的反斜杠加 CRLF 也不会被误当作命令续行。
+
+命中 deny 会在执行任何脚本前拒绝整段命令。`declare`、`typeset`、`export`、`readonly`、`local`、
+`unset`、`unsetenv` 等特殊 builtin 语句也用确定的程序名和可识别的字面参数前缀匹配 deny；
+它们仍属于需要确认的语法，不因配置 allow 而自动放行。不完整、无法识别或不支持的语法
+需要对整段脚本确认，缺少可用确认通道时 fail closed。包括动态展开、重定向，以及续行直接
+连接到 `#`、无法可靠区分词与注释的边界。反斜杠加 CRLF 不视为 Bash 续行。
+不要把 `bash -c` 加入广泛 allow：这会显式授权任意 shell 代码，不能作为默认放宽策略。
 
 `shell.initFile` 有三种配置状态：
 
