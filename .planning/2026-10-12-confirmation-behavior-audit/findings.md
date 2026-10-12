@@ -85,3 +85,34 @@
 - 用户称tmux pasteContext，按当前现有tmux.pasteText理解：该API单独默认acquire=true；可显式false关闭主动请求。
 - 建议省略整个对象、对象为空、仅提供method时都沿用本API的acquire=true，避免对象存在与否改变默认行为。
 - 用户确认paste主动确认必须获准；拒绝、超时、不可用、取消均终止，不回退到Allow。显式acquire=false仍表示不主动获取许可。
+
+## 配置格式提案（未实现，尚未获用户确认）
+```json
+{
+  "policy": {
+    "defaultAction": "confirm",
+    "allow": [
+      "git status **",
+      "git diff **",
+      "git log **"
+    ],
+    "confirm": [
+      "rm **",
+      "mv **",
+      "python -c **"
+    ],
+    "deny": [
+      "ssh **",
+      "mkfs **",
+      "dd **"
+    ]
+  }
+}
+```
+
+- 保留allow/confirm/deny分类，将Rule对象替换为pattern字符串；defaultAction可取allow/confirm/deny，建议初始化confirm，但用户尚未决定。
+- 单独 * 为全命令规则；其它pattern中的 * 匹配单个token内字符，尾部 ** 匹配零或多个剩余参数。
+- 无 ** 的pattern要求参数数量完整匹配；规则匹配的是解析后的单条命令，不是整段脚本。
+- 冲突优先级固定deny>confirm>allow，不根据顺序/长度变化；主动批准覆盖命令决策。
+- 全局allow *覆盖无法静态分析脚本的额外确认要求，不代表可以识别动态展开后的所有执行行为。
+- 初始化preset作为显式配置内容保存，运行时只从配置读取；建议以确认流程、单源初始化、字符串pattern三个步骤实施。
