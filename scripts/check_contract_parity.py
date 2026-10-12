@@ -6495,7 +6495,6 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub HTTP completed printf", f"expected complete process observation: {completed}")
         if process_response_size(completed) > 4096:
             fail("Hub HTTP completed printf", f"creation response exceeded the configured 4096-byte budget: {completed}")
-        assert_event_counts(completed, (0, 0, 0), "Hub HTTP inline completion suppression")
         completed_events_response, completed_events = hub_event_http_call(
             hub_port,
             hub_key,
@@ -6507,6 +6506,29 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "get",
             "Hub HTTP inline completion event query",
         )
+        try:
+            assert_event_counts(completed, (0, 0, 0), "Hub HTTP inline completion suppression")
+        except GateError as error:
+            pending_details = []
+            for item in event_items(completed_events, "Hub HTTP inline completion event query"):
+                event_id = item.get("eventId")
+                _, detail = hub_event_http_call(
+                    hub_port, hub_key, document, "GET",
+                    f"/v1/events/{event_id}?" + urlencode({"agentId": normal_id}), None,
+                    "/v1/events/{eventId}", "get", "Hub HTTP inline suppression pending provenance",
+                )
+                provenance = {"event": detail}
+                source = detail.get("source", {})
+                if source.get("kind") == "process" and source.get("ref"):
+                    process_response, process_status = hub_json(
+                        hub_port, hub_key, "GET",
+                        f"/v1/process/{source['ref']}/read?" + urlencode({
+                            "agentId": normal_id, "view": "status", "waitSeconds": 0
+                        }), None, "Hub HTTP inline suppression source process",
+                    )
+                    provenance["processStatus"] = {"status": process_response.status, "body": process_status}
+                pending_details.append(provenance)
+            fail("Hub HTTP inline completion suppression", f"{error}; inline processId={completed_id}; pending event details={pending_details}")
         if event_items(completed_events, "Hub HTTP inline completion event query"):
             fail("Hub HTTP inline completion suppression", f"terminal response created a completion event: {completed_events}")
 

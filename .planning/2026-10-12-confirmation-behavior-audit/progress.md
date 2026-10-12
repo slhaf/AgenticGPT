@@ -71,3 +71,9 @@
 - 最终隔离cargo test --workspace：518 passed /0 failed /1 ignored；严格cargo clippy --workspace --all-targets -- -D warnings、fmt、diffcheck通过。Agent/Hub隔离build通过。
 - 真实tmux smoke确认paste默认强制批准不可用不发送，显式false按Allow发送；已清理专属server/worker。桌面通知真实用户动作未触发。
 - Live parity修正新默认Confirm下script fixture显式allow以及启动前配置snapshot，空stdout分页不锁定编码时序；最终gate仍在运行，尚不宣称PASS。
+
+- 阶段三提交3fc30c6。阶段四live gate发现纯字面28k参数在glob DP耗时约11秒，越过5秒wait后产生合法异步事件，非通知抑制缺陷。通过真实Hub定点排除普通Deny/inline请求，按具体event source确认binary fixture来源。
+- 为纯字面Atom序列增加线性比较；保留通配符路径和原零事件断言，并增加仅失败时的provenance诊断。相同真实binary请求优化后0.0502秒terminal/complete、pending0；不清空事件绕过门禁。已有实际分页门禁保护该新增性能失败模式，无低档镜像测试。
+- 最终验证：cargo test --workspace 518 passed/0 failed/1 ignored；cargo clippy --workspace --all-targets -- -D warnings、cargo fmt --all -- --check、git diff --check通过；Agent/Hub build与 live check_contract_parity.py PASS。
+- 补充真实迁移CLI检查：转换结果可加载，Python共享flock阻塞Rust config writer后释放完成；真实tmux最终binary smoke PASS；真实bwrap scope smoke PASS。
+- 完成隔离资源清理。未触发用户实际桌面动作、未执行真实配置迁移、未推送或发布；生产tunnel可执行传输和恢复partial-A/B interleaving仍维持现有gate明确限定，不宣称本次已复现。

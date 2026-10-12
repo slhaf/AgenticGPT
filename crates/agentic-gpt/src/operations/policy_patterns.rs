@@ -99,6 +99,17 @@ pub(super) fn command_matches(pattern: &str, program: &str, args: &[String]) -> 
 }
 
 fn glob_matches(pattern: &[Atom], value: &str, path: bool) -> bool {
+    // Literal argv can contain large scripts or escaped output. Comparing them
+    // directly avoids a quadratic table that delays admission beyond waitSeconds.
+    if pattern.iter().all(|atom| matches!(atom, Atom::Literal(_))) {
+        return pattern
+            .iter()
+            .filter_map(|atom| match atom {
+                Atom::Literal(ch) => Some(*ch),
+                _ => None,
+            })
+            .eq(value.chars());
+    }
     let chars = value.chars().collect::<Vec<_>>();
     let mut previous = vec![false; chars.len() + 1];
     previous[0] = true;
