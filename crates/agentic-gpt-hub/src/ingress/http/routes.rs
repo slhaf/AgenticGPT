@@ -1,3 +1,4 @@
+use agentic_gpt_protocol::AcquireConfirmation;
 use agentic_gpt_protocol::{
     EventGetRequest, EventListRequest, EventMarkRequest, EventSeverity, EventStatus, HubCommand,
     McpBatchRequest, McpCallToolRequest, McpListServersRequest, McpListToolsRequest,
@@ -99,7 +100,7 @@ fn default_tmux_capture_lines() -> u32 {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TmuxExecActionRequest {
     agent_id: String,
     target: String,
@@ -107,7 +108,7 @@ pub(crate) struct TmuxExecActionRequest {
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
-    need_confirm: bool,
+    acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default = "default_tmux_exec_wait_ms")]
     wait_ms: u64,
     #[serde(default = "default_tmux_exec_capture_lines")]
@@ -123,36 +124,34 @@ fn default_tmux_exec_capture_lines() -> u32 {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TmuxPasteActionRequest {
     agent_id: String,
     target: String,
     text: String,
     #[serde(default)]
     submit: bool,
-    #[serde(default = "default_true")]
-    need_confirm: bool,
+    #[serde(default)]
+    acquire_confirmation: Option<AcquireConfirmation>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TmuxCreateActionRequest {
     agent_id: String,
     name: String,
     cwd: String,
+    #[serde(default)]
+    acquire_confirmation: Option<AcquireConfirmation>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TmuxCloseActionRequest {
     agent_id: String,
     name: String,
-    #[serde(default = "default_true")]
-    need_confirm: bool,
-}
-
-fn default_true() -> bool {
-    true
+    #[serde(default)]
+    acquire_confirmation: Option<AcquireConfirmation>,
 }
 
 #[derive(Serialize)]
@@ -652,7 +651,7 @@ pub(crate) async fn tmux_exec(
                 target: payload.target,
                 program: payload.program,
                 args: payload.args,
-                need_confirm: payload.need_confirm,
+                acquire_confirmation: payload.acquire_confirmation,
                 wait_ms: payload.wait_ms,
                 capture_lines: payload.capture_lines,
             },
@@ -682,7 +681,7 @@ pub(crate) async fn tmux_paste_text(
                 target: payload.target,
                 text: payload.text,
                 submit: payload.submit,
-                need_confirm: payload.need_confirm,
+                acquire_confirmation: payload.acquire_confirmation,
             },
         },
         65,
@@ -709,6 +708,7 @@ pub(crate) async fn tmux_create_session(
             payload: TmuxCreateSessionRequest {
                 name: payload.name,
                 cwd: payload.cwd,
+                acquire_confirmation: payload.acquire_confirmation,
             },
         },
         5,
@@ -734,7 +734,7 @@ pub(crate) async fn tmux_close_session(
             request_id: random_id("req"),
             payload: TmuxCloseSessionRequest {
                 name: payload.name,
-                need_confirm: payload.need_confirm,
+                acquire_confirmation: payload.acquire_confirmation,
             },
         },
         65,

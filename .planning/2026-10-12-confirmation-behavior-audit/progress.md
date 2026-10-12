@@ -51,3 +51,12 @@
 - 本轮无运行代码或真实配置变更，git diff --check通过。
 
 - 用户通过批注接受Process scope字段约束；补充file.*授权生效方式说明，仍为设计阶段，无运行代码变更。
+
+- 用户授权开始全面实现；起始工作树干净，读取当前规范并恢复已确认设计。主agent负责整合、阶段提交与验证。
+
+- 第一代码阶段完成：无运行builtin，explicit string command/path policies，init-only presets，independent sandbox concrete paths，AcquireConfirmation与协议/stdio/Hub/schema同步。
+- Process/file/tmux已接入一次批准/策略回退，保留请求snapshot、路径身份复核和cleanup。
+- 独立工程审查发现并修正：父只读挂载覆盖子写挂载、patch symlink漂移、tmux cd相对基准、createSession目录映射漂移。
+- 验证：cargo check --workspace和--tests通过；Protocol隔离既有测试4 passed，config_cli全部24测试跨全量+定点修复运行通过；尚未宣称全部运行时验证通过。
+- 使用find-docs/Context7确认notify-rust关闭原因接口，并核对本地锁定4.17.0源码；通用确认改为类型化async动作，不改MCP批准路径。
+- 迁移脚本与文档已准备，将在后续阶段审查交付；没有运行真实配置迁移。

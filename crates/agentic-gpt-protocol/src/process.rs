@@ -1,3 +1,4 @@
+use crate::AcquireConfirmation;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -12,9 +13,8 @@ pub struct ProcessExecRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub command: String,
-    pub need_confirm: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confirm_method: Option<String>,
+    pub acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,9 +35,8 @@ pub struct ProcessBatchExecRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub elements: Vec<ProcessExecElement>,
-    pub need_confirm: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confirm_method: Option<String>,
+    pub acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

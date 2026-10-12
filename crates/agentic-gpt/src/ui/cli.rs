@@ -257,7 +257,11 @@ async fn handle_tmux(config_path: PathBuf, command: TmuxCommand) -> Result<()> {
         TmuxCommand::Create { name, cwd } => {
             let result = tmux::create_session_for_cli(
                 &config,
-                agentic_gpt_protocol::TmuxCreateSessionRequest { name, cwd },
+                agentic_gpt_protocol::TmuxCreateSessionRequest {
+                    name,
+                    cwd,
+                    acquire_confirmation: None,
+                },
                 context,
             )
             .await;
@@ -268,7 +272,7 @@ async fn handle_tmux(config_path: PathBuf, command: TmuxCommand) -> Result<()> {
                 &config,
                 agentic_gpt_protocol::TmuxCloseSessionRequest {
                     name,
-                    need_confirm: false,
+                    acquire_confirmation: None,
                 },
                 context,
             )

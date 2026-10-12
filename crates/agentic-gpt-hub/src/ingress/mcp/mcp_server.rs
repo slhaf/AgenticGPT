@@ -579,8 +579,7 @@ impl AgenticMcpServer {
             agent_id: params.agent_id.clone(),
             group: params.group,
             command: params.command,
-            need_confirm: params.need_confirm.unwrap_or(false),
-            confirm_method: params.confirm_method,
+            acquire_confirmation: params.acquire_confirmation.map(Into::into),
             cwd: params.cwd,
             wait_seconds: params.wait_seconds,
         };
@@ -622,8 +621,7 @@ impl AgenticMcpServer {
                     cwd: element.cwd,
                 })
                 .collect(),
-            need_confirm: params.need_confirm.unwrap_or(false),
-            confirm_method: params.confirm_method,
+            acquire_confirmation: params.acquire_confirmation.map(Into::into),
             cwd: params.cwd,
             wait_seconds: params.wait_seconds,
         };
@@ -822,7 +820,7 @@ impl AgenticMcpServer {
                 target: params.target,
                 text: params.text,
                 submit: params.submit.unwrap_or(false),
-                need_confirm: params.need_confirm.unwrap_or(true),
+                acquire_confirmation: params.acquire_confirmation.map(Into::into),
             },
         };
         let value = request_agent(&self.state, &params.agent_id, command, 65)
@@ -847,7 +845,7 @@ impl AgenticMcpServer {
                 target: params.target,
                 program: params.program,
                 args: params.args,
-                need_confirm: params.need_confirm.unwrap_or(false),
+                acquire_confirmation: params.acquire_confirmation.map(Into::into),
                 wait_ms: params.wait_ms.unwrap_or(300),
                 capture_lines: params.capture_lines.unwrap_or(120),
             },
@@ -873,6 +871,7 @@ impl AgenticMcpServer {
             payload: TmuxCreateSessionRequest {
                 name: params.name,
                 cwd: params.cwd,
+                acquire_confirmation: params.acquire_confirmation.map(Into::into),
             },
         };
         let value = request_agent(&self.state, &params.agent_id, command, 5)
@@ -895,7 +894,7 @@ impl AgenticMcpServer {
             request_id: random_id("req"),
             payload: TmuxCloseSessionRequest {
                 name: params.name,
-                need_confirm: params.need_confirm.unwrap_or(true),
+                acquire_confirmation: params.acquire_confirmation.map(Into::into),
             },
         };
         let value = request_agent(&self.state, &params.agent_id, command, 65)

@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use agentic_gpt_protocol::{
-    EventSeverity, PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary,
-    SafePathRoot, SafePolicyRules, SafeRule, SafeSandboxSummary, SafeTunnelSummary,
-    DEFAULT_PROCESS_RESPONSE_BYTES, MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES,
+    EventSeverity, PolicyCounts, SafeConfigSummary, SafePathPolicySummary, SafePolicyRules,
+    SafeSandboxSummary, SafeTunnelSummary, DEFAULT_PROCESS_RESPONSE_BYTES,
+    MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES,
 };
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, Utc};
@@ -26,7 +26,7 @@ use std::fmt;
 
 use self::mcp_servers::McpServerConfig;
 use crate::instance_lock::InstanceLock;
-use crate::policy::{builtin_rules, paths_match, PolicyDecision};
+use crate::policy::PolicyDecision;
 use crate::state::CapabilityProfile;
 use crate::utils::{agentic_home, hostname_fallback, DEFAULT_BACKUP_LIMIT};
 
@@ -697,32 +697,52 @@ pub(crate) struct SandboxConfig {
     pub(crate) enabled: bool,
     pub(crate) bubblewrap_path: String,
     pub(crate) required_runtime_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub(crate) read_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub(crate) write_paths: Vec<PathBuf>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PathPolicyConfig {
-    #[serde(default)]
-    pub(crate) write_roots: Vec<PathBuf>,
-    #[serde(default)]
-    pub(crate) read_only_roots: Vec<PathBuf>,
-    #[serde(default)]
-    pub(crate) deny_roots: Vec<PathBuf>,
+    pub(crate) read: PolicyConfig,
+    pub(crate) write: PolicyConfig,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+impl Default for PathPolicyConfig {
+    fn default() -> Self {
+        Self {
+            read: PolicyConfig::with_default(PolicyDecision::Deny),
+            write: PolicyConfig::with_default(PolicyDecision::Deny),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PolicyConfig {
-    pub(crate) allow: Vec<Rule>,
-    pub(crate) confirm: Vec<Rule>,
-    pub(crate) deny: Vec<Rule>,
+    pub(crate) default_action: PolicyDecision,
+    pub(crate) allow: Vec<String>,
+    pub(crate) confirm: Vec<String>,
+    pub(crate) deny: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Rule {
-    pub(crate) program: String,
-    pub(crate) args_prefix: Vec<String>,
+impl PolicyConfig {
+    pub(crate) fn with_default(default_action: PolicyDecision) -> Self {
+        Self {
+            default_action,
+            allow: Vec::new(),
+            confirm: Vec::new(),
+            deny: Vec::new(),
+        }
+    }
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self::with_default(PolicyDecision::Confirm)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1088,6 +1108,8 @@ impl Config {
             sandbox: SandboxConfig {
                 enabled: false,
                 bubblewrap_path: "bwrap".to_string(),
+                read_paths: Vec::new(),
+                write_paths: Vec::new(),
                 required_runtime_paths: vec![
                     PathBuf::from("/usr"),
                     PathBuf::from("/bin"),
@@ -1097,7 +1119,7 @@ impl Config {
                 ],
             },
             shell: ShellConfig::default(),
-            path_policy: default_path_policy(&base.join("workspace")),
+            path_policy: PathPolicyConfig::default(),
             policy: PolicyConfig::default(),
             limits: LimitsConfig {
                 max_concurrent_tasks: 2,
@@ -1172,17 +1194,11 @@ impl Config {
                 .expect("toolsets was checked"),
         )
         .map_err(|_| anyhow!("config_toolsets_invalid"))?;
-        let has_path_policy = object.contains_key("pathPolicy");
+        validate_policy_format(object)?;
         let defaults = Self::default_config()?;
-        let workspace_root = object
-            .get("workspaceRoot")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_else(|| defaults.workspace_root.clone());
         let mut defaults = defaults;
         defaults.mode = mode;
         defaults.profile = profile;
-        defaults.path_policy = default_path_policy(&workspace_root);
         defaults.toolsets = toolsets;
         if object.get("tunnel").is_some_and(Value::is_object) {
             defaults.tunnel = Some(TunnelConfig::default());
@@ -1195,10 +1211,8 @@ impl Config {
         if let Some(public_url) = config.http_mcp.public_url.take() {
             config.http_mcp.public_url = Some(normalize_http_mcp_public_url(&public_url)?);
         }
-        if !has_path_policy {
-            config.path_policy = default_path_policy(&config.workspace_root);
-        }
         config.room.skills = config.skills.clone();
+        config.validate_policies()?;
         config.events.validate()?;
         Ok(config)
     }
@@ -1231,6 +1245,7 @@ impl Config {
             .as_object()
             .cloned()
             .ok_or_else(|| anyhow!("config_import_json_object_required"))?;
+        validate_policy_format(&object)?;
         let mut warnings = Vec::new();
 
         let import_defaults = Self::default_config()?;
@@ -1433,6 +1448,9 @@ impl Config {
                 }
             }
             if let Err(error) = materialize_import_value(&Value::Object(candidate)) {
+                if matches!(key, "policy" | "pathPolicy") {
+                    return Err(anyhow!("config_policy_manual_migration_required: {error}"));
+                }
                 if key == "events" {
                     return Err(anyhow!("config_import_events_invalid: {error}"));
                 }
@@ -1455,7 +1473,6 @@ impl Config {
     }
 
     pub(crate) fn safe_summary(&self) -> SafeConfigSummary {
-        let write_roots = safe_write_roots(self);
         SafeConfigSummary {
             workspace_root: workspace_root_summary(&self.workspace_root),
             sandbox: SafeSandboxSummary {
@@ -1466,43 +1483,29 @@ impl Config {
                     "disabled"
                 }
                 .to_string(),
+                read_paths: self
+                    .sandbox
+                    .read_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+                write_paths: self
+                    .sandbox
+                    .write_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
             },
             path_policy: SafePathPolicySummary {
-                write_root_count: write_roots.len(),
-                read_only_root_count: self.path_policy.read_only_roots.len(),
-                deny_root_count: self.path_policy.deny_roots.len(),
-                write_roots,
-                read_only_roots: safe_path_roots(
-                    &self.path_policy.read_only_roots,
-                    &self.workspace_root,
-                    "configured",
-                ),
-                deny_roots: safe_path_roots(
-                    &self.path_policy.deny_roots,
-                    &self.workspace_root,
-                    "configured",
-                ),
+                read: safe_policy(&self.path_policy.read),
+                write: safe_policy(&self.path_policy.write),
             },
             policy_rule_counts: PolicyCounts {
                 allow: self.policy.allow.len(),
                 confirm: self.policy.confirm.len(),
                 deny: self.policy.deny.len(),
             },
-            policy_rules: SafePolicyRules {
-                allow: safe_rules(&self.policy.allow),
-                confirm: safe_rules(&self.policy.confirm),
-                deny: safe_rules(&self.policy.deny),
-                builtins: SafeBuiltinPolicyRules {
-                    confirm: safe_rules(&builtin_rules(
-                        CapabilityProfile::Normal,
-                        PolicyDecision::Confirm,
-                    )),
-                    deny: safe_rules(&builtin_rules(
-                        CapabilityProfile::Normal,
-                        PolicyDecision::Deny,
-                    )),
-                },
-            },
+            policy_rules: safe_policy(&self.policy),
             confirmation_provider: self.confirmation_provider.fallback_label(),
             tunnel: self.tunnel.as_ref().map(|tunnel| SafeTunnelSummary {
                 configured: true,
@@ -1521,12 +1524,36 @@ impl Config {
         }
     }
 
+    pub(crate) fn validate_policies(&self) -> Result<()> {
+        for pattern in self
+            .policy
+            .allow
+            .iter()
+            .chain(&self.policy.confirm)
+            .chain(&self.policy.deny)
+        {
+            crate::policy::validate_command_pattern(pattern)?;
+        }
+        for policy in [&self.path_policy.read, &self.path_policy.write] {
+            for pattern in policy
+                .allow
+                .iter()
+                .chain(&policy.confirm)
+                .chain(&policy.deny)
+            {
+                crate::policy::validate_path_pattern(pattern)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_mcp_servers(&self) -> Result<()> {
         self::mcp_servers::validate_server_configs(&self.mcp_servers)
     }
 
     pub(crate) fn validate_local(&self) -> Result<()> {
         self.events.validate()?;
+        self.validate_policies()?;
         self.validate_mcp_servers()
     }
     pub(crate) fn validate_http_mcp(&self) -> Result<()> {
@@ -1613,7 +1640,15 @@ pub(crate) fn restart_required_fields(effective: &Config, disk: &Config) -> Vec<
         ),
         (
             "sandbox",
-            serde_json::json!(effective.sandbox) != serde_json::json!(disk.sandbox),
+            serde_json::json!((
+                effective.sandbox.enabled,
+                &effective.sandbox.bubblewrap_path,
+                &effective.sandbox.required_runtime_paths
+            )) != serde_json::json!((
+                disk.sandbox.enabled,
+                &disk.sandbox.bubblewrap_path,
+                &disk.sandbox.required_runtime_paths
+            )),
         ),
         (
             "browser",
@@ -1664,12 +1699,6 @@ fn materialize_import_value(value: &Value) -> Result<Config> {
     defaults.mode = mode;
     defaults.profile = profile;
     defaults.toolsets = ToolsetConfig::for_profile(profile);
-    let workspace_root = object
-        .get("workspaceRoot")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_else(|| defaults.workspace_root.clone());
-    defaults.path_policy = default_path_policy(&workspace_root);
     defaults.tunnel = object
         .get("tunnel")
         .is_some_and(Value::is_object)
@@ -1677,10 +1706,8 @@ fn materialize_import_value(value: &Value) -> Result<Config> {
     let mut effective = serde_json::to_value(defaults)?;
     merge_json_values(&mut effective, value.clone());
     let mut config: Config = serde_json::from_value(effective)?;
-    if !object.contains_key("pathPolicy") {
-        config.path_policy = default_path_policy(&config.workspace_root);
-    }
     config.room.skills = config.skills.clone();
+    config.validate_policies()?;
     Ok(config)
 }
 
@@ -1703,7 +1730,6 @@ fn sparse_defaults(config: &Config) -> Result<Config> {
     let mut defaults = Config::default_config()?;
     defaults.mode = config.mode;
     defaults.profile = config.profile;
-    defaults.path_policy = default_path_policy(&config.workspace_root);
     // Sparse persistence is independent of the currently active runtime mode.
     // If a tunnel section is configured, compare it against tunnel defaults so
     // inactive-but-saved tunnel settings stay sparse instead of materializing
@@ -1718,7 +1744,12 @@ fn prune_sparse_value(value: &mut Value, defaults: &Value, root: bool) {
     };
     let keys = value.keys().cloned().collect::<Vec<_>>();
     for key in keys {
-        if root && matches!(key.as_str(), "mode" | "profile" | "toolsets") {
+        if root
+            && matches!(
+                key.as_str(),
+                "mode" | "profile" | "toolsets" | "policy" | "pathPolicy"
+            )
+        {
             continue;
         }
         let Some(current) = value.get(&key) else {
@@ -1866,76 +1897,56 @@ fn workspace_root_summary(workspace_root: &Path) -> String {
     }
 }
 
-fn safe_write_roots(config: &Config) -> Vec<SafePathRoot> {
-    let mut has_workspace_root = false;
-    let mut roots = config
-        .path_policy
-        .write_roots
-        .iter()
-        .map(|root| {
-            let is_workspace_root = paths_match(root, &config.workspace_root);
-            has_workspace_root |= is_workspace_root;
-            SafePathRoot {
-                path: safe_path_display(root, &config.workspace_root),
-                source: if is_workspace_root {
-                    "workspaceRoot"
-                } else {
-                    "configured"
-                }
-                .to_string(),
-            }
-        })
-        .collect::<Vec<_>>();
-    if !has_workspace_root {
-        roots.insert(
-            0,
-            SafePathRoot {
-                path: "workspace".to_string(),
-                source: "workspaceRoot".to_string(),
-            },
-        );
+fn safe_policy(policy: &PolicyConfig) -> SafePolicyRules {
+    SafePolicyRules {
+        default_action: policy.default_action.as_str().to_string(),
+        allow: policy.allow.clone(),
+        confirm: policy.confirm.clone(),
+        deny: policy.deny.clone(),
     }
-    roots
 }
 
-fn safe_path_roots(roots: &[PathBuf], workspace_root: &Path, source: &str) -> Vec<SafePathRoot> {
-    roots
-        .iter()
-        .map(|root| SafePathRoot {
-            path: safe_path_display(root, workspace_root),
-            source: source.to_string(),
+fn validate_policy_format(object: &serde_json::Map<String, Value>) -> Result<()> {
+    if !object.contains_key("policy") || !object.contains_key("pathPolicy") {
+        return Err(anyhow!("config_requires_policy_migration: add explicit policy and pathPolicy sections; migrate manually or config init"));
+    }
+    if object
+        .get("pathPolicy")
+        .and_then(Value::as_object)
+        .is_some_and(|policy| {
+            ["writeRoots", "readOnlyRoots", "denyRoots"]
+                .iter()
+                .any(|key| policy.contains_key(*key))
         })
-        .collect()
-}
-
-fn safe_path_display(path: &Path, workspace_root: &Path) -> String {
-    if paths_match(path, workspace_root) {
-        return "workspace".to_string();
+        || object
+            .get("policy")
+            .and_then(Value::as_object)
+            .is_some_and(|policy| {
+                ["allow", "confirm", "deny"].iter().any(|key| {
+                    policy
+                        .get(*key)
+                        .and_then(Value::as_array)
+                        .is_some_and(|patterns| patterns.iter().any(Value::is_object))
+                })
+            })
+    {
+        return Err(anyhow!("config_policy_manual_migration_required: replace command rule objects with pattern strings and path roots with explicit read/write policies; config import does not migrate policies"));
     }
-    let raw = path.to_string_lossy().to_string();
-    if raw == "~" || raw.starts_with("~/") {
-        return raw;
-    }
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = path.strip_prefix(&home) {
-            if relative.as_os_str().is_empty() {
-                return "~".to_string();
+    for (key, kind) in [("policy", "command"), ("pathPolicy", "path")] {
+        if let Some(value) = object.get(key) {
+            let valid = if kind == "command" {
+                serde_json::from_value::<PolicyConfig>(value.clone()).is_ok()
+            } else {
+                serde_json::from_value::<PathPolicyConfig>(value.clone()).is_ok()
+            };
+            if !valid {
+                return Err(anyhow!("config_policy_manual_migration_required: {key} requires complete explicit defaultAction/allow/confirm/deny groups"));
             }
-            return format!("~/{}", relative.to_string_lossy());
         }
     }
-    raw
+    Ok(())
 }
 
-fn safe_rules(rules: &[Rule]) -> Vec<SafeRule> {
-    rules
-        .iter()
-        .map(|rule| SafeRule {
-            program: rule.program.clone(),
-            args_prefix: rule.args_prefix.clone(),
-        })
-        .collect()
-}
 pub(crate) fn default_room_config() -> RoomConfig {
     RoomConfig {
         repository_root: None,
@@ -2242,46 +2253,122 @@ pub(crate) fn confirmation_language_is_zh(config: &Config) -> bool {
     normalize_confirmation_language(&config.confirmation_language) == "zh-CN"
 }
 
-pub(crate) fn default_path_policy(workspace_root: &Path) -> PathPolicyConfig {
+pub(crate) fn path_subtree_pattern(path: &Path) -> String {
+    let literal = path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('*', "\\*");
+    format!("{}/**", literal.trim_end_matches('/'))
+}
+
+pub(crate) fn seed_path_policy(workspace_root: &Path) -> PathPolicyConfig {
+    let (read, write, deny) = init_path_roots(workspace_root);
+    let patterns = |roots: Vec<PathBuf>| {
+        roots
+            .into_iter()
+            .map(|root| path_subtree_pattern(&root))
+            .collect::<Vec<_>>()
+    };
+    let deny = patterns(deny);
+    let mut read_policy = PolicyConfig::with_default(PolicyDecision::Deny);
+    read_policy.allow = patterns(read.into_iter().chain(write.clone()).collect());
+    read_policy.deny = deny.clone();
+    let mut write_policy = PolicyConfig::with_default(PolicyDecision::Deny);
+    write_policy.allow = patterns(write);
+    write_policy.deny = deny;
     PathPolicyConfig {
-        write_roots: vec![
-            workspace_root.to_path_buf(),
-            PathBuf::from("~/Documents"),
-            PathBuf::from("~/Downloads"),
-            PathBuf::from("/tmp"),
-        ],
-        read_only_roots: vec![
-            PathBuf::from("~/.cache"),
-            PathBuf::from("~/.local/share"),
-            PathBuf::from("/etc/os-release"),
-            PathBuf::from("/proc/meminfo"),
-            PathBuf::from("/proc/cpuinfo"),
-            PathBuf::from("/proc/loadavg"),
-            PathBuf::from("/proc/uptime"),
-            PathBuf::from("/sys/class/power_supply"),
-            PathBuf::from("/sys/class/thermal"),
-        ],
-        deny_roots: vec![
-            PathBuf::from("~/.ssh"),
-            PathBuf::from("~/.gnupg"),
-            PathBuf::from("~/.local/share/keyrings"),
-            PathBuf::from("~/.password-store"),
-            PathBuf::from("~/.mozilla"),
-            PathBuf::from("~/.config/google-chrome"),
-            PathBuf::from("~/.config/chromium"),
-            PathBuf::from("~/.config/Code/User/globalStorage"),
-            PathBuf::from("~/.npmrc"),
-            PathBuf::from("~/.pypirc"),
-            PathBuf::from("~/.cargo/credentials"),
-            PathBuf::from("~/.docker/config.json"),
-            PathBuf::from("~/.kube"),
-            PathBuf::from("~/.aws"),
-            PathBuf::from("~/.config/gcloud"),
-            PathBuf::from("~/.config/gh"),
-            PathBuf::from("~/.config/hub"),
-            PathBuf::from("~/.config/clash"),
-            PathBuf::from("~/.config/clash-verge"),
-        ],
+        read: read_policy,
+        write: write_policy,
+    }
+}
+
+pub(crate) fn seed_sandbox_paths(workspace_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let (read, write, _) = init_path_roots(workspace_root);
+    (read, write)
+}
+
+fn init_path_roots(workspace_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+    let write = vec![
+        workspace_root.to_path_buf(),
+        PathBuf::from("~/Documents"),
+        PathBuf::from("~/Downloads"),
+        PathBuf::from("/tmp"),
+    ];
+    let read = vec![
+        PathBuf::from("~/.cache"),
+        PathBuf::from("~/.local/share"),
+        PathBuf::from("/etc/os-release"),
+        PathBuf::from("/proc/meminfo"),
+        PathBuf::from("/proc/cpuinfo"),
+        PathBuf::from("/proc/loadavg"),
+        PathBuf::from("/proc/uptime"),
+        PathBuf::from("/sys/class/power_supply"),
+        PathBuf::from("/sys/class/thermal"),
+    ];
+    let deny = vec![
+        PathBuf::from("~/.ssh"),
+        PathBuf::from("~/.gnupg"),
+        PathBuf::from("~/.local/share/keyrings"),
+        PathBuf::from("~/.password-store"),
+        PathBuf::from("~/.mozilla"),
+        PathBuf::from("~/.config/google-chrome"),
+        PathBuf::from("~/.config/chromium"),
+        PathBuf::from("~/.config/Code/User/globalStorage"),
+        PathBuf::from("~/.npmrc"),
+        PathBuf::from("~/.pypirc"),
+        PathBuf::from("~/.cargo/credentials"),
+        PathBuf::from("~/.docker/config.json"),
+        PathBuf::from("~/.kube"),
+        PathBuf::from("~/.aws"),
+        PathBuf::from("~/.config/gcloud"),
+        PathBuf::from("~/.config/gh"),
+        PathBuf::from("~/.config/hub"),
+        PathBuf::from("~/.config/clash"),
+        PathBuf::from("~/.config/clash-verge"),
+    ];
+    (read, write, deny)
+}
+
+pub(crate) fn seed_command_policy(profile: WorkerProfile) -> PolicyConfig {
+    let programs = if profile == WorkerProfile::Room {
+        vec!["sudo", "mount", "systemctl", "service", "scp"]
+    } else {
+        vec![
+            "sudo",
+            "rm",
+            "mv",
+            "chmod",
+            "chown",
+            "mount",
+            "systemctl",
+            "service",
+            "docker",
+            "scp",
+            "curl",
+            "wget",
+            "bash",
+            "sh",
+            "zsh",
+            "fish",
+            "perl",
+            "ruby",
+        ]
+    };
+    let mut confirm = programs
+        .into_iter()
+        .map(|program| format!("{program} **"))
+        .collect::<Vec<_>>();
+    if profile == WorkerProfile::Normal {
+        confirm.extend(["python -c **".to_string(), "node -e **".to_string()]);
+    }
+    PolicyConfig {
+        default_action: PolicyDecision::Confirm,
+        allow: Vec::new(),
+        confirm,
+        deny: ["su", "mkfs", "dd", "ssh"]
+            .into_iter()
+            .map(|program| format!("{program} **"))
+            .collect(),
     }
 }
 
@@ -2668,18 +2755,18 @@ mod tests {
     }
 
     #[test]
-    fn sparse_projection_preserves_custom_workspace_root_but_reconstructs_its_path_defaults() {
+    fn sparse_projection_preserves_custom_workspace_and_explicit_path_policy() {
         let mut config = Config::default_config().unwrap();
         config.mode = RuntimeMode::Local;
         config.workspace_root = temp_config_path().with_extension("workspace");
-        config.path_policy = default_path_policy(&config.workspace_root);
+        config.path_policy = seed_path_policy(&config.workspace_root);
 
         let value = sparse_config_value(&config, false).unwrap();
         assert_eq!(
             value["workspaceRoot"],
             serde_json::to_value(&config.workspace_root).unwrap()
         );
-        assert!(value.get("pathPolicy").is_none());
+        assert!(value.get("pathPolicy").is_some());
 
         let path = temp_config_path();
         fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
@@ -2729,11 +2816,12 @@ mod tests {
     }
 
     #[test]
-    fn sparse_load_reconstructs_workspace_dependent_path_policy_and_unknown_fields() {
+    fn sparse_load_keeps_fail_closed_path_policy_and_unknown_fields() {
         let root = temp_config_path();
         let workspace = root.with_extension("workspace");
-        let expected = default_path_policy(&workspace);
+        let expected = PathPolicyConfig::default();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "mode": "local",
             "profile": "normal",
             "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
@@ -2755,6 +2843,7 @@ mod tests {
     fn sparse_load_preserves_inactive_mode_and_profile_sections() {
         let root = temp_config_path();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "mode": "local",
             "profile": "normal",
             "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
@@ -2817,6 +2906,7 @@ mod tests {
     fn strict_load_rejects_legacy_confirmation_provider_shape() {
         let root = temp_config_path();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "mode": "local",
             "profile": "normal",
             "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
@@ -2849,6 +2939,7 @@ mod tests {
     fn strict_load_rejects_legacy_top_level_hub_fields_even_with_selectors() {
         let root = temp_config_path();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "mode": "hub",
             "profile": "normal",
             "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
@@ -2868,6 +2959,7 @@ mod tests {
     fn explicit_import_maps_legacy_hub_and_preserves_recognized_and_unknown_fields() {
         let root = temp_config_path();
         let value = json!({
+            "pathPolicy": PathPolicyConfig::default(),
             "displayName": "imported-agent",
             "hubUrl": "https://legacy.example.com",
             "hubTransport": "sse",
@@ -2889,7 +2981,8 @@ mod tests {
                 }
             },
             "policy": {
-                "allow": [{"program": "git", "argsPrefix": ["status"]}],
+                "defaultAction": "confirm",
+                "allow": ["git status"],
                 "confirm": [],
                 "deny": []
             },
@@ -2922,7 +3015,7 @@ mod tests {
         );
         assert_eq!(imported.config.limits.max_concurrent_tasks, 7);
         assert_eq!(imported.config.mcp_servers.len(), 1);
-        assert_eq!(imported.config.policy.allow[0].program, "git");
+        assert_eq!(imported.config.policy.allow[0], "git status");
         assert_eq!(imported.config.room.timezone, "UTC");
         assert_eq!(
             imported.config.extra["futureField"],
@@ -2936,23 +3029,26 @@ mod tests {
         let root = temp_config_path();
         let cases = [
             (
-                json!({"mode": "local", "profile": "normal"}),
+                json!({"policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "mode": "local", "profile": "normal"}),
                 ShellInitFile::Default,
             ),
             (
                 json!({
-                    "mode": "local",
-                    "profile": "normal",
-                    "shell": {"initFile": null}
-                }),
+                        "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+                "mode": "local",
+                        "profile": "normal",
+                        "shell": {"initFile": null}
+                    }),
                 ShellInitFile::Disabled,
             ),
             (
                 json!({
-                    "mode": "local",
-                    "profile": "normal",
-                    "shell": {"initFile": DEFAULT_SHELL_INIT_FILE}
-                }),
+                        "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+                "mode": "local",
+                        "profile": "normal",
+                        "shell": {"initFile": DEFAULT_SHELL_INIT_FILE}
+                    }),
                 ShellInitFile::Path(DEFAULT_SHELL_INIT_FILE.to_string()),
             ),
         ];
@@ -2975,6 +3071,7 @@ mod tests {
     fn explicit_import_uses_room_toolset_preset_when_toolsets_are_omitted() {
         let root = temp_config_path();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "mode": "standalone",
             "profile": "room"
         });
@@ -2989,6 +3086,7 @@ mod tests {
     fn explicit_import_uses_normal_toolset_preset_when_toolsets_are_omitted() {
         let root = temp_config_path();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "mode": "standalone",
             "profile": "normal"
         });
@@ -3003,6 +3101,7 @@ mod tests {
     fn explicit_import_preserves_toolsets_that_omit_a_room_profile_namespace() {
         let root = temp_config_path();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "mode": "standalone",
             "profile": "room",
             "toolsets": {"enabled": ["room"]}
@@ -3018,6 +3117,7 @@ mod tests {
     fn explicit_import_rejects_invalid_toolsets() {
         let root = temp_config_path();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "mode": "standalone",
             "profile": "room",
             "toolsets": {"enabled": ["not-a-tool"]}
@@ -3033,6 +3133,7 @@ mod tests {
     fn explicit_import_reports_unimportable_recognized_fields_and_keeps_other_values() {
         let root = temp_config_path();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "displayName": "still-imported",
             "limits": {"maxActiveSessions": 4},
             "shell": {"initFile": false},
@@ -3060,6 +3161,7 @@ mod tests {
     fn explicit_import_clears_plaintext_tunnel_secret_and_reports_it() {
         let root = temp_config_path();
         let value = json!({
+            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
             "mode": "standalone",
             "profile": "normal",
             "tunnel": {

@@ -2619,10 +2619,9 @@ fn numeric_field(field: SetupField) -> bool {
 fn optional_section_for_field(field: SetupField) -> crate::config_templates::OptionalSection {
     match field {
         SetupField::DisplayName => crate::config_templates::OptionalSection::Identity,
-        SetupField::WorkspaceRoot
-        | SetupField::WriteRoots
-        | SetupField::ReadOnlyRoots
-        | SetupField::DenyRoots => crate::config_templates::OptionalSection::Workspace,
+        SetupField::WorkspaceRoot | SetupField::WritePolicy | SetupField::ReadPolicy => {
+            crate::config_templates::OptionalSection::Workspace
+        }
         SetupField::ConfirmationChannels | SetupField::ConfirmationLanguage => {
             crate::config_templates::OptionalSection::Confirmation
         }
@@ -2632,6 +2631,8 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         | SetupField::ProcessResponseBytes => crate::config_templates::OptionalSection::Limits,
         SetupField::SandboxEnabled
         | SetupField::BubblewrapPath
+        | SetupField::SandboxReadPaths
+        | SetupField::SandboxWritePaths
         | SetupField::RequiredRuntimePaths => crate::config_templates::OptionalSection::Sandbox,
         SetupField::ShellInitFileMode | SetupField::ShellInitFilePath => {
             crate::config_templates::OptionalSection::Shell

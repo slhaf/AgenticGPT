@@ -7,10 +7,11 @@ use anyhow::{anyhow, Result};
 use crate::cli_i18n::UiLanguage;
 use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{
-    default_path_policy, normalize_http_mcp_public_url, parse_http_mcp_allow_hosts,
-    validate_hub_transport, validate_hub_url_shape, Config, ConfirmationProviderConfig,
-    EventsConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig, SandboxConfig,
-    ShellConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
+    normalize_http_mcp_public_url, parse_http_mcp_allow_hosts, seed_command_policy,
+    seed_path_policy, seed_sandbox_paths, validate_hub_transport, validate_hub_url_shape, Config,
+    ConfirmationProviderConfig, EventsConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig,
+    RoomConfig, SandboxConfig, ShellConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig,
+    TunnelConfig, WorkerProfile,
 };
 use crate::utils::agentic_home;
 
@@ -257,9 +258,13 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
 
     if let Some(workspace_root) = workspace_root {
         config.workspace_root = workspace_root;
-        if path_policy.is_none() {
-            config.path_policy = default_path_policy(&config.workspace_root);
-        }
+    }
+    if !has_imported_base {
+        config.policy = seed_command_policy(profile);
+        config.path_policy = seed_path_policy(&config.workspace_root);
+        let (read, write) = seed_sandbox_paths(&config.workspace_root);
+        config.sandbox.read_paths = read;
+        config.sandbox.write_paths = write;
     }
     if let Some(path_policy) = path_policy {
         config.path_policy = path_policy;

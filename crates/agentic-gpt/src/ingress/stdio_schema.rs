@@ -14,6 +14,27 @@ use crate::{
 const PATCH_SCHEMA_DESCRIPTION: &str =
     "以 *** Begin Patch 开始、*** End Patch 结束；支持新增、删除、更新和移动文件。";
 
+fn acquire_confirmation_schema(allow_scope: bool, default: bool) -> Value {
+    let mut scope = json!({"type":"array", "items":{"type":"string"}, "default":[]});
+    if !allow_scope {
+        scope["maxItems"] = json!(0);
+    }
+    json!({
+        "type":"object", "additionalProperties":false,
+        "description": if allow_scope {
+            "可选单次确认。read/write 临时路径范围仅适用于本次命令，必须同时 acquire=true；不改变持久配置。"
+        } else {
+            "可选单次确认。不接受非空 read/write 范围；确认仅作用于本次操作，不改变持久配置。"
+        },
+        "properties": {
+            "acquire":{"type":"boolean","default":default,"description":"是否主动请求确认；确认可单次覆盖策略拒绝，提供方不可用或拒绝时不执行。"},
+            "method":{"type":"string","enum":["ntfy","freedesktop"],"description":"可选确认提供方；省略沿用配置。"},
+            "read":scope.clone(),
+            "write":scope,
+        }
+    })
+}
+
 fn wait_seconds_schema(default: u64, description: &'static str) -> Value {
     json!({
         "type": "integer",
@@ -258,6 +279,10 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         }
         "browser.list" => {}
         "file.read" => {
+            add(
+                "acquireConfirmation",
+                acquire_confirmation_schema(false, false),
+            );
             add("path", string("策略允许的文件/目录路径。"));
             add("metadata", boolean("返回文件信息；缺省 false。"));
             add("startLine", number("文本起始行（含，>0）。"));
@@ -271,11 +296,15 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                         "metadata":boolean("返回文件信息；缺省 false。"),
                         "startLine":number("文本起始行（含，>0）。"), "endLine":number("文本结束行（含，≥startLine）。")
                     },"required":["path"]},
-                    "description":"与顶层字段互斥；逐项读取。"
+                    "description":"与顶层单项读取字段互斥；逐项读取，顶层 acquireConfirmation 作用于整个批次。"
                 }),
             );
         }
         "file.search" => {
+            add(
+                "acquireConfirmation",
+                acquire_confirmation_schema(false, false),
+            );
             add("path", string("搜索根路径。"));
             add("query", string("非空匹配文本。"));
             add(
@@ -312,7 +341,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                         "hidden":{"type":"boolean","default":false,"description":"搜索隐藏文件。"},
                         "respectGitignore":{"type":"boolean","default":true,"description":"遵循 Git ignore。"}
                     },"required":["path","query"]},
-                    "description":"与顶层字段互斥；逐项搜索。"
+                    "description":"与顶层单项搜索字段互斥；逐项搜索，顶层 acquireConfirmation 作用于整个批次。"
                 }),
             );
         }
@@ -397,8 +426,8 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         "file.edit" => {
             add("patch", string(PATCH_SCHEMA_DESCRIPTION));
             add(
-                "needConfirm",
-                json!({"type":"boolean","default":false,"description":"请求写前确认。"}),
+                "acquireConfirmation",
+                acquire_confirmation_schema(false, false),
             );
         }
         "mcp.list" => add(
@@ -417,8 +446,8 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 }),
             );
             add(
-                "needConfirm",
-                json!({"type":"boolean","default":false,"description":"请求执行前确认。"}),
+                "acquireConfirmation",
+                acquire_confirmation_schema(true, false),
             );
             add(
                 "cwd",
@@ -441,7 +470,10 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     }, "required": ["command"], "additionalProperties": false}
                 }),
             );
-            add("needConfirm", boolean("批次前确认；缺省 false。"));
+            add(
+                "acquireConfirmation",
+                acquire_confirmation_schema(true, false),
+            );
             add(
                 "group",
                 json!({
@@ -538,11 +570,14 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         "tmux.sessions" => {
             add(
                 "action",
-                json!({"type": "string", "enum": ["list", "create", "close"], "description":"list 仅 action；create 需 name/cwd；close 需 name，可带 needConfirm（缺省 true）。"}),
+                json!({"type": "string", "enum": ["list", "create", "close"], "description":"list 仅 action；create 需 name/cwd；close 需 name；create/close 可带 acquireConfirmation（缺省不主动请求确认）。"}),
             );
             add("name", string("create/close 的 session 名。"));
             add("cwd", string("create 的工作目录。"));
-            add("needConfirm", boolean("关闭前确认；缺省 true。"));
+            add(
+                "acquireConfirmation",
+                acquire_confirmation_schema(false, false),
+            );
         }
         "tmux.panes" => {
             add(
@@ -565,13 +600,19 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             add("target", string("非 shell pane/TUI；shell pane 拒绝。"));
             add("text", string("写入 pane 的文本。"));
             add("submit", boolean("是否追加 Enter；缺省 false。"));
-            add("needConfirm", boolean("写入前确认；缺省 true。"));
+            add(
+                "acquireConfirmation",
+                acquire_confirmation_schema(false, true),
+            );
         }
         "tmux.exec" => {
             add("target", string("存活且非 copy mode 的 shell pane。"));
             add("program", string("shell 程序名/builtin。"));
             add("args", strings("program 参数数组。"));
-            add("needConfirm", boolean("执行前确认；缺省 false。"));
+            add(
+                "acquireConfirmation",
+                acquire_confirmation_schema(false, false),
+            );
             add(
                 "waitMs",
                 number("等待 pane 输出的毫秒数；缺省 300、最多 5000；不代表命令完成。"),
@@ -580,13 +621,17 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         }
         "tmux.createSession" => {
             add("name", string("要创建或复用的 session 名。"));
-            add("cwd", string("session 工作目录；受执行策略约束。"));
+            add("cwd", string("session 工作目录；受路径策略约束。"));
+            add(
+                "acquireConfirmation",
+                acquire_confirmation_schema(false, false),
+            );
         }
         "tmux.closeSession" => {
             add("name", string("要关闭的 session 名。"));
             add(
-                "needConfirm",
-                boolean("关闭前确认；缺省 true，会结束 session 中任务。"),
+                "acquireConfirmation",
+                acquire_confirmation_schema(false, false),
             );
         }
         "mcp.listServers" => add("agentId", string("目标 Agent ID。")),
@@ -940,7 +985,7 @@ fn tool_description(name: &str) -> String {
         "browser.list" => "查看 Browser runtime 与 lease；返回 runtimeAvailable、版本/channel 及 lease 的名称、状态、空闲时限/剩余时间；不可用时返回未就绪状态。只读。".to_string(),
         "file.read" => "按文件路径策略读取 UTF-8 文件或目录元数据；单次 path 与 requests 批次二选一。文本返回 content/可选 metadata/nextStartLine；PNG/JPEG/WebP 及 GIF 以 image content blocks 返回，GIF 为采样 PNG 帧并带帧元数据。批次按序逐项给状态/错误，单项失败不阻断其他项；目录须请求 metadata，图片不支持行范围。只读。".to_string(),
         "file.search" => "在允许的工作区路径搜索文本，支持字面/正则、glob 和有序批次；返回匹配位置/上下文及跳过、裁剪状态，批次逐项标明结果或错误。空查询、无效正则/glob 或路径会失败；上下文可能按配置裁剪。只读。".to_string(),
-        "file.edit" => "用 Codex apply_patch 更新、新增、删除或移动工作区文件；成功返回 status/changed/changes（path/action/可选 destination），部分失败保留已完成项和错误，不公开 diff/revision。无效补丁、路径策略、确认拒绝或并发冲突会报错；有效操作会写盘，needConfirm 可请求一次确认。".to_string(),
+        "file.edit" => "用 Codex apply_patch 更新、新增、删除或移动工作区文件；成功返回 status/changed/changes（path/action/可选 destination），部分失败保留已完成项和错误，不公开 diff/revision。无效补丁、路径策略、确认拒绝或并发冲突会报错；有效操作会写盘，acquireConfirmation 可请求一次确认。".to_string(),
         "process.exec" => "在本 Agent 上执行一段 Bash 命令或脚本，适用于启动单项工作；多项独立工作可用 process.batch。返回 processId/state 及预算内可用输出，后续用 process.read 跟进或 process.cancel 请求取消。普通非登录/非交互 Bash 原样执行 command（pipefail 生效，不设 set -e）；cwd 在可信初始化后生效。命令可产生文件或外部副作用；策略只分析提交的 command，不检查可信初始化中的 PATH/函数，不是运行时安全边界。waitSeconds 只等待、不取消。".to_string(),
         "process.batch" => "一次提交多条独立 Bash 命令，适用于无需先后依赖的批量工作。整批准入后按 limits.maxConcurrentTasks 控制并发，不保证执行/完成顺序；有依赖关系时用 process.exec 和显式 shell 控制流。Bash 行为与 process.exec 相同；元素 cwd 覆盖批次 cwd。返回 batchId/status 与按输入顺序排列的逐项进程信息（含 processId），用 process.read 或 process.cancel 跟进单项。waitSeconds 只等待不取消，已启动副作用不会回滚。".to_string(),
         "process.read" => "已有 processId 时读取执行状态、增量输出或下游 MCP 结果，适合跟进 process.exec、process.batch、skills.run 或 mcp.callTool；不知道 ID 时先用 process.list。不启动或取消工作。view=status 只返回元数据并等待执行终态/期限；auto 优先返回未读产物，否则有界等待。返回 agentId/processId/kind/state/captureStatus 及可用 output/mcpResult。执行终态与 output.eof 不能互相推断；hasMore 仅表示当前有未读输出，gap 表示已丢失字节，captureStatus=incomplete 时不要无限等 EOF。command/skill 可用 cursor 续读；status 或 kind=mcp 不接受输出 cursor。mcpResult.value 为完整 CallToolResult；pending 不是失败，deferred 可提高 maxBytes 领取，not_retained 不可恢复。waitSeconds 到期不取消；未知 ID 或非法参数返回错误。".to_string(),
@@ -948,14 +993,14 @@ fn tool_description(name: &str) -> String {
         "process.cancel" => "需要停止排队中或已启动的工作时，按 processId 请求取消；返回 state/cancelOutcome/terminationEvidence 和可选 error。依据返回的证据判断是否已观察到停止，不把请求已接收当作副作用已停止。本地命令/skill 取消针对受管理进程组，不保证脱组后代停止；MCP 向下游请求取消，不保证远端副作用停止。".to_string(),
         "mcp.callTool" => "调用已发现的下游 MCP 工具并登记为受管理进程；返回统一进程观察和预算内可用结果/错误，后续用 process.read 查看或 process.cancel 请求取消。下游可能产生外部副作用；waitSeconds 不取消；timeoutSeconds 仅在获准并取得执行槽后限制连接/请求（不含确认/排队），取消须另行请求。".to_string(),
         "tmux.listSessions" => "列出目标 Agent 的持久 tmux sessions；调用时提供 agentId。返回 sessions 列表；tmux server 未运行时为空列表，其他错误返回 error。只读。".to_string(),
-        "tmux.sessions" => "本地 session 合并入口：list 只传 action；create 需 name/cwd；close 需 name，可选 needConfirm（缺省 true）。返回列表或 session/created 结果；close 会结束 session 内任务，拒绝或 tmux 错误返回 error。".to_string(),
+        "tmux.sessions" => "本地 session 合并入口：list 只传 action；create 需 name/cwd；close 需 name；create/close 可选 acquireConfirmation（缺省不主动请求确认）。返回列表或 session/created 结果；close 会结束 session 内任务，拒绝或 tmux 错误返回 error。".to_string(),
         "tmux.listPanes" => "列出 agentId 指定 Agent 的 tmux panes，可选 session 限定范围；返回 panes 元数据。只读；无效 session 或远端错误返回 error。".to_string(),
         "tmux.panes" => "本地 pane 合并入口：list 可选 session，capture 需 target、可选 lines；分别返回 panes 或有界 capture 文本。只观察持久终端状态，不提交命令；目标错误返回 error。".to_string(),
         "tmux.capturePane" => "抓取 agentId 指定 Agent 的一个 pane 历史；返回 capture 文本，lines 缺省 160 并受服务端上限约束。只读；无效 target 或 tmux 错误返回 error。".to_string(),
-        "tmux.pasteText" => "向非 shell pane/TUI 写入 text；shell pane 会拒绝并应改用 tmux.exec。submit=true 会追加 Enter，可能触发界面动作；成功返回 status=completed。needConfirm 缺省 true，确认拒绝或写入失败返回 error。".to_string(),
+        "tmux.pasteText" => "向非 shell pane/TUI 写入 text；shell pane 会拒绝并应改用 tmux.exec。submit=true 会追加 Enter，可能触发界面动作；成功返回 status=completed。acquireConfirmation.acquire 缺省 true，确认拒绝或写入失败返回 error。".to_string(),
         "tmux.exec" => "把结构化 program/args 提交到本地 shell pane；返回 submitted 及可选输出快照/warning，不代表命令已完成或成功。策略可拒绝/要求确认；命令会在 pane 中真实执行。".to_string(),
         "tmux.createSession" => "在策略允许的 cwd 创建或复用 agentId 指定 Agent 的持久 tmux session；返回 session、cwd、created。目录或 tmux 错误返回 error；创建后 session 持续存在。".to_string(),
-        "tmux.closeSession" => "关闭 agentId 指定 Agent 的持久 session，会结束其中的 pane/任务；needConfirm 缺省 true。返回关闭结果或确认/执行错误；仅在确需终止时调用。".to_string(),
+        "tmux.closeSession" => "关闭 agentId 指定 Agent 的持久 session，会结束其中的 pane/任务；acquireConfirmation.acquire 缺省 false。返回关闭结果或确认/执行错误；仅在确需终止时调用。".to_string(),
         "mcp.listServers" => "列出已配置的下游 MCP servers，可选 agentId 指定目标；返回 id、enabled、transport 和 url 摘要。只读发现；目标或远端错误返回 error。".to_string(),
         "mcp.listTools" => "用 agentId 与 serverId 查询下游 MCP server 暴露的工具定义；返回其原始 tools/schema，便于选择 toolName 和构造 arguments。连接、配置或远端错误返回 error；只读。".to_string(),
         "mcp.list" => "本地合并发现入口：省略 serverId 列出已配置服务器，提供时连接该 server 并列出 tools；返回 servers 或原始工具定义。配置/连接错误返回 error；只读。".to_string(),

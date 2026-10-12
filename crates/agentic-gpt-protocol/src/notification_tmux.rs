@@ -1,3 +1,4 @@
+use crate::AcquireConfirmation;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -99,25 +100,25 @@ fn default_tmux_capture_lines() -> u32 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TmuxPasteTextRequest {
     pub target: String,
     pub text: String,
     #[serde(default)]
     pub submit: bool,
-    #[serde(default = "default_true")]
-    pub need_confirm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquire_confirmation: Option<AcquireConfirmation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TmuxExecRequest {
     pub target: String,
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default)]
-    pub need_confirm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default = "default_tmux_exec_wait_ms")]
     pub wait_ms: u64,
     #[serde(default = "default_tmux_exec_capture_lines")]
@@ -133,22 +134,20 @@ fn default_tmux_exec_capture_lines() -> u32 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TmuxCreateSessionRequest {
     pub name: String,
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquire_confirmation: Option<AcquireConfirmation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TmuxCloseSessionRequest {
     pub name: String,
-    #[serde(default = "default_true")]
-    pub need_confirm: bool,
-}
-
-fn default_true() -> bool {
-    true
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquire_confirmation: Option<AcquireConfirmation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

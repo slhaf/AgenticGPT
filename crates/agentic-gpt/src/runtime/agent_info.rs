@@ -5,12 +5,11 @@ use std::sync::LazyLock;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use crate::config::{Config, ConfirmationChannel, Rule};
+use crate::config::{Config, ConfirmationChannel, PolicyConfig};
 use crate::exec;
 use crate::notify;
-use crate::policy::{self, PolicyDecision};
 use crate::process;
-use crate::state::{AppState, CapabilityProfile, HubMode, Transport};
+use crate::state::{AppState, HubMode, Transport};
 
 const MAX_SUMMARY_ENTRIES: usize = 128;
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
@@ -54,18 +53,11 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         .map(|issue| Value::String(issue.to_string()))
         .collect::<Vec<_>>();
     let capabilities = state.runtime.capabilities();
-    let (write_roots, write_truncated) = path_values(
-        config
-            .path_policy
-            .write_roots
-            .iter()
-            .chain(std::iter::once(&config.workspace_root)),
-    );
-    let (read_only_roots, read_only_truncated) =
-        path_values(config.path_policy.read_only_roots.iter());
-    let (deny_roots, deny_truncated) = path_values(config.path_policy.deny_roots.iter());
-    let policy_summary = policy_summary(&config, state.runtime.profile);
-    let paths_truncated = write_truncated || read_only_truncated || deny_truncated;
+    let command_summary = policy_summary(&config.policy);
+    let read_summary = policy_summary(&config.path_policy.read);
+    let write_summary = policy_summary(&config.path_policy.write);
+    let (sandbox_read, sandbox_read_truncated) = path_values(config.sandbox.read_paths.iter());
+    let (sandbox_write, sandbox_write_truncated) = path_values(config.sandbox.write_paths.iter());
     let channels = config
         .confirmation_provider
         .channels
@@ -123,16 +115,15 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "sandbox": {
                 "enabled": config.sandbox.enabled,
                 "mode": if config.sandbox.enabled { "bubblewrap" } else { "disabled" },
+                "readPaths": sandbox_read,
+                "writePaths": sandbox_write,
+                "truncated": sandbox_read_truncated || sandbox_write_truncated,
             },
-            "pathPolicy": {
-                "writeRoots": write_roots,
-                "readOnlyRoots": read_only_roots,
-                "denyRoots": deny_roots,
-                "truncated": paths_truncated,
-            },
+            "pathPolicy": { "read": read_summary, "write": write_summary },
+
         },
         "execution": {
-            "programMatching": "exact",
+            "programMatching": "argv-pattern",
             "processes": {
                 "configuredMax": config.limits.max_active_processes.configured_label(),
                 "resolvedMax": resolved_limit.resolved,
@@ -143,7 +134,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "fileSearch": {
                 "maxContextLines": config.limits.max_file_search_context_lines,
             },
-            "policy": policy_summary,
+            "policy": command_summary,
         },
         "confirmation": {
             "channels": channels,
@@ -249,37 +240,22 @@ fn path_values<'a>(roots: impl Iterator<Item = &'a PathBuf>) -> (Vec<String>, bo
     (values, truncated)
 }
 
-fn policy_summary(config: &Config, profile: CapabilityProfile) -> Value {
-    let (allow, allow_truncated) = rule_values(&config.policy.allow);
-    let (confirm, confirm_truncated) = rule_values(&config.policy.confirm);
-    let (deny, deny_truncated) = rule_values(&config.policy.deny);
-    let (builtin_confirm, builtin_confirm_truncated) =
-        rule_values(&policy::builtin_rules(profile, PolicyDecision::Confirm));
-    let (builtin_deny, builtin_deny_truncated) =
-        rule_values(&policy::builtin_rules(profile, PolicyDecision::Deny));
-    json!({
-        "counts": {
-            "allow": config.policy.allow.len(),
-            "confirm": config.policy.confirm.len(),
-            "deny": config.policy.deny.len(),
-        },
-        "allow": allow,
-        "confirm": confirm,
-        "deny": deny,
-        "builtinConfirm": builtin_confirm,
-        "builtinDeny": builtin_deny,
-        "truncated": allow_truncated || confirm_truncated || deny_truncated || builtin_confirm_truncated || builtin_deny_truncated,
-    })
+fn policy_summary(policy: &PolicyConfig) -> Value {
+    let (allow, allow_truncated) = rule_values(&policy.allow);
+    let (confirm, confirm_truncated) = rule_values(&policy.confirm);
+    let (deny, deny_truncated) = rule_values(&policy.deny);
+    json!({ "defaultAction": policy.default_action, "counts": { "allow": policy.allow.len(), "confirm": policy.confirm.len(), "deny": policy.deny.len() }, "allow": allow, "confirm": confirm, "deny": deny, "truncated": allow_truncated || confirm_truncated || deny_truncated })
 }
 
-fn rule_values(rules: &[Rule]) -> (Vec<Value>, bool) {
-    let truncated = rules.len() > MAX_SUMMARY_ENTRIES;
-    let values = rules
-        .iter()
-        .take(MAX_SUMMARY_ENTRIES)
-        .map(|rule| json!({"program": rule.program, "argsPrefix": rule.args_prefix}))
-        .collect();
-    (values, truncated)
+fn rule_values(rules: &[String]) -> (Vec<Value>, bool) {
+    (
+        rules
+            .iter()
+            .take(MAX_SUMMARY_ENTRIES)
+            .map(|rule| json!(rule))
+            .collect(),
+        rules.len() > MAX_SUMMARY_ENTRIES,
+    )
 }
 
 struct ConfigHealth {
@@ -338,7 +314,7 @@ fn config_health(state: &AppState, effective: &Config) -> ConfigHealth {
     if disk.validate_mcp_servers().is_err() || disk.validate_http_mcp().is_err() {
         return invalid_config_health(modified_at);
     }
-    let live_subset_matches_disk = live_subset_matches_disk_for_workspace(effective, &disk);
+    let live_subset_matches_disk = live_subset_matches(effective, &disk);
     let restart_required_fields = crate::config::restart_required_fields(effective, &disk);
     let mut issues = Vec::new();
     if !live_subset_matches_disk {
@@ -372,6 +348,8 @@ fn live_subset(config: &Config) -> Value {
     json!({
         "policy": config.policy,
         "pathPolicy": config.path_policy,
+        "sandboxReadPaths": config.sandbox.read_paths,
+        "sandboxWritePaths": config.sandbox.write_paths,
         "limits": config.limits,
         "mcpServers": config.mcp_servers,
         "toolsets": config.toolsets,
@@ -380,24 +358,15 @@ fn live_subset(config: &Config) -> Value {
     })
 }
 
-fn live_subset_matches_disk_for_workspace(effective: &Config, disk: &Config) -> bool {
-    let effective_subset = live_subset(effective);
-    let mut disk_subset = live_subset(disk);
-    if effective.workspace_root != disk.workspace_root {
-        if let (Some(path_policy), Some(disk_object)) = (
-            effective_subset.get("pathPolicy").cloned(),
-            disk_subset.as_object_mut(),
-        ) {
-            disk_object.insert("pathPolicy".to_string(), path_policy);
-        }
-    }
-    effective_subset == disk_subset
+fn live_subset_matches(effective: &Config, disk: &Config) -> bool {
+    live_subset(effective) == live_subset(disk)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::mcp_servers::McpServerConfig;
+    use crate::state::CapabilityProfile;
     use agentic_gpt_protocol::AgentMessage;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -408,7 +377,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("agent-info-{}", uuid::Uuid::new_v4().simple()));
         config.workspace_root = root.clone();
-        config.path_policy.write_roots = vec![root.clone()];
+        config.path_policy.write.allow = vec![format!("{}/**", root.display())];
         let private_state =
             crate::private_state::PrivateStatePaths::for_test(root.join(".private-state"));
         let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
@@ -443,7 +412,7 @@ mod tests {
         let value = collect(&state(CapabilityProfile::Room)).await;
         assert!(value.get("surface").is_none());
         assert_eq!(value["identity"]["profile"], "room");
-        assert!(value["workspace"]["pathPolicy"]["writeRoots"][0].is_string());
+        assert!(value["workspace"]["pathPolicy"]["write"]["allow"][0].is_string());
         assert_eq!(value["config"]["diskStatus"], "missing");
         assert_eq!(value["mcp"]["concurrency"]["globalLimit"], 8);
         assert_eq!(value["mcp"]["concurrency"]["perServerLimit"], 2);
@@ -463,25 +432,27 @@ mod tests {
         {
             let mut config = app.config.write().await;
             config.workspace_root = PathBuf::from(format!("{}/", root.display()));
-            config.path_policy.write_roots = vec![root.clone(), PathBuf::from("/tmp")];
-            config.path_policy.read_only_roots.clear();
-            config.path_policy.deny_roots.clear();
+            config.path_policy.write.allow =
+                vec![format!("{}/**", root.display()), "/tmp/**".to_string()];
+            config.path_policy.read.allow.clear();
+            config.path_policy.read.deny.clear();
+            config.path_policy.write.deny.clear();
         }
 
         let value = collect(&app).await;
         assert_eq!(value["workspace"]["root"], root.to_string_lossy().as_ref());
         assert_eq!(
-            value["workspace"]["pathPolicy"]["writeRoots"]
+            value["workspace"]["pathPolicy"]["write"]["allow"]
                 .as_array()
                 .unwrap()
                 .len(),
             2
         );
-        assert!(value["workspace"]["pathPolicy"]["readOnlyRoots"]
+        assert!(value["workspace"]["pathPolicy"]["read"]["allow"]
             .as_array()
             .unwrap()
             .is_empty());
-        assert!(value["workspace"]["pathPolicy"]["denyRoots"]
+        assert!(value["workspace"]["pathPolicy"]["write"]["deny"]
             .as_array()
             .unwrap()
             .is_empty());
@@ -533,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn config_health_ignores_path_policy_drift_with_workspace_restart() {
+    fn config_health_reports_independent_path_policy_drift_with_workspace_restart() {
         let mut app = state(CapabilityProfile::Normal);
         let root = std::env::temp_dir().join(format!(
             "agent-info-path-policy-{}",
@@ -548,10 +519,10 @@ mod tests {
 
         let mut effective = Config::default_config().unwrap();
         effective.workspace_root = live_workspace;
-        effective.path_policy.write_roots = vec![live_write_root];
+        effective.path_policy.write.allow = vec![format!("{}/**", live_write_root.display())];
         let mut disk = effective.clone();
         disk.workspace_root = candidate_workspace;
-        disk.path_policy.write_roots = vec![candidate_write_root];
+        disk.path_policy.write.allow = vec![format!("{}/**", candidate_write_root.display())];
         disk.browser.managed.enabled = false;
         let disk_path = root.join("config.json");
         fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
@@ -559,7 +530,7 @@ mod tests {
 
         let health = config_health(&app, &effective);
         assert_eq!(health.disk_status, "valid");
-        assert!(health.live_subset_matches_disk);
+        assert!(!health.live_subset_matches_disk);
         assert!(health
             .restart_required_fields
             .iter()

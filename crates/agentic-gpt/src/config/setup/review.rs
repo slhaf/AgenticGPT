@@ -594,9 +594,8 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
         )],
         OptionalSectionDraft::Workspace(WorkspaceDraft {
             workspace_root,
-            write_roots,
-            read_only_roots,
-            deny_roots,
+            read_policy,
+            write_policy,
         }) => vec![
             ReviewItem::field(
                 SetupField::WorkspaceRoot,
@@ -605,22 +604,16 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::Text,
             ),
             ReviewItem::field(
-                SetupField::WriteRoots,
-                "write_roots",
-                write_roots,
-                ReviewEditorKind::List,
+                SetupField::ReadPolicy,
+                "read_policy",
+                read_policy,
+                ReviewEditorKind::Text,
             ),
             ReviewItem::field(
-                SetupField::ReadOnlyRoots,
-                "read_only_roots",
-                read_only_roots,
-                ReviewEditorKind::List,
-            ),
-            ReviewItem::field(
-                SetupField::DenyRoots,
-                "deny_roots",
-                deny_roots,
-                ReviewEditorKind::List,
+                SetupField::WritePolicy,
+                "write_policy",
+                write_policy,
+                ReviewEditorKind::Text,
             ),
         ],
         OptionalSectionDraft::Confirmation(ConfirmationDraft { channels, language }) => vec![
@@ -672,6 +665,8 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
             enabled,
             bubblewrap_path,
             required_runtime_paths,
+            read_paths,
+            write_paths,
         }) => vec![
             ReviewItem::field(
                 SetupField::SandboxEnabled,
@@ -689,6 +684,18 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 SetupField::RequiredRuntimePaths,
                 "required_runtime_paths",
                 required_runtime_paths,
+                ReviewEditorKind::List,
+            ),
+            ReviewItem::field(
+                SetupField::SandboxReadPaths,
+                "sandbox_read_paths",
+                read_paths,
+                ReviewEditorKind::List,
+            ),
+            ReviewItem::field(
+                SetupField::SandboxWritePaths,
+                "sandbox_write_paths",
+                write_paths,
                 ReviewEditorKind::List,
             ),
         ],

@@ -1643,10 +1643,8 @@ components:
           default: []
           items:
             type: string
-        needConfirm:
-          type: boolean
-          default: false
-          description: Force confirmation in addition to configured command policy.
+        acquireConfirmation:
+          $ref: "#/components/schemas/AcquireConfirmationNoScope"
         waitMs:
           type: integer
           minimum: 0
@@ -1676,9 +1674,9 @@ components:
         submit:
           type: boolean
           default: false
-        needConfirm:
-          type: boolean
-          default: true
+        acquireConfirmation:
+          $ref: "#/components/schemas/AcquireConfirmationNoScope"
+          description: 此操作的 acquire 缺省为 true；省略整个对象也请求确认。
     TmuxCreateSessionRequest:
       type: object
       required:
@@ -1693,7 +1691,9 @@ components:
           type: string
         cwd:
           type: string
-          description: Existing session cwd. It must be inside writable roots and outside denied roots.
+          description: 会话工作目录；必须是现存目录并通过 Agent 的路径策略。
+        acquireConfirmation:
+          $ref: "#/components/schemas/AcquireConfirmationNoScope"
     TmuxCloseSessionRequest:
       type: object
       required:
@@ -1705,9 +1705,8 @@ components:
           type: string
         name:
           type: string
-        needConfirm:
-          type: boolean
-          default: true
+        acquireConfirmation:
+          $ref: "#/components/schemas/AcquireConfirmationNoScope"
     TmuxOperationResponse:
       type: object
       additionalProperties: true
@@ -2012,41 +2011,31 @@ components:
           required:
             - enabled
             - mode
+            - readPaths
+            - writePaths
           additionalProperties: false
           properties:
             enabled:
               type: boolean
             mode:
               type: string
+            readPaths:
+              type: array
+              items:
+                type: string
+            writePaths:
+              type: array
+              items:
+                type: string
         pathPolicy:
           type: object
-          required:
-            - writeRootCount
-            - readOnlyRootCount
-            - denyRootCount
-            - writeRoots
-            - readOnlyRoots
-            - denyRoots
+          required: [read, write]
           additionalProperties: false
           properties:
-            writeRootCount:
-              type: integer
-            readOnlyRootCount:
-              type: integer
-            denyRootCount:
-              type: integer
-            writeRoots:
-              type: array
-              items:
-                $ref: "#/components/schemas/SafePathRoot"
-            readOnlyRoots:
-              type: array
-              items:
-                $ref: "#/components/schemas/SafePathRoot"
-            denyRoots:
-              type: array
-              items:
-                $ref: "#/components/schemas/SafePathRoot"
+            read:
+              $ref: "#/components/schemas/SafePolicyRules"
+            write:
+              $ref: "#/components/schemas/SafePolicyRules"
         policyRuleCounts:
           type: object
           required:
@@ -2065,69 +2054,26 @@ components:
           $ref: "#/components/schemas/SafePolicyRules"
         confirmationProvider:
           type: string
-    SafePathRoot:
-      type: object
-      required:
-        - path
-        - source
-      additionalProperties: false
-      properties:
-        path:
-          type: string
-        source:
-          type: string
-          enum:
-            - configured
-            - workspaceRoot
-    SafeRule:
-      type: object
-      required:
-        - program
-        - argsPrefix
-      additionalProperties: false
-      properties:
-        program:
-          type: string
-        argsPrefix:
-          type: array
-          items:
-            type: string
     SafePolicyRules:
       type: object
-      required:
-        - allow
-        - confirm
-        - deny
-        - builtins
+      required: [defaultAction, allow, confirm, deny]
       additionalProperties: false
       properties:
+        defaultAction:
+          type: string
+          enum: [allow, confirm, deny]
         allow:
           type: array
           items:
-            $ref: "#/components/schemas/SafeRule"
+            type: string
         confirm:
           type: array
           items:
-            $ref: "#/components/schemas/SafeRule"
+            type: string
         deny:
           type: array
           items:
-            $ref: "#/components/schemas/SafeRule"
-        builtins:
-          type: object
-          required:
-            - confirm
-            - deny
-          additionalProperties: false
-          properties:
-            confirm:
-              type: array
-              items:
-                $ref: "#/components/schemas/SafeRule"
-            deny:
-              type: array
-              items:
-                $ref: "#/components/schemas/SafeRule"
+            type: string
     McpListServersRequest:
       type: object
       additionalProperties: false
@@ -3788,12 +3734,70 @@ components:
             type: string
         events:
           $ref: "#/components/schemas/EventPanel"
+    AcquireConfirmation:
+      type: object
+      additionalProperties: false
+      description: 可选单次确认；确认可覆盖本次命令策略和所请求路径范围，不改变持久配置。非空 read/write 必须同时 acquire=true。
+      anyOf:
+        - required: [acquire]
+          properties:
+            acquire:
+              const: true
+        - properties:
+            read:
+              maxItems: 0
+            write:
+              maxItems: 0
+      properties:
+        acquire:
+          type: boolean
+          default: false
+          description: 是否主动请求确认；省略为 false。
+        method:
+          type: string
+          enum: [ntfy, freedesktop]
+          description: 确认提供方；省略沿用 Agent 配置。
+        read:
+          type: array
+          default: []
+          items:
+            type: string
+          description: 仅在本次命令执行期间生效的临时读取路径范围。
+        write:
+          type: array
+          default: []
+          items:
+            type: string
+          description: 仅在本次命令执行期间生效的临时写入路径范围。
+    AcquireConfirmationNoScope:
+      type: object
+      additionalProperties: false
+      description: 可选单次确认；tmux.pasteText 缺省主动请求确认，其他 tmux 操作缺省不主动请求。不接受非空 read/write 范围。
+      properties:
+        acquire:
+          type: boolean
+          description: 是否主动请求确认；缺省值由具体操作决定。
+        method:
+          type: string
+          enum: [ntfy, freedesktop]
+          description: 确认提供方；省略沿用 Agent 配置。
+        read:
+          type: array
+          maxItems: 0
+          default: []
+          items:
+            type: string
+        write:
+          type: array
+          maxItems: 0
+          default: []
+          items:
+            type: string
     ProcessExecRequest:
       type: object
       required:
         - agentId
         - command
-        - needConfirm
       additionalProperties: false
       properties:
         agentId:
@@ -3806,17 +3810,8 @@ components:
         command:
           type: string
           description: Bash command executed verbatim without rewriting.
-        needConfirm:
-          type: boolean
-        confirmMethod:
-          type: string
-          enum:
-            - default
-            - freedesktop
-            - hub
-            - freedesktop-then-hub
-            - freedesktopThenHub
-          description: Optional per-request confirmation provider override. Omit or use default to follow the local agent configuration.
+        acquireConfirmation:
+          $ref: "#/components/schemas/AcquireConfirmation"
         cwd:
           type: string
           description: Optional command working directory; applied after Bash initialization. Relative values are resolved from the agent workspace root and must satisfy local path policy.
@@ -3831,7 +3826,6 @@ components:
       required:
         - agentId
         - elements
-        - needConfirm
       additionalProperties: false
       properties:
         agentId:
@@ -3856,17 +3850,8 @@ components:
               cwd:
                 type: string
                 description: Optional per-element working directory. Overrides the batch cwd for this element.
-        needConfirm:
-          type: boolean
-        confirmMethod:
-          type: string
-          enum:
-            - default
-            - freedesktop
-            - hub
-            - freedesktop-then-hub
-            - freedesktopThenHub
-          description: Optional per-request confirmation provider override for all batch elements.
+        acquireConfirmation:
+          $ref: "#/components/schemas/AcquireConfirmation"
         cwd:
           type: string
           description: Optional default working directory for all batch elements. Relative values are resolved from the agent workspace root. Per-element cwd values override this.

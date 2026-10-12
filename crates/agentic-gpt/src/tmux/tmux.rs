@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::audit::{write_audit, AuditRecord};
 use crate::config::Config;
 use crate::operation::{RequestContext, RequestIngress};
-use crate::policy::{policy_decision_for_profile, PolicyDecision};
+use crate::policy::{command_policy_decision, PolicyDecision};
 use crate::state::AppState;
 use crate::{confirmation, exec};
 
@@ -115,7 +115,11 @@ pub(crate) async fn paste_text(
 ) -> Value {
     let started = Instant::now();
     let target = request.target.clone();
-    let need_confirm = request.need_confirm;
+    let need_confirm = request
+        .acquire_confirmation
+        .as_ref()
+        .map(|a| a.effective_acquire(true))
+        .unwrap_or(true);
     let submit = request.submit;
     let request_source = context.source();
     let result = paste_text_inner(state, request).await;
@@ -154,17 +158,36 @@ async fn paste_text_inner(state: &AppState, request: TmuxPasteTextRequest) -> Va
         )
         .value();
     }
-    if request.need_confirm
-        && !confirmed(
-            state,
-            "paste-buffer",
-            &["-t".to_string(), request.target.clone()],
-        )
-        .await
+    let config = state.config.read().await.clone();
+    if let Err(error) = authorize_tmux(
+        state,
+        &config,
+        request.acquire_confirmation.as_ref(),
+        true,
+        PolicyDecision::Allow,
+        "tmux.pasteText",
+        &[
+            request.target.clone(),
+            format!("submit={}", request.submit),
+            request.text.clone(),
+        ],
+        true,
+    )
+    .await
     {
-        return TmuxError::new("confirmation_denied", "tmux paste was not approved").value();
+        return error.value();
     }
-
+    match inspect_pane(&request.target).await {
+        Ok(current) if !current.is_likely_shell => {}
+        Ok(_) => {
+            return TmuxError::new(
+                "tmux_shell_paste_forbidden",
+                "target changed to a shell while awaiting approval",
+            )
+            .value()
+        }
+        Err(error) => return error.value(),
+    }
     let mut bytes = request.text.into_bytes();
     if request.submit {
         bytes.push(b'\r');
@@ -186,16 +209,14 @@ pub(crate) async fn exec(
     let program = request.program.clone();
     let args = request.args.clone();
     let target = request.target.clone();
-    let need_confirm = request.need_confirm;
+    let need_confirm = request
+        .acquire_confirmation
+        .as_ref()
+        .map(|a| a.effective_acquire(false))
+        .unwrap_or(false);
     let request_source = context.source();
     let config = state.config.read().await.clone();
-    let decision = policy_decision_for_profile(
-        &config,
-        state.runtime.profile,
-        &program,
-        &args,
-        need_confirm,
-    );
+    let decision = command_policy_decision(&config, &program, &args);
     let result = exec_inner(state, request).await;
     let cwd = result
         .get("currentPath")
@@ -252,41 +273,84 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
     }
 
     let config = state.config.read().await.clone();
-    let cwd = match exec::resolve_working_directory(&config, Some(&pane.current_path)) {
+    let cwd = match exec::resolve_working_directory(
+        &exec::permissive_paths(&config),
+        Some(&pane.current_path),
+    ) {
         Ok(cwd) => cwd,
         Err(reason) => {
             return TmuxError::new(&reason, reason.clone())
                 .value_with_current_path(&pane.current_path);
         }
     };
-    if request.program == "cd" {
-        if let Err(reason) = validate_cd_target(&config, &cwd, &request.args) {
-            return TmuxError::new(&reason, reason.clone())
-                .value_with_current_path(&pane.current_path);
+    let permissive = exec::permissive_paths(&config);
+    let execution = exec::ExecutionSpec::Argv {
+        program: request.program.clone(),
+        args: request.args.clone(),
+    };
+    let mut decision = command_policy_decision(&config, &request.program, &request.args);
+    let path_decision = if request.program == "cd" {
+        match cd_target_arg(&request.args).and_then(|target| {
+            exec::resolve_working_directory(
+                &permissive,
+                Some(
+                    &{
+                        let expanded = exec::expand_path(&target)
+                            .map_err(|_| "working_directory_invalid".to_string())?;
+                        if expanded.is_absolute() {
+                            expanded
+                        } else {
+                            cwd.join(expanded)
+                        }
+                    }
+                    .to_string_lossy(),
+                ),
+            )
+        }) {
+            Ok(target) => crate::policy::path_policy_decision(&config, &target, true),
+            Err(reason) => return TmuxError::new(&reason, &reason).value(),
         }
-    } else if let Err(reason) = exec::preflight(&config, &cwd, &request.program, &request.args) {
-        return TmuxError::new(&reason, reason.clone()).value_with_current_path(&pane.current_path);
+    } else {
+        exec::execution_path_decision(&config, &cwd, &execution)
+    };
+    match path_decision {
+        Ok(d) => decision = decision.max(d),
+        Err(reason) => return TmuxError::new(&reason, &reason).value(),
     }
-    let decision = policy_decision_for_profile(
+    let preview = vec![
+        request.target.clone(),
+        format!("cwd: {}", cwd.display()),
+        request.program.clone(),
+        request.args.join(" "),
+    ];
+    if let Err(error) = authorize_tmux(
+        state,
         &config,
-        state.runtime.profile,
-        &request.program,
-        &request.args,
-        request.need_confirm,
-    );
-    if decision == PolicyDecision::Deny {
-        return TmuxError::new("policy_denied", "command was denied by local policy")
-            .value_with_current_path(&pane.current_path);
-    }
-    if decision == PolicyDecision::Confirm
-        && confirmation::request_confirmation(state, &config, None, &request.program, &request.args)
-            .await
-            != "allow_once"
+        request.acquire_confirmation.as_ref(),
+        false,
+        decision,
+        "tmux.exec",
+        &preview,
+        false,
+    )
+    .await
     {
-        return TmuxError::new("confirmation_denied", "tmux command was not approved")
-            .value_with_current_path(&pane.current_path);
+        return error.value();
     }
-
+    match inspect_pane(&request.target).await {
+        Ok(current)
+            if current.current_path == pane.current_path
+                && current.is_likely_shell
+                && !current.pane_dead
+                && !current.pane_in_mode => {}
+        _ => {
+            return TmuxError::new(
+                "tmux_target_changed",
+                "pane changed while awaiting approval",
+            )
+            .value()
+        }
+    }
     let mut command = shell_quote(&request.program);
     for arg in &request.args {
         command.push(' ');
@@ -379,7 +443,45 @@ pub(crate) async fn create_session(
     let cwd = request.cwd.clone();
     let request_source = context.source();
     let config = state.config.read().await.clone();
-    let result = create_session_inner(&config, request).await;
+    let permission = exec::permissive_paths(&config);
+    let resolved = match exec::resolve_working_directory(&permission, Some(&request.cwd)) {
+        Ok(p) => p,
+        Err(reason) => return TmuxError::new(&reason, &reason).value(),
+    };
+    let decision = match crate::policy::path_policy_decision(&config, &resolved, true) {
+        Ok(d) => d,
+        Err(reason) => return TmuxError::new(&reason, &reason).value(),
+    };
+    let approved = match authorize_tmux(
+        state,
+        &config,
+        request.acquire_confirmation.as_ref(),
+        false,
+        decision,
+        "tmux.createSession",
+        &[name.clone(), resolved.display().to_string()],
+        false,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(error) => return error.value(),
+    };
+    let effective = if approved { permission } else { config.clone() };
+    if exec::resolve_working_directory(&effective, Some(&request.cwd))
+        .ok()
+        .as_ref()
+        != Some(&resolved)
+    {
+        return TmuxError::new(
+            "tmux_target_changed",
+            "session path changed while awaiting approval",
+        )
+        .value();
+    }
+    let mut request = request;
+    request.cwd = resolved.to_string_lossy().into_owned();
+    let result = create_session_inner(&effective, request).await;
     audit_tmux(
         &config,
         "tmux.createSession",
@@ -462,7 +564,7 @@ pub(crate) async fn close_session_for_cli(
     }
     let started = Instant::now();
     let request = TmuxCloseSessionRequest {
-        need_confirm: false,
+        acquire_confirmation: None,
         ..request
     };
     let name = request.name.clone();
@@ -493,22 +595,30 @@ pub(crate) async fn close_session(
 ) -> Value {
     let started = Instant::now();
     let name = request.name.clone();
-    let need_confirm = request.need_confirm;
+    let need_confirm = request
+        .acquire_confirmation
+        .as_ref()
+        .map(|a| a.effective_acquire(false))
+        .unwrap_or(false);
     let request_source = context.source();
+    let config = state.config.read().await.clone();
     let result = match validate_close_session(&request) {
         Err(error) => error.value(),
-        Ok(())
-            if request.need_confirm
-                && !confirmed(
-                    state,
-                    "kill-session",
-                    &["-t".to_string(), request.name.clone()],
-                )
-                .await =>
+        Ok(()) => match authorize_tmux(
+            state,
+            &config,
+            request.acquire_confirmation.as_ref(),
+            false,
+            PolicyDecision::Allow,
+            "tmux.closeSession",
+            &[name.clone()],
+            false,
+        )
+        .await
         {
-            TmuxError::new("confirmation_denied", "tmux close was not approved").value()
-        }
-        Ok(()) => close_session_inner(request).await,
+            Ok(_) => close_session_inner(request).await,
+            Err(error) => error.value(),
+        },
     };
     let config = state.config.read().await.clone();
     audit_tmux(
@@ -653,17 +763,43 @@ fn audit_tmux(
     );
 }
 
-async fn confirmed(state: &AppState, operation: &str, args: &[String]) -> bool {
-    let config = state.config.read().await.clone();
-    confirmation::request_confirmation(
+#[allow(clippy::too_many_arguments)]
+async fn authorize_tmux(
+    state: &AppState,
+    config: &Config,
+    acquisition: Option<&agentic_gpt_protocol::AcquireConfirmation>,
+    default: bool,
+    decision: PolicyDecision,
+    operation: &str,
+    args: &[String],
+    strict: bool,
+) -> Result<bool, TmuxError> {
+    if let Some(a) = acquisition {
+        a.validate_scope(false)
+            .map_err(|r| TmuxError::new("tmux_invalid_acquisition", &r))?;
+    }
+    confirmation::authorize_operation(
         state,
-        &config,
-        None,
-        "tmux",
-        &[operation.to_string(), args.join(" ")],
+        config,
+        acquisition,
+        default,
+        decision,
+        operation,
+        args,
+        strict,
     )
     .await
-        == "allow_once"
+    .map(|a| a.approved)
+    .map_err(|r| {
+        TmuxError::new(
+            if r == "policy_denied" {
+                "policy_denied"
+            } else {
+                "confirmation_denied"
+            },
+            &r,
+        )
+    })
 }
 
 async fn tmux_output<I, S>(args: I) -> Result<String, TmuxError>
@@ -699,25 +835,6 @@ fn is_likely_shell(command: &str) -> bool {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn validate_cd_target(
-    config: &Config,
-    cwd: &Path,
-    args: &[String],
-) -> std::result::Result<(), String> {
-    let target = cd_target_arg(args)?;
-    let expanded = exec::expand_pathbuf(Path::new(target))
-        .map_err(|_| "working_directory_invalid".to_string())?;
-    let candidate: PathBuf = if expanded.is_absolute() {
-        expanded
-    } else {
-        cwd.join(expanded)
-    };
-    let candidate = candidate
-        .to_str()
-        .ok_or_else(|| "working_directory_invalid".to_string())?;
-    exec::resolve_working_directory(config, Some(candidate)).map(|_| ())
 }
 
 fn cd_target_arg(args: &[String]) -> std::result::Result<&str, String> {

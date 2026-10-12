@@ -63,9 +63,9 @@ fn every_visible_command_has_help() {
         &["config", "path", "--help"],
         &["config", "path", "list", "--help"],
         &["config", "path", "write", "--help"],
-        &["config", "path", "write", "add", "--help"],
-        &["config", "path", "readonly", "--help"],
-        &["config", "path", "deny", "--help"],
+        &["config", "path", "write", "allow", "add", "--help"],
+        &["config", "path", "read", "--help"],
+        &["config", "path", "read", "deny", "--help"],
         &["config", "mcp", "--help"],
         &["config", "mcp", "add", "--help"],
         &["config", "mcp", "remove", "--help"],
@@ -288,6 +288,30 @@ fn config_init_set_and_show_round_trip() {
         "process response config set command failed"
     );
 
+    let command_pattern = "printf 'literal * argument' **";
+    let removed_pattern = "echo **";
+    let path_pattern = format!("{}/**", root.join("read-scope").display());
+    for args in [
+        vec!["allow", "add", command_pattern],
+        vec!["allow", "add", removed_pattern],
+        vec!["allow", "remove", removed_pattern],
+        vec!["set", "policy.defaultAction", "deny"],
+        vec!["path", "read", "allow", "add", path_pattern.as_str()],
+        vec!["path", "write", "default-action", "confirm"],
+    ] {
+        let result = Command::new(&binary)
+            .args(["config", "--config"])
+            .arg(&config)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "policy mutation failed for {args:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
     let disk: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
     assert_eq!(disk["mode"], "standalone");
     assert_eq!(disk["profile"], "room");
@@ -306,6 +330,24 @@ fn config_init_set_and_show_round_trip() {
     assert_eq!(value["limits"]["maxConcurrentTasks"], 2);
     assert_eq!(value["limits"]["processResponseBytes"], 16384);
     assert_eq!(value["room"]["timezone"], "Asia/Tokyo");
+
+    assert_eq!(value["policy"]["defaultAction"], "deny");
+    assert!(value["policy"]["allow"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|pattern| pattern == command_pattern));
+    assert!(!value["policy"]["allow"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|pattern| pattern == removed_pattern));
+    assert!(value["pathPolicy"]["read"]["allow"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|pattern| pattern == &path_pattern));
+    assert_eq!(value["pathPolicy"]["write"]["defaultAction"], "confirm");
 
     let _ = fs::remove_dir_all(root);
 }
@@ -579,6 +621,8 @@ fn config_set_rejects_invalid_event_policy_without_writing() {
         serde_json::to_vec(&serde_json::json!({
             "mode": "local",
             "profile": "normal",
+            "policy": {"defaultAction":"confirm","allow":[],"confirm":[],"deny":[]},
+            "pathPolicy": {"read":{"defaultAction":"deny","allow":[],"confirm":[],"deny":[]},"write":{"defaultAction":"deny","allow":[],"confirm":[],"deny":[]}},
             "events": {
                 "internalOverrides": {
                     "process.unknown": "medium"

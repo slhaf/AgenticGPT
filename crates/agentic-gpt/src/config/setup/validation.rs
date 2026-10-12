@@ -164,8 +164,8 @@ use crate::config::mcp_servers::{self, McpServerAuthConfig, McpServerConfig};
 use crate::config::{
     self, default_room_config, ConfirmationProviderConfig, EventNotificationLevel, EventsConfig,
     HttpMcpConfig, HubReportingConfig, LimitsConfig, MaxActiveProcesses, PathPolicyConfig,
-    ReportingDetail, RoomConfig, RoomMaintenanceConfig, RoomMaintenanceMode, SandboxConfig,
-    ShellConfig, ShellInitFile, ToolNamespace, ToolsetConfig, TunnelClientConfig,
+    PolicyConfig, ReportingDetail, RoomConfig, RoomMaintenanceConfig, RoomMaintenanceMode,
+    SandboxConfig, ShellConfig, ShellInitFile, ToolNamespace, ToolsetConfig, TunnelClientConfig,
 };
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -446,13 +446,12 @@ pub(super) fn validate_field(
             OptionalSection::Identity,
             &session.optional_draft(OptionalSection::Identity),
         ),
-        SetupField::WorkspaceRoot
-        | SetupField::WriteRoots
-        | SetupField::ReadOnlyRoots
-        | SetupField::DenyRoots => validate_optional(
-            OptionalSection::Workspace,
-            &session.optional_draft(OptionalSection::Workspace),
-        ),
+        SetupField::WorkspaceRoot | SetupField::WritePolicy | SetupField::ReadPolicy => {
+            validate_optional(
+                OptionalSection::Workspace,
+                &session.optional_draft(OptionalSection::Workspace),
+            )
+        }
         SetupField::ConfirmationChannels | SetupField::ConfirmationLanguage => validate_optional(
             OptionalSection::Confirmation,
             &session.optional_draft(OptionalSection::Confirmation),
@@ -466,6 +465,8 @@ pub(super) fn validate_field(
         ),
         SetupField::SandboxEnabled
         | SetupField::BubblewrapPath
+        | SetupField::SandboxReadPaths
+        | SetupField::SandboxWritePaths
         | SetupField::RequiredRuntimePaths => validate_optional(
             OptionalSection::Sandbox,
             &session.optional_draft(OptionalSection::Sandbox),
@@ -580,24 +581,27 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 "workspace_root",
                 &mut errors,
             );
-            parse_path_list(
-                &value.write_roots,
-                SetupField::WriteRoots,
-                "config_init_path_policy_write_roots_invalid",
-                &mut errors,
-            );
-            parse_path_list(
-                &value.read_only_roots,
-                SetupField::ReadOnlyRoots,
-                "config_init_path_policy_read_only_roots_invalid",
-                &mut errors,
-            );
-            parse_path_list(
-                &value.deny_roots,
-                SetupField::DenyRoots,
-                "config_init_path_policy_deny_roots_invalid",
-                &mut errors,
-            );
+            for (text, field) in [
+                (&value.read_policy, SetupField::ReadPolicy),
+                (&value.write_policy, SetupField::WritePolicy),
+            ] {
+                match serde_json::from_str::<PolicyConfig>(text) {
+                    Ok(policy) => {
+                        for pattern in policy
+                            .allow
+                            .iter()
+                            .chain(&policy.confirm)
+                            .chain(&policy.deny)
+                        {
+                            if crate::policy::validate_path_pattern(pattern).is_err() {
+                                errors.push(error(field, "config_init_path_policy_invalid"));
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => errors.push(error(field, "config_init_path_policy_invalid")),
+                }
+            }
         }
         (OptionalSection::Confirmation, OptionalSectionDraft::Confirmation(value)) => {
             if parse_confirmation_channels(&value.channels).is_err() {
@@ -642,6 +646,17 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 "bubblewrap_path",
                 &mut errors,
             );
+            for (text, field) in [
+                (&value.read_paths, SetupField::SandboxReadPaths),
+                (&value.write_paths, SetupField::SandboxWritePaths),
+            ] {
+                parse_path_list(
+                    text,
+                    field,
+                    "config_init_runtime_paths_invalid",
+                    &mut errors,
+                );
+            }
             if serde_json::from_str::<Vec<PathBuf>>(value.required_runtime_paths.trim()).is_err() {
                 errors.push(error(
                     SetupField::RequiredRuntimePaths,
@@ -1064,26 +1079,13 @@ fn apply_optional_draft(
             input.display_name = Some(value.display_name.trim().to_string());
         }
         (OptionalSection::Workspace, OptionalSectionDraft::Workspace(value)) => {
-            let parse = |text: &str, field: SetupField, code: &'static str| {
-                serde_json::from_str::<Vec<PathBuf>>(text.trim())
-                    .map_err(|_| vec![error(field, code)])
+            let parse = |text: &str, field: SetupField| {
+                serde_json::from_str::<PolicyConfig>(text.trim())
+                    .map_err(|_| vec![error(field, "config_init_path_policy_invalid")])
             };
             let path_policy = PathPolicyConfig {
-                write_roots: parse(
-                    &value.write_roots,
-                    SetupField::WriteRoots,
-                    "config_init_path_policy_write_roots_invalid",
-                )?,
-                read_only_roots: parse(
-                    &value.read_only_roots,
-                    SetupField::ReadOnlyRoots,
-                    "config_init_path_policy_read_only_roots_invalid",
-                )?,
-                deny_roots: parse(
-                    &value.deny_roots,
-                    SetupField::DenyRoots,
-                    "config_init_path_policy_deny_roots_invalid",
-                )?,
+                read: parse(&value.read_policy, SetupField::ReadPolicy)?,
+                write: parse(&value.write_policy, SetupField::WritePolicy)?,
             };
             input.workspace_root = Some(PathBuf::from(value.workspace_root.trim()));
             input.path_policy = Some(path_policy);
@@ -1167,6 +1169,18 @@ fn apply_optional_draft(
                 enabled: value.enabled,
                 bubblewrap_path: value.bubblewrap_path.trim().to_string(),
                 required_runtime_paths,
+                read_paths: serde_json::from_str(&value.read_paths).map_err(|_| {
+                    vec![error(
+                        SetupField::SandboxReadPaths,
+                        "config_init_runtime_paths_invalid",
+                    )]
+                })?,
+                write_paths: serde_json::from_str(&value.write_paths).map_err(|_| {
+                    vec![error(
+                        SetupField::SandboxWritePaths,
+                        "config_init_runtime_paths_invalid",
+                    )]
+                })?,
             });
         }
         (OptionalSection::Toolsets, OptionalSectionDraft::Toolsets(value)) => {

@@ -48,18 +48,7 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "config_init_secret_path_invalid" => ("Secret path is invalid.", "密钥路径无效。"),
         "config_init_secret_source_invalid" => ("Secret source is invalid.", "密钥来源无效。"),
         "config_init_number_invalid" => ("Enter a valid number.", "请输入有效数字。"),
-        "config_init_path_policy_write_roots_invalid" => (
-            "Write roots must be a JSON array.",
-            "写入根目录必须是 JSON 数组。",
-        ),
-        "config_init_path_policy_read_only_roots_invalid" => (
-            "Read-only roots must be a JSON array.",
-            "只读根目录必须是 JSON 数组。",
-        ),
-        "config_init_path_policy_deny_roots_invalid" => (
-            "Deny roots must be a JSON array.",
-            "拒绝根目录必须是 JSON 数组。",
-        ),
+        "config_init_path_policy_invalid" => ("Enter a complete policy JSON object with valid absolute path patterns.", "请输入完整策略 JSON 对象及有效绝对路径模式。"),
         "config_init_runtime_paths_invalid" => (
             "Required runtime paths must be a JSON array.",
             "运行时路径必须是 JSON 数组。",
@@ -1238,21 +1227,6 @@ fn render_optional_form(
     section_dirty: bool,
     progress: (usize, usize),
 ) {
-    if section == OptionalSection::Workspace {
-        render_workspace_form(
-            frame,
-            session,
-            state,
-            language,
-            theme,
-            errors,
-            section_draft,
-            section_dirty,
-            progress,
-        );
-        return;
-    }
-
     let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
     render_surface_header(
         frame,
@@ -1354,18 +1328,24 @@ fn render_optional_form(
                 errors,
                 left.width,
             );
-            push_list_field(
-                &mut lines,
-                &mut focused_line,
-                section,
-                draft,
-                state,
+            for field in [
                 SetupField::RequiredRuntimePaths,
-                language,
-                theme,
-                errors,
-                left.width,
-            );
+                SetupField::SandboxReadPaths,
+                SetupField::SandboxWritePaths,
+            ] {
+                push_list_field(
+                    &mut lines,
+                    &mut focused_line,
+                    section,
+                    draft,
+                    state,
+                    field,
+                    language,
+                    theme,
+                    errors,
+                    left.width,
+                );
+            }
         }
         OptionalSection::Shell => {
             push_choice_group(
@@ -1580,7 +1560,27 @@ fn render_optional_form(
                 );
             }
         }
-        OptionalSection::Workspace => unreachable!("workspace has a dedicated renderer"),
+        OptionalSection::Workspace => {
+            for field in [
+                SetupField::WorkspaceRoot,
+                SetupField::ReadPolicy,
+                SetupField::WritePolicy,
+            ] {
+                push_long_form_field(
+                    &mut lines,
+                    &mut focused_line,
+                    session,
+                    section,
+                    draft,
+                    state,
+                    field,
+                    language,
+                    theme,
+                    errors,
+                    left.width,
+                );
+            }
+        }
     }
 
     let content_height = left.height.saturating_sub(2);
@@ -2455,88 +2455,6 @@ fn render_optional_form_footer(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum WorkspaceFocusItem {
-    Root,
-    Path {
-        field: SetupField,
-        index: Option<usize>,
-    },
-}
-
-impl WorkspaceFocusItem {
-    fn field(self) -> SetupField {
-        match self {
-            Self::Root => SetupField::WorkspaceRoot,
-            Self::Path { field, .. } => field,
-        }
-    }
-}
-
-fn workspace_list_fields() -> [SetupField; 3] {
-    [
-        SetupField::WriteRoots,
-        SetupField::ReadOnlyRoots,
-        SetupField::DenyRoots,
-    ]
-}
-
-pub(super) fn workspace_list_state(
-    draft: &OptionalSectionDraft,
-    field: SetupField,
-) -> Result<EditableListState, ()> {
-    let OptionalSectionDraft::Workspace(workspace) = draft else {
-        return Err(());
-    };
-    let raw = match field {
-        SetupField::WriteRoots => &workspace.write_roots,
-        SetupField::ReadOnlyRoots => &workspace.read_only_roots,
-        SetupField::DenyRoots => &workspace.deny_roots,
-        _ => return Err(()),
-    };
-    serde_json::from_str::<Vec<String>>(raw)
-        .map(EditableListState::new)
-        .map_err(|_| ())
-}
-
-pub(super) fn workspace_focus_items(draft: &OptionalSectionDraft) -> Vec<WorkspaceFocusItem> {
-    let mut items = vec![WorkspaceFocusItem::Root];
-    for field in workspace_list_fields() {
-        match workspace_list_state(draft, field) {
-            Ok(state) if !state.is_empty() => {
-                items.extend(
-                    (0..state.items().len()).map(|index| WorkspaceFocusItem::Path {
-                        field,
-                        index: Some(index),
-                    }),
-                );
-            }
-            _ => items.push(WorkspaceFocusItem::Path { field, index: None }),
-        }
-    }
-    items
-}
-
-pub(super) fn workspace_focus_field(
-    draft: &OptionalSectionDraft,
-    focus: usize,
-) -> Option<SetupField> {
-    workspace_focus_items(draft)
-        .get(focus)
-        .copied()
-        .map(WorkspaceFocusItem::field)
-}
-
-pub(super) fn workspace_path_target(
-    draft: &OptionalSectionDraft,
-    focus: usize,
-) -> Option<(SetupField, Option<usize>)> {
-    match workspace_focus_items(draft).get(focus).copied() {
-        Some(WorkspaceFocusItem::Path { field, index }) => Some((field, index)),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OptionalFocusItem {
     Field(SetupField),
     Choice {
@@ -2637,14 +2555,11 @@ pub(super) fn optional_list_state(
     field: SetupField,
 ) -> Result<EditableListState, ()> {
     let raw = match (draft, field) {
-        (OptionalSectionDraft::Workspace(value), SetupField::WriteRoots) => &value.write_roots,
-        (OptionalSectionDraft::Workspace(value), SetupField::ReadOnlyRoots) => {
-            &value.read_only_roots
-        }
-        (OptionalSectionDraft::Workspace(value), SetupField::DenyRoots) => &value.deny_roots,
         (OptionalSectionDraft::Sandbox(value), SetupField::RequiredRuntimePaths) => {
             &value.required_runtime_paths
         }
+        (OptionalSectionDraft::Sandbox(value), SetupField::SandboxReadPaths) => &value.read_paths,
+        (OptionalSectionDraft::Sandbox(value), SetupField::SandboxWritePaths) => &value.write_paths,
         _ => return Err(()),
     };
     serde_json::from_str::<Vec<String>>(raw)
@@ -2661,17 +2576,14 @@ pub(super) fn set_optional_list_state(
         return false;
     };
     match (draft, field) {
-        (OptionalSectionDraft::Workspace(value), SetupField::WriteRoots) => {
-            value.write_roots = serialized
-        }
-        (OptionalSectionDraft::Workspace(value), SetupField::ReadOnlyRoots) => {
-            value.read_only_roots = serialized
-        }
-        (OptionalSectionDraft::Workspace(value), SetupField::DenyRoots) => {
-            value.deny_roots = serialized
-        }
         (OptionalSectionDraft::Sandbox(value), SetupField::RequiredRuntimePaths) => {
             value.required_runtime_paths = serialized
+        }
+        (OptionalSectionDraft::Sandbox(value), SetupField::SandboxReadPaths) => {
+            value.read_paths = serialized
+        }
+        (OptionalSectionDraft::Sandbox(value), SetupField::SandboxWritePaths) => {
+            value.write_paths = serialized
         }
         _ => return false,
     }
@@ -2696,15 +2608,14 @@ pub(super) fn optional_focus_items(
 ) -> Vec<OptionalFocusItem> {
     match section {
         OptionalSection::Identity => vec![OptionalFocusItem::Field(SetupField::DisplayName)],
-        OptionalSection::Workspace => workspace_focus_items(draft)
-            .into_iter()
-            .map(|item| match item {
-                WorkspaceFocusItem::Root => OptionalFocusItem::Field(SetupField::WorkspaceRoot),
-                WorkspaceFocusItem::Path { field, index } => {
-                    OptionalFocusItem::List { field, index }
-                }
-            })
-            .collect(),
+        OptionalSection::Workspace => [
+            SetupField::WorkspaceRoot,
+            SetupField::ReadPolicy,
+            SetupField::WritePolicy,
+        ]
+        .into_iter()
+        .map(OptionalFocusItem::Field)
+        .collect(),
         OptionalSection::Confirmation => multi_select_options(SetupField::ConfirmationChannels)
             .iter()
             .copied()
@@ -2739,7 +2650,13 @@ pub(super) fn optional_focus_items(
                 OptionalFocusItem::Field(SetupField::SandboxEnabled),
                 OptionalFocusItem::Field(SetupField::BubblewrapPath),
             ];
-            items.extend(list_focus_items(SetupField::RequiredRuntimePaths, draft));
+            for field in [
+                SetupField::RequiredRuntimePaths,
+                SetupField::SandboxReadPaths,
+                SetupField::SandboxWritePaths,
+            ] {
+                items.extend(list_focus_items(field, draft));
+            }
             items
         }
         OptionalSection::Shell => {
@@ -3140,279 +3057,6 @@ pub(super) fn optional_item_focus_index(
         })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_workspace_form(
-    frame: &mut Frame,
-    session: &SetupSession,
-    state: &TuiState,
-    language: UiLanguage,
-    theme: &Theme,
-    errors: &HashMap<SetupField, String>,
-    section_draft: Option<&OptionalSectionDraft>,
-    section_dirty: bool,
-    progress: (usize, usize),
-) {
-    let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
-    render_surface_header(
-        frame,
-        header,
-        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
-        &format!("{} / {}", progress.0, progress.1),
-        theme,
-    );
-    render_horizontal_rule(frame, top_rule, theme);
-    let [left, _, right] = surface_columns(body);
-
-    let fallback = session.optional_draft(OptionalSection::Workspace);
-    let draft = section_draft.unwrap_or(&fallback);
-    let focus_items = workspace_focus_items(draft);
-    let action_focused = state.focus >= focus_items.len();
-    let mut lines = vec![
-        labeled_heading_line(
-            t(language, "Workspace settings", "工作区配置"),
-            left.width,
-            theme,
-        ),
-        Line::raw(""),
-    ];
-    let mut focused_line = 0usize;
-
-    lines.push(subsection_heading_line(
-        optional_field_label(SetupField::WorkspaceRoot, language),
-        theme,
-    ));
-    let root_focused = state.focus == 0;
-    if root_focused {
-        focused_line = lines.len();
-    }
-    let root_value = optional_field_value(draft, SetupField::WorkspaceRoot);
-    let default_workspace = default_optional_draft(language, OptionalSection::Workspace);
-    let default_root = optional_field_value(&default_workspace, SetupField::WorkspaceRoot);
-    lines.push(long_form_input_value_line(
-        current_input_value(state, SetupField::WorkspaceRoot, &root_value),
-        root_focused,
-        editing_cursor(state, SetupField::WorkspaceRoot).is_some(),
-        editing_cursor(state, SetupField::WorkspaceRoot),
-        false,
-        root_value == default_root,
-        left.width,
-        theme,
-    ));
-    if let Some(error) = errors.get(&SetupField::WorkspaceRoot) {
-        lines.push(inline_error_line(&localized_error(error, language), theme));
-    }
-    lines.push(Line::raw(""));
-
-    for field in workspace_list_fields() {
-        lines.push(subsection_heading_line(
-            optional_field_label(field, language),
-            theme,
-        ));
-        let targets = focus_items
-            .iter()
-            .enumerate()
-            .filter_map(|(focus, item)| match item {
-                WorkspaceFocusItem::Path {
-                    field: candidate,
-                    index,
-                } if *candidate == field => Some((focus, *index)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        match workspace_list_state(draft, field) {
-            Ok(list) if !list.is_empty() => {
-                for (focus, index) in targets {
-                    let Some(index) = index else {
-                        continue;
-                    };
-                    let focused = state.focus == focus;
-                    if focused {
-                        focused_line = lines.len();
-                    }
-                    let list_editing = state
-                        .list_edit
-                        .as_ref()
-                        .is_some_and(|target| target.field == field && target.index == index);
-                    let value = if list_editing {
-                        state
-                            .editing
-                            .as_ref()
-                            .map(|editing| editing.buffer.as_str())
-                            .unwrap_or_default()
-                    } else {
-                        list.items()
-                            .get(index)
-                            .map(String::as_str)
-                            .unwrap_or_default()
-                    };
-                    lines.push(editable_list_item_line(
-                        value,
-                        focused,
-                        list_editing,
-                        if list_editing {
-                            state.editing.as_ref().map(|editing| editing.cursor)
-                        } else {
-                            None
-                        },
-                        left.width,
-                        theme,
-                    ));
-                }
-            }
-            Ok(_) => {
-                let focus = targets.first().map(|(focus, _)| *focus).unwrap_or_default();
-                let focused = state.focus == focus;
-                if focused {
-                    focused_line = lines.len();
-                }
-                lines.push(editable_list_item_line(
-                    "", focused, false, None, left.width, theme,
-                ));
-            }
-            Err(()) => {
-                let focus = targets.first().map(|(focus, _)| *focus).unwrap_or_default();
-                let focused = state.focus == focus;
-                if focused {
-                    focused_line = lines.len();
-                }
-                lines.push(editable_list_item_line(
-                    "", focused, false, None, left.width, theme,
-                ));
-                let code = errors
-                    .get(&field)
-                    .map(String::as_str)
-                    .unwrap_or(match field {
-                        SetupField::WriteRoots => "config_init_path_policy_write_roots_invalid",
-                        SetupField::ReadOnlyRoots => {
-                            "config_init_path_policy_read_only_roots_invalid"
-                        }
-                        SetupField::DenyRoots => "config_init_path_policy_deny_roots_invalid",
-                        _ => "config_init_optional_section_invalid",
-                    });
-                lines.push(inline_error_line(&localized_error(code, language), theme));
-            }
-        }
-        if let Some(error) = errors.get(&field) {
-            if workspace_list_state(draft, field).is_ok() {
-                lines.push(inline_error_line(&localized_error(error, language), theme));
-            }
-        }
-        lines.push(Line::raw(""));
-    }
-
-    let content_height = left.height.saturating_sub(2);
-    let content_area = Rect {
-        x: left.x,
-        y: left.y,
-        width: left.width,
-        height: content_height,
-    };
-    let visible = usize::from(content_height);
-    let max_scroll = lines.len().saturating_sub(visible);
-    if action_focused {
-        focused_line = lines.len().saturating_sub(1);
-    }
-    let scroll = focused_line
-        .saturating_sub(visible.saturating_sub(1) / 2)
-        .min(max_scroll)
-        .min(usize::from(u16::MAX)) as u16;
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), content_area);
-    render_surface_action_dock(
-        frame,
-        left,
-        optional_action_label(section_dirty, language),
-        action_focused,
-        theme,
-    );
-
-    let field = workspace_focus_field(draft, state.focus);
-    if right.width > 0 {
-        render_surface(frame, right, theme);
-        let inspector = right.inner(Margin {
-            horizontal: 2,
-            vertical: 1,
-        });
-        let title = field
-            .map(|field| optional_field_label(field, language))
-            .unwrap_or_else(|| section_label(OptionalSection::Workspace, language));
-        let inspector_body =
-            optional_form_inspector_body(OptionalSection::Workspace, field, language);
-        render_inspector(frame, inspector, title, inspector_body, theme);
-    }
-    render_horizontal_rule(frame, bottom_rule, theme);
-    render_workspace_footer(frame, footer, state, draft, action_focused, language, theme);
-}
-
-fn render_workspace_footer(
-    frame: &mut Frame,
-    area: Rect,
-    state: &TuiState,
-    draft: &OptionalSectionDraft,
-    action_focused: bool,
-    language: UiLanguage,
-    theme: &Theme,
-) {
-    if state.editing.is_some() {
-        render_contextual_footer(
-            frame,
-            area,
-            &[
-                ("Enter", t(language, "confirm", "确认")),
-                ("Esc", t(language, "discard", "放弃")),
-                ("Ctrl+C", t(language, "cancel", "取消")),
-            ],
-            theme,
-        );
-        return;
-    }
-    if action_focused {
-        render_contextual_footer(
-            frame,
-            area,
-            &[
-                ("Enter/l", t(language, "continue", "继续")),
-                ("Esc/h", t(language, "back", "返回")),
-                ("Ctrl+C", t(language, "cancel", "取消")),
-            ],
-            theme,
-        );
-        return;
-    }
-    if let Some((_, index)) = workspace_path_target(draft, state.focus) {
-        render_contextual_footer(
-            frame,
-            area,
-            &[
-                ("↑↓ j/k", t(language, "move", "移动")),
-                (
-                    "Enter/l",
-                    if index.is_some() {
-                        t(language, "edit", "编辑")
-                    } else {
-                        t(language, "add", "新增")
-                    },
-                ),
-                ("a", t(language, "add", "新增")),
-                ("d", t(language, "delete", "删除")),
-                ("Esc/h", t(language, "back", "返回")),
-            ],
-            theme,
-        );
-        return;
-    }
-    render_contextual_footer(
-        frame,
-        area,
-        &[
-            ("↑↓ j/k", t(language, "move", "移动")),
-            ("Enter/l", t(language, "edit", "编辑")),
-            ("Esc/h", t(language, "back", "返回")),
-            ("Ctrl+C", t(language, "cancel", "取消")),
-        ],
-        theme,
-    );
-}
-
 fn optional_center_inspector_body(
     section: Option<OptionalSection>,
     language: UiLanguage,
@@ -3428,8 +3072,8 @@ fn optional_center_inspector_body(
                     "Set the default working directory and the paths file tools may write, read only, or not access.",
                     "",
                     "Access priority:",
-                    "• deny > write > read-only",
-                    "• workspace root is always writable",
+                    "• deny > confirm > allow",
+                    "• access follows explicit read/write policies",
                 ],
                 OptionalSection::Confirmation => &[
                     "Choose how confirmation requests are delivered and which language they use.",
@@ -3499,8 +3143,8 @@ fn optional_center_inspector_body(
                     "设置默认工作目录，以及文件工具允许写入、只读和禁止访问的路径范围。",
                     "",
                     "权限优先级：",
-                    "• deny > write > read-only",
-                    "• workspace root 始终可写",
+                    "• deny > confirm > allow",
+                    "• 访问遵循显式 read/write 策略",
                 ],
                 OptionalSection::Confirmation => &[
                     "设置确认请求的投递通道和语言。",
@@ -3584,33 +3228,8 @@ fn optional_form_inspector_body(
                     "• untouched: use the host name when available",
                     "• saved default draft: write AgenticGPT agent",
                 ],
-                SetupField::WorkspaceRoot => &[
-                    "Default working directory for relative paths and workspace-scoped data.",
-                    "Default: ~/.agentic_gpt/workspace.",
-                    "",
-                    "Access rule:",
-                    "• workspace root is always writable",
-                ],
-                SetupField::WriteRoots => &[
-                    "Additional roots file tools may modify.",
-                    "Default: workspace, ~/Documents, ~/Downloads, /tmp.",
-                    "",
-                    "Workspace root remains writable even if it is removed from this list.",
-                ],
-                SetupField::ReadOnlyRoots => &[
-                    "Roots file tools may read but not modify.",
-                    "",
-                    "Access priority:",
-                    "• write overrides read-only",
-                    "• deny overrides both",
-                ],
-                SetupField::DenyRoots => &[
-                    "Roots file tools cannot access.",
-                    "Default includes common credential, browser, cloud, and package-manager locations.",
-                    "",
-                    "Access priority:",
-                    "• deny overrides write and read-only",
-                ],
+                SetupField::WorkspaceRoot => &["Default working directory; access requires an explicit matching path policy."],
+                SetupField::ReadPolicy | SetupField::WritePolicy => &["Edit the complete JSON object with defaultAction, allow, confirm, deny.", "Path patterns: * stays in one component, ** crosses components; deny wins, then confirm, then allow.", "Policy and sandbox concrete mounts are independent."],
                 SetupField::ConfirmationChannels => &[
                     "Choose confirmation fallback channels.",
                     "Selected order is the fallback order: the first available channel handles the request.",
@@ -3806,33 +3425,8 @@ fn optional_form_inspector_body(
                     "• 未配置：优先使用主机名",
                     "• 保存默认草稿：写入 AgenticGPT agent",
                 ],
-                SetupField::WorkspaceRoot => &[
-                    "相对路径和工作区数据使用的默认目录。",
-                    "默认 ~/.agentic_gpt/workspace。",
-                    "",
-                    "访问规则：",
-                    "• workspace root 始终可写",
-                ],
-                SetupField::WriteRoots => &[
-                    "文件工具允许修改的额外根目录。",
-                    "默认包含 workspace、~/Documents、~/Downloads 和 /tmp。",
-                    "",
-                    "即使从此列表移除，workspace root 仍保持可写。",
-                ],
-                SetupField::ReadOnlyRoots => &[
-                    "文件工具可以读取、但不能修改的根目录。",
-                    "",
-                    "权限优先级：",
-                    "• write 覆盖 read-only",
-                    "• deny 覆盖两者",
-                ],
-                SetupField::DenyRoots => &[
-                    "文件工具禁止访问的根目录。",
-                    "默认包含常见的凭据、浏览器、云服务和包管理器配置位置。",
-                    "",
-                    "权限优先级：",
-                    "• deny 覆盖 write 和 read-only",
-                ],
+                SetupField::WorkspaceRoot => &["默认工作目录；访问需显式匹配路径策略。"],
+                SetupField::ReadPolicy | SetupField::WritePolicy => &["编辑完整 JSON 对象，包含 defaultAction、allow、confirm、deny。", "路径模式中 * 不跨目录，** 跨目录；deny 优先，其次 confirm，再次 allow。", "路径策略与沙箱具体挂载路径独立。"],
                 SetupField::ConfirmationChannels => &[
                     "选择确认请求的降级通道。",
                     "选中顺序就是降级顺序：按顺序尝试，首个可用通道处理请求。",
@@ -4068,9 +3662,8 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
     match field {
         SetupField::DisplayName => t(language, "Display name", "显示名称"),
         SetupField::WorkspaceRoot => t(language, "Workspace root", "工作区根目录"),
-        SetupField::WriteRoots => t(language, "Write roots", "写入根目录"),
-        SetupField::ReadOnlyRoots => t(language, "Read-only roots", "只读根目录"),
-        SetupField::DenyRoots => t(language, "Deny roots", "拒绝根目录"),
+        SetupField::WritePolicy => t(language, "Write policy JSON", "写入策略 JSON"),
+        SetupField::ReadPolicy => t(language, "Read policy JSON", "读取策略 JSON"),
         SetupField::ConfirmationChannels => t(language, "Fallback channels", "降级通道"),
         SetupField::ConfirmationLanguage => t(language, "Language", "语言"),
         SetupField::MaxConcurrentTasks => t(language, "Max concurrent tasks", "最大并发任务"),
@@ -4088,6 +3681,8 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::ShellInitFilePath => t(language, "Init file path", "初始化文件路径"),
         SetupField::BubblewrapPath => t(language, "Bubblewrap path", "Bubblewrap 路径"),
         SetupField::RequiredRuntimePaths => t(language, "Required runtime paths", "必需运行时路径"),
+        SetupField::SandboxReadPaths => t(language, "Sandbox read paths", "沙箱只读路径"),
+        SetupField::SandboxWritePaths => t(language, "Sandbox write paths", "沙箱可写路径"),
         SetupField::RepositoryRoot => t(language, "Repository root", "仓库根目录"),
         SetupField::RoomMaintenanceMode => t(language, "Maintenance mode", "维护模式"),
         SetupField::RoomMaintenanceAutoPush => t(language, "Auto-push", "自动推送"),
@@ -4157,9 +3752,8 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
         },
         OptionalSectionDraft::Workspace(value) => match field {
             SetupField::WorkspaceRoot => value.workspace_root.clone(),
-            SetupField::WriteRoots => value.write_roots.clone(),
-            SetupField::ReadOnlyRoots => value.read_only_roots.clone(),
-            SetupField::DenyRoots => value.deny_roots.clone(),
+            SetupField::WritePolicy => value.write_policy.clone(),
+            SetupField::ReadPolicy => value.read_policy.clone(),
             _ => String::new(),
         },
         OptionalSectionDraft::Confirmation(value) => match field {
@@ -4178,6 +3772,8 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             SetupField::SandboxEnabled => value.enabled.to_string(),
             SetupField::BubblewrapPath => value.bubblewrap_path.clone(),
             SetupField::RequiredRuntimePaths => value.required_runtime_paths.clone(),
+            SetupField::SandboxReadPaths => value.read_paths.clone(),
+            SetupField::SandboxWritePaths => value.write_paths.clone(),
             _ => String::new(),
         },
         OptionalSectionDraft::Shell(value) => match field {
@@ -4236,9 +3832,8 @@ pub(super) fn set_optional_field(
         }
         OptionalSectionDraft::Workspace(draft) => match field {
             SetupField::WorkspaceRoot => draft.workspace_root = value,
-            SetupField::WriteRoots => draft.write_roots = value,
-            SetupField::ReadOnlyRoots => draft.read_only_roots = value,
-            SetupField::DenyRoots => draft.deny_roots = value,
+            SetupField::WritePolicy => draft.write_policy = value,
+            SetupField::ReadPolicy => draft.read_policy = value,
             _ => {}
         },
         OptionalSectionDraft::Confirmation(draft) => match field {
@@ -4256,6 +3851,8 @@ pub(super) fn set_optional_field(
         OptionalSectionDraft::Sandbox(draft) => match field {
             SetupField::BubblewrapPath => draft.bubblewrap_path = value,
             SetupField::RequiredRuntimePaths => draft.required_runtime_paths = value,
+            SetupField::SandboxReadPaths => draft.read_paths = value,
+            SetupField::SandboxWritePaths => draft.write_paths = value,
             SetupField::SandboxEnabled => draft.enabled = value == "true",
             _ => {}
         },
@@ -5112,9 +4709,8 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "connection" => t(language, "Connection", "连接"),
         "display_name" => t(language, "Display name", "显示名称"),
         "workspace_root" => t(language, "Workspace root", "工作区根目录"),
-        "write_roots" => t(language, "Write roots", "写入根目录"),
-        "read_only_roots" => t(language, "Read-only roots", "只读根目录"),
-        "deny_roots" => t(language, "Deny roots", "拒绝根目录"),
+        "write_policy" => t(language, "Write policy JSON", "写入策略 JSON"),
+        "read_policy" => t(language, "Read policy JSON", "读取策略 JSON"),
         "confirmation_channels" => t(language, "Fallback channels", "降级通道"),
         "confirmation_language" => t(language, "Language", "语言"),
         "max_concurrent_tasks" => t(language, "Max concurrent tasks", "最大并发任务"),

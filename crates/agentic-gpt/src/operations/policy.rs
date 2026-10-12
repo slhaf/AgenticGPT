@@ -1,18 +1,15 @@
-use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{
-    acquire_config_mutation_lock, write_config_with_backup, Config, PathPolicyConfig, Rule,
-};
-use crate::config_cli::{PathCommand, PathRootCommand, PathRootKind, RuleCommand};
-use crate::exec;
-use crate::state::CapabilityProfile;
-use crate::utils::{command_preview, risk_level, risky_file_mutation};
+use crate::config::{acquire_config_mutation_lock, write_config_with_backup, Config, PolicyConfig};
+use crate::config_cli::{PathCommand, PathPolicyCommand, RuleCommand};
+use crate::utils::{risk_level, risky_file_mutation};
 
+#[path = "policy_patterns.rs"]
+mod patterns;
 #[path = "shell_parser.rs"]
 pub(crate) mod shell_parser;
 
@@ -23,93 +20,123 @@ pub(crate) enum PolicyDecision {
     Confirm,
     Deny,
 }
-pub(crate) fn policy_decision_for_profile(
-    config: &Config,
-    profile: CapabilityProfile,
-    program: &str,
-    args: &[String],
-    need_confirm: bool,
-) -> PolicyDecision {
-    let mut decision = if need_confirm {
-        PolicyDecision::Confirm
-    } else {
-        PolicyDecision::Allow
-    };
-    for rule in builtin_rules(profile, PolicyDecision::Confirm) {
-        if rule.matches(program, args) {
-            decision = decision.max(PolicyDecision::Confirm);
-        }
-    }
-    for rule in builtin_rules(profile, PolicyDecision::Deny) {
-        if rule.matches(program, args) {
-            decision = decision.max(PolicyDecision::Deny);
-        }
-    }
 
-    let mut configured_decision = None;
-    for rule in &config.policy.allow {
-        if rule.matches(program, args) {
-            configured_decision = Some(PolicyDecision::Allow);
+impl PolicyDecision {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Confirm => "confirm",
+            Self::Deny => "deny",
         }
     }
-    for rule in &config.policy.confirm {
-        if rule.matches(program, args) {
-            configured_decision = Some(PolicyDecision::Confirm);
-        }
-    }
-    for rule in &config.policy.deny {
-        if rule.matches(program, args) {
-            configured_decision = Some(PolicyDecision::Deny);
-        }
-    }
-
-    configured_decision.unwrap_or(decision)
 }
 
-pub(crate) fn shell_policy_decision_for_profile(
-    config: &Config,
-    profile: CapabilityProfile,
-    command: &str,
-    need_confirm: bool,
-) -> PolicyDecision {
-    let extraction = shell_parser::extract_literal_commands(command);
-    let mut decision = PolicyDecision::Allow;
-    let mut complete = extraction.complete;
+pub(crate) fn validate_command_pattern(pattern: &str) -> Result<()> {
+    patterns::command_tokens(pattern)
+        .map(|_| ())
+        .map_err(|error| anyhow!(error))
+}
 
+pub(crate) fn validate_path_pattern(pattern: &str) -> Result<()> {
+    patterns::path_pattern(pattern)
+        .map(|_| ())
+        .map_err(|error| anyhow!(error))
+}
+
+fn decide(policy: &PolicyConfig, matches: impl Fn(&str) -> bool) -> PolicyDecision {
+    for (action, patterns) in [
+        (PolicyDecision::Deny, &policy.deny),
+        (PolicyDecision::Confirm, &policy.confirm),
+        (PolicyDecision::Allow, &policy.allow),
+    ] {
+        if patterns.iter().any(|pattern| matches(pattern)) {
+            return action;
+        }
+    }
+    policy.default_action
+}
+
+pub(crate) fn command_policy_decision(
+    config: &Config,
+    program: &str,
+    args: &[String],
+) -> PolicyDecision {
+    decide(&config.policy, |pattern| {
+        patterns::command_matches(pattern, program, args)
+    })
+}
+
+pub(crate) fn shell_policy_decision(config: &Config, command: &str) -> PolicyDecision {
+    let extraction = shell_parser::extract_literal_commands(command);
+    // The sole wildcard applies even when no literal invocation can be recovered.
+    let global = decide(&config.policy, |pattern| pattern.trim() == "*");
+    if config
+        .policy
+        .deny
+        .iter()
+        .any(|pattern| pattern.trim() == "*")
+    {
+        return PolicyDecision::Deny;
+    }
+    let mut decision = PolicyDecision::Allow;
     for invocation in &extraction.commands {
-        let invocation_decision = policy_decision_for_profile(
-            config,
-            profile,
-            &invocation.program,
-            &invocation.args,
-            false,
-        );
+        let invocation_decision =
+            command_policy_decision(config, &invocation.program, &invocation.args);
         if invocation_decision == PolicyDecision::Deny {
             return PolicyDecision::Deny;
         }
-        if !invocation.complete {
-            complete = false;
-            continue;
-        }
-        let invocation_decision = if invocation_decision == PolicyDecision::Allow
-            && !config
-                .policy
-                .allow
-                .iter()
-                .any(|rule| rule.matches(&invocation.program, &invocation.args))
-        {
-            PolicyDecision::Confirm
-        } else {
-            invocation_decision
-        };
         decision = decision.max(invocation_decision);
     }
-
-    if need_confirm || !complete || extraction.commands.is_empty() {
-        decision.max(PolicyDecision::Confirm)
-    } else {
-        decision
+    if !extraction.complete
+        || extraction.commands.is_empty()
+        || extraction
+            .commands
+            .iter()
+            .any(|invocation| !invocation.complete)
+    {
+        let explicitly_global = config
+            .policy
+            .allow
+            .iter()
+            .any(|pattern| pattern.trim() == "*");
+        decision = decision.max(if explicitly_global {
+            global
+        } else {
+            global.max(PolicyDecision::Confirm)
+        });
     }
+    decision
+}
+
+pub(crate) fn path_policy_decision(
+    config: &Config,
+    path: &Path,
+    write: bool,
+) -> std::result::Result<PolicyDecision, String> {
+    let policy = if write {
+        &config.path_policy.write
+    } else {
+        &config.path_policy.read
+    };
+    let mut normalized = Vec::new();
+    for (action, patterns) in [
+        (PolicyDecision::Deny, &policy.deny),
+        (PolicyDecision::Confirm, &policy.confirm),
+        (PolicyDecision::Allow, &policy.allow),
+    ] {
+        for pattern in patterns {
+            normalized.push((action, patterns::path_pattern(pattern)?));
+        }
+    }
+    let target = path
+        .to_str()
+        .ok_or_else(|| "path_policy_target_not_utf8".to_string())?;
+    for (action, pattern) in normalized {
+        if patterns::path_matches(&pattern, target) {
+            return Ok(action);
+        }
+    }
+    Ok(policy.default_action)
 }
 
 pub(crate) fn shell_script_risk_level(command: &str) -> &'static str {
@@ -132,66 +159,6 @@ pub(crate) fn shell_script_risk_level(command: &str) -> &'static str {
     }
 }
 
-impl Rule {
-    pub(crate) fn matches(&self, program: &str, args: &[String]) -> bool {
-        self.program == program
-            && args.len() >= self.args_prefix.len()
-            && self
-                .args_prefix
-                .iter()
-                .zip(args.iter())
-                .all(|(expected, actual)| expected == actual)
-    }
-}
-
-pub(crate) fn builtin_rules(profile: CapabilityProfile, decision: PolicyDecision) -> Vec<Rule> {
-    let programs = match decision {
-        PolicyDecision::Deny => vec!["su", "mkfs", "dd", "ssh"],
-        PolicyDecision::Confirm if profile == CapabilityProfile::Room => {
-            vec!["sudo", "mount", "systemctl", "service", "scp"]
-        }
-        PolicyDecision::Confirm => vec![
-            "sudo",
-            "rm",
-            "mv",
-            "chmod",
-            "chown",
-            "mount",
-            "systemctl",
-            "service",
-            "docker",
-            "scp",
-            "curl",
-            "wget",
-            "bash",
-            "sh",
-            "zsh",
-            "fish",
-            "perl",
-            "ruby",
-        ],
-        PolicyDecision::Allow => vec![],
-    };
-    let mut rules = programs
-        .into_iter()
-        .map(|program| Rule {
-            program: program.to_string(),
-            args_prefix: vec![],
-        })
-        .collect::<Vec<_>>();
-    if decision == PolicyDecision::Confirm && profile == CapabilityProfile::Normal {
-        rules.push(Rule {
-            program: "python".to_string(),
-            args_prefix: vec!["-c".to_string()],
-        });
-        rules.push(Rule {
-            program: "node".to_string(),
-            args_prefix: vec!["-e".to_string()],
-        });
-    }
-    rules
-}
-
 pub(crate) fn mutate_rule(
     config_path: PathBuf,
     decision: PolicyDecision,
@@ -199,160 +166,64 @@ pub(crate) fn mutate_rule(
 ) -> Result<()> {
     let _lock = acquire_config_mutation_lock(&config_path)?;
     let mut config = Config::load_or_default_locked(&config_path)?;
-    let rules = match decision {
-        PolicyDecision::Allow => &mut config.policy.allow,
-        PolicyDecision::Confirm => &mut config.policy.confirm,
-        PolicyDecision::Deny => &mut config.policy.deny,
-    };
-    match command {
-        RuleCommand::Add {
-            program,
-            args_prefix,
-        } => {
-            let rule = Rule {
-                program,
-                args_prefix,
-            };
-            println!("added {}", rule_display(&rule));
-            rules.push(rule);
-        }
-        RuleCommand::Remove {
-            program,
-            args_prefix,
-        } => {
-            remove_rule(rules, &program, &args_prefix)?;
-        }
-    }
+    mutate_patterns(&mut config.policy, decision, command, false)?;
     write_config_with_backup(&config_path, &config)
 }
 
-pub(crate) fn remove_rule(
-    rules: &mut Vec<Rule>,
-    program: &str,
-    args_prefix: &[String],
+fn mutate_patterns(
+    policy: &mut PolicyConfig,
+    decision: PolicyDecision,
+    command: RuleCommand,
+    path: bool,
 ) -> Result<()> {
-    remove_rule_with_interactive(rules, program, args_prefix, io::stdin().is_terminal())
-}
-
-pub(crate) fn remove_rule_with_interactive(
-    rules: &mut Vec<Rule>,
-    program: &str,
-    args_prefix: &[String],
-    interactive: bool,
-) -> Result<()> {
-    let matches = rules
-        .iter()
-        .enumerate()
-        .filter(|(_, rule)| rule.program == program && rule.args_prefix == args_prefix)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-
-    match matches.len() {
-        0 => Err(anyhow!(
-            "rule not found: {}",
-            command_preview(program, args_prefix)
-        )),
-        1 => {
-            let removed = rules.remove(matches[0]);
-            println!("removed {}", rule_display(&removed));
-            Ok(())
-        }
-        _ if interactive => {
-            let selected = choose_rule_interactively(rules, &matches)?;
-            let removed = rules.remove(selected);
-            println!("removed {}", rule_display(&removed));
-            Ok(())
-        }
-        _ => {
-            eprintln!(
-                "multiple rules match {}; rerun in an interactive terminal or provide a more specific args prefix:",
-                command_preview(program, args_prefix)
-            );
-            for index in matches {
-                eprintln!("  {}", rule_display(&rules[index]));
+    let rules = match decision {
+        PolicyDecision::Allow => &mut policy.allow,
+        PolicyDecision::Confirm => &mut policy.confirm,
+        PolicyDecision::Deny => &mut policy.deny,
+    };
+    match command {
+        RuleCommand::Add { pattern } => {
+            if path {
+                validate_path_pattern(&pattern)?;
+            } else {
+                validate_command_pattern(&pattern)?;
             }
-            Err(anyhow!("multiple_matching_rules"))
+            if !rules.contains(&pattern) {
+                rules.push(pattern);
+            }
+        }
+        RuleCommand::Remove { pattern } => {
+            if !rules.contains(&pattern) {
+                return Err(anyhow!("pattern not found: {pattern}"));
+            }
+            rules.retain(|existing| existing != &pattern);
         }
     }
+    Ok(())
 }
 
-fn choose_rule_interactively(rules: &[Rule], matches: &[usize]) -> Result<usize> {
-    println!("multiple matching rules:");
-    for (ordinal, index) in matches.iter().enumerate() {
-        println!("  {}) {}", ordinal + 1, rule_display(&rules[*index]));
-    }
-    print!("select rule to remove [1-{}]: ", matches.len());
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let selected = input
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| anyhow!("invalid selection"))?;
-    if selected == 0 || selected > matches.len() {
-        return Err(anyhow!("selection out of range"));
-    }
-    Ok(matches[selected - 1])
-}
-
-fn rule_display(rule: &Rule) -> String {
-    command_preview(&rule.program, &rule.args_prefix)
-}
 pub(crate) fn mutate_path_policy(config_path: PathBuf, command: PathCommand) -> Result<()> {
     let _lock = acquire_config_mutation_lock(&config_path)?;
     let mut config = Config::load_or_default_locked(&config_path)?;
-    match command {
+    let (policy, command) = match command {
         PathCommand::List => {
             println!("{}", serde_json::to_string_pretty(&config.path_policy)?);
             return Ok(());
         }
-        PathCommand::Write { command } => {
-            mutate_path_roots(&mut config.path_policy, PathRootKind::Write, command)
+        PathCommand::Read { command } => (&mut config.path_policy.read, command),
+        PathCommand::Write { command } => (&mut config.path_policy.write, command),
+    };
+    match command {
+        PathPolicyCommand::DefaultAction { action } => policy.default_action = action,
+        PathPolicyCommand::Allow { command } => {
+            mutate_patterns(policy, PolicyDecision::Allow, command, true)?
         }
-        PathCommand::Readonly { command } => {
-            mutate_path_roots(&mut config.path_policy, PathRootKind::Readonly, command)
+        PathPolicyCommand::Confirm { command } => {
+            mutate_patterns(policy, PolicyDecision::Confirm, command, true)?
         }
-        PathCommand::Deny { command } => {
-            mutate_path_roots(&mut config.path_policy, PathRootKind::Deny, command)
+        PathPolicyCommand::Deny { command } => {
+            mutate_patterns(policy, PolicyDecision::Deny, command, true)?
         }
     }
     write_config_with_backup(&config_path, &config)
-}
-
-pub(crate) fn mutate_path_roots(
-    policy: &mut PathPolicyConfig,
-    kind: PathRootKind,
-    command: PathRootCommand,
-) {
-    match command {
-        PathRootCommand::Add { path } => {
-            let roots = roots_for_kind(policy, kind);
-            if !roots.iter().any(|existing| paths_match(existing, &path)) {
-                roots.push(path);
-            }
-        }
-        PathRootCommand::Remove { path } => {
-            let roots = roots_for_kind(policy, kind);
-            roots.retain(|existing| !paths_match(existing, &path));
-        }
-    }
-}
-
-fn roots_for_kind(policy: &mut PathPolicyConfig, kind: PathRootKind) -> &mut Vec<PathBuf> {
-    match kind {
-        PathRootKind::Write => &mut policy.write_roots,
-        PathRootKind::Readonly => &mut policy.read_only_roots,
-        PathRootKind::Deny => &mut policy.deny_roots,
-    }
-}
-
-pub(crate) fn paths_match(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    match exec::normalize_roots([left, right].into_iter()) {
-        Ok(normalized) => normalized.len() == 1,
-        Err(_) => false,
-    }
 }

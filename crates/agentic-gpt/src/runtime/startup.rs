@@ -89,14 +89,14 @@ pub(crate) async fn run_stdio_worker(
     config.validate_standalone()?;
     config.ensure_workspace()?;
     log_info(format!(
-        "standalone worker config loaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}",
+        "standalone worker config loaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteAllow={}; pathReadAllow={}; pathDeny={}",
         config.limits.max_active_processes.resolve().diagnostic(),
         config.policy.allow.len(),
         config.policy.confirm.len(),
         config.policy.deny.len(),
-        config.path_policy.write_roots.len(),
-        config.path_policy.read_only_roots.len(),
-        config.path_policy.deny_roots.len(),
+        config.path_policy.write.allow.len(),
+        config.path_policy.read.allow.len(),
+        config.path_policy.write.deny.len() + config.path_policy.read.deny.len(),
     ));
     let reporting_enabled = config
         .tunnel
@@ -331,14 +331,14 @@ async fn watch_live_config(
             let _ = updates.send(live.http_mcp.clone());
         }
         log_info(format!(
-            "live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}; mcpServers={}; httpMcpEnabled={}",
+            "live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteAllow={}; pathReadAllow={}; pathDeny={}; mcpServers={}; httpMcpEnabled={}",
             resolved.diagnostic(),
             live.policy.allow.len(),
             live.policy.confirm.len(),
             live.policy.deny.len(),
-            live.path_policy.write_roots.len(),
-            live.path_policy.read_only_roots.len(),
-            live.path_policy.deny_roots.len(),
+            live.path_policy.write.allow.len(),
+            live.path_policy.read.allow.len(),
+            live.path_policy.write.deny.len() + live.path_policy.read.deny.len(),
             live.mcp_servers.len(),
             live.http_mcp.enabled,
         ));
@@ -349,6 +349,7 @@ pub(crate) async fn reload_live_config_once(
     state: &AppState,
 ) -> Result<config::ResolvedMaxActiveProcesses> {
     let candidate = Config::load(&state.config_path)?;
+    candidate.validate_policies()?;
     let mut live = state.config.write().await;
     if !config_matches_runtime(&candidate, state.runtime) {
         return Err(anyhow!("runtime_selector_changed_restart_required"));
@@ -379,11 +380,10 @@ pub(crate) fn apply_live_config_subset(
     candidate: Config,
 ) -> config::ResolvedMaxActiveProcesses {
     let resolved = candidate.limits.max_active_processes.resolve();
-    let workspace_matches = live.workspace_root == candidate.workspace_root;
     live.policy = candidate.policy;
-    if workspace_matches {
-        live.path_policy = candidate.path_policy;
-    }
+    live.path_policy = candidate.path_policy;
+    live.sandbox.read_paths = candidate.sandbox.read_paths;
+    live.sandbox.write_paths = candidate.sandbox.write_paths;
     live.limits = candidate.limits;
     live.shell = candidate.shell;
     live.mcp_servers = candidate.mcp_servers;

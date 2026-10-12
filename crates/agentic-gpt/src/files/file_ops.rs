@@ -6,7 +6,6 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
@@ -21,7 +20,13 @@ use agentic_apply_patch::{apply_update, parse_patch, ApplyPatchFileUpdateMode, H
 use crate::audit::{write_file_audit, ChangedLines, FileAuditRecord};
 use crate::config::Config;
 use crate::exec;
+use crate::policy::PolicyDecision;
 use crate::state::AppState;
+use agentic_gpt_protocol::AcquireConfirmation;
+#[path = "file_authorization.rs"]
+mod file_authorization;
+use file_authorization::{authorize_file_targets, authorize_read_requests};
+pub(crate) use file_authorization::{read_request_with_images, search_request};
 
 use image::{AnimationDecoder, ImageDecoder, ImageEncoder};
 
@@ -132,6 +137,7 @@ pub(crate) struct ResolvedPath {
     pub(crate) input: String,
     pub(crate) requested: PathBuf,
     pub(crate) path: PathBuf,
+    policy_config: Arc<Config>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,6 +222,7 @@ pub(crate) fn resolve_path(
         input: input.to_string(),
         requested: candidate,
         path: resolved,
+        policy_config: Arc::new(config.clone()),
     })
 }
 
@@ -259,6 +266,7 @@ pub(crate) fn resolve_absent_path(
         input: input.to_string(),
         requested: candidate,
         path: resolved,
+        policy_config: Arc::new(config.clone()),
     })
 }
 
@@ -324,6 +332,7 @@ fn resolve_absent_add_path(
             input: input.to_string(),
             requested: projected.clone(),
             path: projected,
+            policy_config: Arc::new(config.clone()),
         },
         parents_to_create,
     ))
@@ -371,63 +380,24 @@ fn missing_parent_directories(parent: &Path) -> std::result::Result<Vec<PathBuf>
     Ok(missing)
 }
 
-fn path_policy_error(error: exec::PathRootNormalizationError) -> FileError {
-    let message = match error {
-        exec::PathRootNormalizationError::Expansion(_) => "path root could not be expanded",
-        exec::PathRootNormalizationError::Resolution(_) => "path root could not be resolved",
-    };
-    FileError::new("path_policy_error", message)
-}
-
 fn check_policy(
     config: &Config,
     resolved: &Path,
     access: Access,
 ) -> std::result::Result<(), FileError> {
-    let write_roots = exec::normalize_roots(
-        config
-            .path_policy
-            .write_roots
-            .iter()
-            .map(PathBuf::as_path)
-            .chain(std::iter::once(config.workspace_root.as_path())),
-    )
-    .map_err(path_policy_error)?;
-    let read_roots = exec::normalize_roots(
-        config
-            .path_policy
-            .read_only_roots
-            .iter()
-            .map(PathBuf::as_path),
-    )
-    .map_err(path_policy_error)?;
-    let deny_roots =
-        exec::normalize_roots(config.path_policy.deny_roots.iter().map(PathBuf::as_path))
-            .map_err(path_policy_error)?;
-    if deny_roots.iter().any(|root| resolved.starts_with(root)) {
-        return Err(FileError::new(
+    match crate::policy::path_policy_decision(config, resolved, access == Access::Write)
+        .map_err(|reason| FileError::new("path_policy_error", &reason))?
+    {
+        PolicyDecision::Allow => Ok(()),
+        PolicyDecision::Confirm => Err(FileError::new(
+            "file_confirmation_required",
+            "path requires confirmation",
+        )),
+        PolicyDecision::Deny => Err(FileError::new(
             "path_denied",
             "path is denied by path policy",
-        ));
+        )),
     }
-    if access == Access::Write
-        && read_roots.iter().any(|root| resolved.starts_with(root))
-        && !write_roots.iter().any(|root| resolved.starts_with(root))
-    {
-        return Err(FileError::new(
-            "path_readonly",
-            "path is read-only under path policy",
-        ));
-    }
-    if !write_roots.iter().any(|root| resolved.starts_with(root))
-        && !read_roots.iter().any(|root| resolved.starts_with(root))
-    {
-        return Err(FileError::new(
-            "path_denied",
-            "path is outside configured path policy roots",
-        ));
-    }
-    Ok(())
 }
 
 fn is_reserved_path(config: &Config, path: &Path) -> bool {
@@ -1074,6 +1044,23 @@ pub(crate) fn search_with_context_limit(
         if !path.is_file() {
             continue;
         }
+        let checked = match resolve_path(
+            &options.root.policy_config,
+            &path.to_string_lossy(),
+            Access::Read,
+        ) {
+            Ok(target)
+                if target.path.starts_with(&options.root.path)
+                    || root_is_file && target.path == options.root.path =>
+            {
+                target
+            }
+            _ => {
+                increment_skip(&mut skipped, "unreadable");
+                continue;
+            }
+        };
+        let path = checked.path.as_path();
         if scanned_files >= options.scan_file_limit {
             truncated = true;
             truncation_reason = Some("scan_files");
@@ -1326,10 +1313,6 @@ impl FileError {
     }
 }
 
-pub(crate) fn to_result(result: std::result::Result<Value, FileError>) -> Result<Value> {
-    Ok(result.unwrap_or_else(|error| error.value()))
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ReadRequest {
     pub(crate) path: String,
@@ -1355,8 +1338,26 @@ pub(crate) struct SearchRequest {
 pub(crate) async fn read_batch_with_images(
     state: &AppState,
     requests: &[ReadRequest],
+    acquisition: Option<AcquireConfirmation>,
 ) -> ReadBatchOutput {
-    let config = state.config.read().await.clone();
+    let base = state.config.read().await.clone();
+    let config = match authorize_read_requests(state, &base, requests, acquisition.as_ref(), false)
+        .await
+    {
+        Ok(config) => config,
+        Err(error) => {
+            return ReadBatchOutput {
+                value: finalize_read_search_batch(
+                    requests
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| envelope(i, Err(FileError::new(&error.code, &error.message))))
+                        .collect(),
+                ),
+                images_by_result: (0..requests.len()).map(|_| Vec::new()).collect(),
+            }
+        }
+    };
     let mut image_budget_used = 0usize;
     let mut images_by_result = Vec::with_capacity(requests.len());
     let mut results = Vec::with_capacity(requests.len());
@@ -1429,8 +1430,36 @@ pub(crate) async fn read_batch_with_images(
     }
 }
 
-pub(crate) async fn search_batch(state: &AppState, requests: &[SearchRequest]) -> Value {
-    let config = state.config.read().await.clone();
+pub(crate) async fn search_batch(
+    state: &AppState,
+    requests: &[SearchRequest],
+    acquisition: Option<AcquireConfirmation>,
+) -> Value {
+    let base = state.config.read().await.clone();
+    let read_requests = requests
+        .iter()
+        .map(|r| ReadRequest {
+            path: r.path.clone(),
+            metadata: false,
+            start_line: None,
+            end_line: None,
+        })
+        .collect::<Vec<_>>();
+    let config =
+        match authorize_read_requests(state, &base, &read_requests, acquisition.as_ref(), true)
+            .await
+        {
+            Ok(config) => config,
+            Err(error) => {
+                return finalize_read_search_batch(
+                    requests
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| envelope(i, Err(FileError::new(&error.code, &error.message))))
+                        .collect(),
+                )
+            }
+        };
     let mut scanned_files = 0usize;
     let mut scanned_bytes = 0u64;
     let mut results = Vec::with_capacity(requests.len());
@@ -1566,7 +1595,7 @@ fn truncate_batch_output(response: &mut Value) {
 #[derive(Clone, Debug)]
 pub(crate) struct EditRequest {
     pub(crate) patch: String,
-    pub(crate) need_confirm: bool,
+    pub(crate) acquire_confirmation: Option<AcquireConfirmation>,
 }
 
 #[derive(Clone, Debug)]
@@ -1596,7 +1625,10 @@ pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
             let audit_status = write_patch_audits(
                 &config,
                 &response,
-                request.need_confirm,
+                request
+                    .acquire_confirmation
+                    .as_ref()
+                    .is_some_and(|a| a.effective_acquire(false)),
                 started.elapsed().as_millis(),
             );
             let mut value = slim_edit_response(&response);
@@ -1607,7 +1639,10 @@ pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
             let audit_status = write_patch_failure_audit(
                 &config,
                 &error.code,
-                request.need_confirm,
+                request
+                    .acquire_confirmation
+                    .as_ref()
+                    .is_some_and(|a| a.effective_acquire(false)),
                 started.elapsed().as_millis(),
             );
             let mut value = error.value();
@@ -1630,6 +1665,69 @@ async fn apply_patch_inner(
             "patch contains no files",
         ));
     }
+    let unrestricted = exec::permissive_paths(config);
+    let mut targets = Vec::new();
+    let mut requested_targets = Vec::new();
+    for hunk in &parsed.hunks {
+        let input = hunk.path().to_string_lossy();
+        match hunk {
+            Hunk::AddFile { .. } => {
+                let (target, parents) = resolve_absent_add_path(&unrestricted, &input)?;
+                requested_targets.push((input.to_string(), target.path.clone(), true));
+                targets.push((target.path, Access::Write));
+                targets.extend(parents.into_iter().map(|p| (p, Access::Write)));
+            }
+            Hunk::DeleteFile { .. } | Hunk::UpdateFile { .. } => {
+                let target = resolve_path(&unrestricted, &input, Access::Write)?;
+                requested_targets.push((input.to_string(), target.path.clone(), false));
+                targets.push((target.path.clone(), Access::Read));
+                targets.push((target.path, Access::Write));
+                if let Hunk::UpdateFile {
+                    move_path: Some(path),
+                    ..
+                } = hunk
+                {
+                    let destination = resolve_absent_path(&unrestricted, &path.to_string_lossy())?;
+                    requested_targets.push((
+                        path.to_string_lossy().into_owned(),
+                        destination.path.clone(),
+                        true,
+                    ));
+                    targets.push((destination.path, Access::Write));
+                }
+            }
+        }
+    }
+    let (effective_config, authorization) = authorize_file_targets(
+        state,
+        config,
+        request.acquire_confirmation.as_ref(),
+        "file.edit",
+        &targets,
+    )
+    .await?;
+    for (input, expected, absent) in requested_targets {
+        let actual = if absent {
+            let p = exec::expand_path(&input)
+                .map_err(|_| FileError::new("file_path_invalid", "invalid path"))?;
+            let p = if p.is_absolute() {
+                p
+            } else {
+                config.workspace_root.join(p)
+            };
+            exec::canonicalize_existing_or_parent(&p)
+                .map_err(|_| FileError::new("file_path_unreadable", "path could not be resolved"))?
+        } else {
+            resolve_path(&unrestricted, &input, Access::Write)?.path
+        };
+        if actual != expected {
+            return Err(FileError::new(
+                "file_symlink_rejected",
+                "patch target changed while awaiting approval",
+            ));
+        }
+    }
+    let config = &effective_config;
     let mut changes = Vec::new();
     let mut lock_paths = Vec::new();
     let mut normalized_paths = Vec::new();
@@ -1801,40 +1899,6 @@ async fn apply_patch_inner(
         }
     }
 
-    if effective > 0 && request.need_confirm {
-        let preview = changes
-            .iter()
-            .filter(|change| is_effective(change))
-            .map(|change| {
-                format!(
-                    "{}:{}:+{}-{}",
-                    change.action,
-                    change.target.path.display(),
-                    change.changed_lines["added"],
-                    change.changed_lines["removed"]
-                )
-            })
-            .collect::<Vec<_>>();
-        let confirmation =
-            crate::confirmation::request_confirmation(state, config, None, "file.edit", &preview)
-                .await;
-        if confirmation != "allow_once" {
-            cleanup_temps(&mut changes);
-            cleanup_owned_parent_directories(&mut owned_parent_dirs);
-            let (code, message) = if confirmation == "provider_unavailable" {
-                (
-                    "file_confirmation_unavailable",
-                    "The configured confirmation channel/provider was unavailable, so approval could not be obtained; file changes were not applied.",
-                )
-            } else {
-                (
-                    "file_confirmation_denied",
-                    "File mutation was not confirmed; file changes were not applied.",
-                )
-            };
-            return Err(FileError::new(code, message));
-        }
-    }
     // Revalidate again after staging and immediately before the first commit.
     #[cfg(test)]
     if let Some((path, contents)) = take_external_change_for(&changes) {
@@ -1923,7 +1987,7 @@ async fn apply_patch_inner(
                 .skip(change_index + 1)
                 .filter(|later| is_effective(later))
                 .count());
-            if effective > 0 && request.need_confirm {
+            if effective > 0 && authorization.approved {
                 response["confirmation"] = json!({"requested": true, "result": "allow_once"});
             }
             return Ok(response);
@@ -1957,7 +2021,7 @@ async fn apply_patch_inner(
         });
     }
     let mut response = patch_response("completed", response_changes, effective);
-    if effective > 0 && request.need_confirm {
+    if effective > 0 && authorization.approved {
         response["confirmation"] = json!({"requested": true, "result": "allow_once"});
     }
     Ok(response)
@@ -2649,16 +2713,12 @@ fn write_patch_failure_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, PathPolicyConfig};
+    use crate::config::Config;
 
     fn config(root: &Path) -> Config {
         let mut config = Config::default_config().unwrap();
         config.workspace_root = root.to_path_buf();
-        config.path_policy = PathPolicyConfig {
-            write_roots: vec![root.to_path_buf()],
-            read_only_roots: Vec::new(),
-            deny_roots: Vec::new(),
-        };
+        config.path_policy = crate::config::seed_path_policy(root);
         config
     }
 
@@ -2728,8 +2788,21 @@ mod tests {
         fs::write(read_only.join("a.txt"), "a").unwrap();
         fs::write(denied.join("a.txt"), "a").unwrap();
         let mut config = config(&workspace);
-        config.path_policy.read_only_roots = vec![read_only.clone()];
-        config.path_policy.deny_roots = vec![denied.clone()];
+        config
+            .path_policy
+            .read
+            .allow
+            .push(crate::config::path_subtree_pattern(&read_only));
+        config
+            .path_policy
+            .read
+            .deny
+            .push(crate::config::path_subtree_pattern(&denied));
+        config
+            .path_policy
+            .write
+            .deny
+            .push(crate::config::path_subtree_pattern(&denied));
         let read_resolved = resolve_path(
             &config,
             &read_only.join("a.txt").to_string_lossy(),

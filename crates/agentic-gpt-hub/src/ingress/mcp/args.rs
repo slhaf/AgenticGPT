@@ -1,3 +1,4 @@
+use agentic_gpt_protocol::{AcquireConfirmation, AcquireConfirmationMethod};
 use agentic_gpt_protocol::{
     EventSeverity, EventStatus, McpBatchMode, NotificationAction, RoomDiaryLayer,
     RoomMaintenanceExecutionMode, RoomMaintenanceRequestItem, RoomMaintenanceSlot,
@@ -10,6 +11,84 @@ use super::{
     default_process_list_limit, default_process_wait_seconds, default_room_notebook_limit,
     default_room_wait_seconds, default_standard_wait_seconds,
 };
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum AcquireConfirmationMethodArgs {
+    Ntfy,
+    Freedesktop,
+}
+
+impl From<AcquireConfirmationMethodArgs> for AcquireConfirmationMethod {
+    fn from(value: AcquireConfirmationMethodArgs) -> Self {
+        match value {
+            AcquireConfirmationMethodArgs::Ntfy => Self::Ntfy,
+            AcquireConfirmationMethodArgs::Freedesktop => Self::Freedesktop,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct AcquireConfirmationArgs {
+    #[serde(default)]
+    #[schemars(description = "是否主动请求确认；省略为 false。策略仍可要求确认或拒绝。")]
+    acquire: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "确认提供方；省略沿用 Agent 配置。")]
+    method: Option<AcquireConfirmationMethodArgs>,
+    #[serde(default)]
+    #[schemars(
+        description = "本次命令的临时读取路径范围；必须同时 acquire=true。只在本次命令执行期间生效。"
+    )]
+    read: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "本次命令的临时写入路径范围；必须同时 acquire=true。只在本次命令执行期间生效。"
+    )]
+    write: Vec<String>,
+}
+
+impl From<AcquireConfirmationArgs> for AcquireConfirmation {
+    fn from(value: AcquireConfirmationArgs) -> Self {
+        Self {
+            acquire: value.acquire,
+            method: value.method.map(Into::into),
+            read: value.read,
+            write: value.write,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct AcquireConfirmationNoScopeArgs {
+    #[serde(default)]
+    #[schemars(
+        description = "是否主动请求确认；默认值由操作决定。确认可单次覆盖操作策略与路径策略，不改变配置。"
+    )]
+    acquire: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "确认提供方；省略沿用 Agent 配置。")]
+    method: Option<AcquireConfirmationMethodArgs>,
+    #[serde(default)]
+    #[schemars(length(max = 0), description = "此操作不接受临时读取范围；只能为空。")]
+    read: Vec<String>,
+    #[serde(default)]
+    #[schemars(length(max = 0), description = "此操作不接受临时写入范围；只能为空。")]
+    write: Vec<String>,
+}
+
+impl From<AcquireConfirmationNoScopeArgs> for AcquireConfirmation {
+    fn from(value: AcquireConfirmationNoScopeArgs) -> Self {
+        Self {
+            acquire: value.acquire,
+            method: value.method.map(Into::into),
+            read: value.read,
+            write: value.write,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -155,14 +234,9 @@ pub(super) struct ProcessExecArgs {
     pub(super) command: String,
     #[serde(default)]
     #[schemars(
-        description = "是否在请求中要求确认；省略或传 null 时为 false。最终 Allow、Confirm 或 Deny 仍由 Agent 本地策略决定，true 不能覆盖策略拒绝，false 也不能绕过策略确认。"
+        description = "可选单次确认请求；省略或 acquire 省略时不主动请求确认。策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
     )]
-    pub(super) need_confirm: Option<bool>,
-    #[serde(default)]
-    #[schemars(
-        description = "可选的确认提供方覆盖；省略、null 或 default 沿用 Agent 本地配置的提供方链，其他值按受支持的旧式提供方名称解析；不能绕过本地策略。"
-    )]
-    pub(super) confirm_method: Option<String>,
+    pub(super) acquire_confirmation: Option<AcquireConfirmationArgs>,
     #[serde(default)]
     #[schemars(
         description = "可选当前工作目录；省略或 null 使用 Agent 工作区根目录。Bash 初始化完成后会切换至此目录。"
@@ -193,14 +267,9 @@ pub(super) struct ProcessBatchArgs {
     pub(super) elements: Vec<ProcessBatchElementArgs>,
     #[serde(default)]
     #[schemars(
-        description = "是否为批次请求确认；省略或传 null 时为 false。Agent 本地策略仍可对各元素要求确认或拒绝；需要确认的元素通过批次确认流程处理。"
+        description = "可选单次确认请求；省略或 acquire 省略时不主动请求确认。策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
     )]
-    pub(super) need_confirm: Option<bool>,
-    #[serde(default)]
-    #[schemars(
-        description = "可选的批次级确认提供方覆盖，传给所有需要确认的元素；省略、null 或 default 使用 Agent 本地配置，其他值按受支持的旧式提供方名称解析，不能绕过本地策略。"
-    )]
-    pub(super) confirm_method: Option<String>,
+    pub(super) acquire_confirmation: Option<AcquireConfirmationArgs>,
     #[serde(default)]
     #[schemars(
         description = "所有元素的默认工作目录；省略或 null 使用 Agent 工作区根目录。元素 cwd（非 null）覆盖此值。"
@@ -367,7 +436,7 @@ pub(super) struct TmuxCapturePaneArgs {
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct TmuxPasteTextArgs {
     #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
@@ -384,13 +453,13 @@ pub(super) struct TmuxPasteTextArgs {
     pub(super) submit: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "是否先请求本地确认；省略或传 null 时为 true，显式 false 会跳过此确认。"
+        description = "可选单次确认请求；省略或 acquire 省略时主动请求确认，显式 acquire=false 跳过主动确认。"
     )]
-    pub(super) need_confirm: Option<bool>,
+    pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct TmuxExecArgs {
     #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
@@ -409,9 +478,9 @@ pub(super) struct TmuxExecArgs {
     pub(super) args: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "是否额外请求本地确认；省略或传 null 时为 false，但本地执行策略仍可要求确认或拒绝。"
+        description = "可选单次确认请求；省略或 acquire 省略时不主动请求确认。策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
     )]
-    pub(super) need_confirm: Option<bool>,
+    pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
     #[serde(default)]
     #[schemars(
         description = "提交命令后、读取窗格快照前等待的毫秒数；省略或传 null 时为 300，运行时最多等待 5000 毫秒。"
@@ -425,7 +494,7 @@ pub(super) struct TmuxExecArgs {
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct TmuxCreateSessionArgs {
     #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
@@ -435,10 +504,13 @@ pub(super) struct TmuxCreateSessionArgs {
         description = "会话工作目录；相对路径从 Agent 工作区根目录解析，必须是现存目录并通过本地路径策略。"
     )]
     pub(super) cwd: String,
+    #[serde(default)]
+    #[schemars(description = "可选单次确认请求；省略不主动请求；不接受 read/write 范围。")]
+    pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct TmuxCloseSessionArgs {
     #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
@@ -446,9 +518,9 @@ pub(super) struct TmuxCloseSessionArgs {
     pub(super) name: String,
     #[serde(default)]
     #[schemars(
-        description = "是否在关闭会话前请求本地确认；省略或传 null 时为 true，显式 false 会跳过此确认。"
+        description = "可选单次确认请求；省略或 acquire 省略时不主动请求确认。策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
     )]
-    pub(super) need_confirm: Option<bool>,
+    pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]

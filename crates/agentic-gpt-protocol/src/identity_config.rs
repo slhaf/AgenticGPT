@@ -15,47 +15,24 @@ pub struct PolicyCounts {
 pub struct SafeSandboxSummary {
     pub enabled: bool,
     pub mode: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SafePathRoot {
-    pub path: String,
-    pub source: String,
+    pub read_paths: Vec<String>,
+    pub write_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SafePathPolicySummary {
-    pub write_root_count: usize,
-    pub read_only_root_count: usize,
-    pub deny_root_count: usize,
-    pub write_roots: Vec<SafePathRoot>,
-    pub read_only_roots: Vec<SafePathRoot>,
-    pub deny_roots: Vec<SafePathRoot>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SafeRule {
-    pub program: String,
-    pub args_prefix: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SafeBuiltinPolicyRules {
-    pub confirm: Vec<SafeRule>,
-    pub deny: Vec<SafeRule>,
+    pub read: SafePolicyRules,
+    pub write: SafePolicyRules,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SafePolicyRules {
-    pub allow: Vec<SafeRule>,
-    pub confirm: Vec<SafeRule>,
-    pub deny: Vec<SafeRule>,
-    pub builtins: SafeBuiltinPolicyRules,
+    pub default_action: String,
+    pub allow: Vec<String>,
+    pub confirm: Vec<String>,
+    pub deny: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

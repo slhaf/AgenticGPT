@@ -9,7 +9,7 @@ use crate::{
         self, normalize_confirmation_language, Config, EventNotificationLevel, ReportingDetail,
         RoomMaintenanceMode, RuntimeMode, ShellInitFile, INTERNAL_EVENT_TYPES,
     },
-    policy, WorkerProfile,
+    WorkerProfile,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,6 +33,7 @@ pub(crate) enum ConfigValueKind {
     RuntimeMode,
     WorkerProfile,
     RoomMaintenanceMode,
+    PolicyAction,
 }
 
 impl ConfigValueKind {
@@ -56,6 +57,7 @@ impl ConfigValueKind {
             Self::RuntimeMode => "runtime-mode",
             Self::WorkerProfile => "worker-profile",
             Self::RoomMaintenanceMode => "room-maintenance-mode",
+            Self::PolicyAction => "policy-action",
             Self::EventNotificationLevel => "event-notification-level",
         }
     }
@@ -63,6 +65,7 @@ impl ConfigValueKind {
     fn choices(self) -> Option<&'static [&'static str]> {
         match self {
             Self::Boolean => Some(&["true", "false"]),
+            Self::PolicyAction => Some(&["allow", "confirm", "deny"]),
             Self::ConfirmationChannels => Some(&["freedesktop", "ntfy"]),
             Self::HubTransport => Some(&["websocket", "sse"]),
             Self::ReportingDetail => Some(&["metadata", "full"]),
@@ -82,6 +85,7 @@ pub(crate) enum ConfigSection {
     HttpMcp,
     Confirmation,
     Sandbox,
+    Policy,
     Shell,
     Limits,
     Skills,
@@ -99,6 +103,7 @@ impl ConfigSection {
             Self::Hub => "hub",
             Self::Confirmation => "confirmation",
             Self::Sandbox => "sandbox",
+            Self::Policy => "policy",
             Self::Shell => "shell",
             Self::Limits => "limits",
             Self::Skills => "skills",
@@ -120,6 +125,8 @@ impl ConfigSection {
             (Self::HttpMcp, UiLanguage::ZhCn) => "HTTP MCP",
             (Self::Confirmation, UiLanguage::En) => "Confirmation",
             (Self::Confirmation, UiLanguage::ZhCn) => "确认",
+            (Self::Policy, UiLanguage::En) => "Policy",
+            (Self::Policy, UiLanguage::ZhCn) => "策略",
             (Self::Sandbox, UiLanguage::En) => "Sandbox",
             (Self::Sandbox, UiLanguage::ZhCn) => "沙箱",
             (Self::Shell, UiLanguage::En) => "Shell",
@@ -367,6 +374,18 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "en",
         set_confirmation_language
     ),
+    config_key!("policy.defaultAction", Policy, PolicyAction, false, "Default policy action.", "未匹配模式时的默认动作。", "deny", set_policy_default_action),
+    config_key!("policy.allow", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_policy_allow),
+    config_key!("policy.confirm", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_policy_confirm),
+    config_key!("policy.deny", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_policy_deny),
+    config_key!("pathPolicy.read.defaultAction", Policy, PolicyAction, false, "Default policy action.", "未匹配模式时的默认动作。", "deny", set_path_policy_read_default_action),
+    config_key!("pathPolicy.read.allow", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_read_allow),
+    config_key!("pathPolicy.read.confirm", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_read_confirm),
+    config_key!("pathPolicy.read.deny", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_read_deny),
+    config_key!("pathPolicy.write.defaultAction", Policy, PolicyAction, false, "Default policy action.", "未匹配模式时的默认动作。", "deny", set_path_policy_write_default_action),
+    config_key!("pathPolicy.write.allow", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_write_allow),
+    config_key!("pathPolicy.write.confirm", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_write_confirm),
+    config_key!("pathPolicy.write.deny", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_write_deny),
     config_key!(
         "sandbox.enabled",
         Sandbox,
@@ -387,6 +406,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "bwrap",
         set_bubblewrap_path
     ),
+    config_key!("sandbox.readPaths", Sandbox, JsonPathArray, false, "Concrete read-only sandbox mounts.", "沙箱只读挂载的具体路径。", r#"["/etc/os-release"]"#, set_sandbox_read_paths),
+    config_key!("sandbox.writePaths", Sandbox, JsonPathArray, false, "Concrete writable sandbox mounts.", "沙箱可写挂载的具体路径。", r#"["/tmp"]"#, set_sandbox_write_paths),
     config_key!(
         "sandbox.requiredRuntimePaths",
         Sandbox,
@@ -921,13 +942,14 @@ struct ConfigDescriptionOutput {
     zh_cn: &'static str,
 }
 
-const CONFIG_SECTION_ORDER: [ConfigSection; 12] = [
+const CONFIG_SECTION_ORDER: [ConfigSection; 13] = [
     ConfigSection::Runtime,
     ConfigSection::Identity,
     ConfigSection::Hub,
     ConfigSection::HttpMcp,
     ConfigSection::Confirmation,
     ConfigSection::Sandbox,
+    ConfigSection::Policy,
     ConfigSection::Shell,
     ConfigSection::Limits,
     ConfigSection::Skills,
@@ -1091,14 +1113,7 @@ fn set_http_mcp_allow_hosts(config: &mut Config, value: &str) -> Result<()> {
 }
 
 fn set_workspace_root(config: &mut Config, value: &str) -> Result<()> {
-    let old_workspace = config.workspace_root.clone();
-    let new_workspace = PathBuf::from(value);
-    for root in &mut config.path_policy.write_roots {
-        if policy::paths_match(root, &old_workspace) {
-            *root = new_workspace.clone();
-        }
-    }
-    config.workspace_root = new_workspace;
+    config.workspace_root = PathBuf::from(value);
     Ok(())
 }
 
@@ -1142,6 +1157,94 @@ fn set_shell_init_file(config: &mut Config, value: &str) -> Result<()> {
 fn unset_shell_init_file(config: &mut Config) {
     config.shell.init_file = ShellInitFile::Default;
 }
+fn set_policy_default_action(config: &mut Config, value: &str) -> Result<()> {
+    config.policy.default_action =
+        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
+    Ok(())
+}
+fn set_policy_allow(config: &mut Config, value: &str) -> Result<()> {
+    let patterns: Vec<String> = serde_json::from_str(value)?;
+    for pattern in &patterns {
+        crate::policy::validate_command_pattern(pattern)?;
+    }
+    config.policy.allow = patterns;
+    Ok(())
+}
+fn set_policy_confirm(config: &mut Config, value: &str) -> Result<()> {
+    let patterns: Vec<String> = serde_json::from_str(value)?;
+    for pattern in &patterns {
+        crate::policy::validate_command_pattern(pattern)?;
+    }
+    config.policy.confirm = patterns;
+    Ok(())
+}
+fn set_policy_deny(config: &mut Config, value: &str) -> Result<()> {
+    let patterns: Vec<String> = serde_json::from_str(value)?;
+    for pattern in &patterns {
+        crate::policy::validate_command_pattern(pattern)?;
+    }
+    config.policy.deny = patterns;
+    Ok(())
+}
+fn set_path_policy_read_default_action(config: &mut Config, value: &str) -> Result<()> {
+    config.path_policy.read.default_action =
+        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
+    Ok(())
+}
+fn set_path_policy_read_allow(config: &mut Config, value: &str) -> Result<()> {
+    let patterns: Vec<String> = serde_json::from_str(value)?;
+    for pattern in &patterns {
+        crate::policy::validate_path_pattern(pattern)?;
+    }
+    config.path_policy.read.allow = patterns;
+    Ok(())
+}
+fn set_path_policy_read_confirm(config: &mut Config, value: &str) -> Result<()> {
+    let patterns: Vec<String> = serde_json::from_str(value)?;
+    for pattern in &patterns {
+        crate::policy::validate_path_pattern(pattern)?;
+    }
+    config.path_policy.read.confirm = patterns;
+    Ok(())
+}
+fn set_path_policy_read_deny(config: &mut Config, value: &str) -> Result<()> {
+    let patterns: Vec<String> = serde_json::from_str(value)?;
+    for pattern in &patterns {
+        crate::policy::validate_path_pattern(pattern)?;
+    }
+    config.path_policy.read.deny = patterns;
+    Ok(())
+}
+fn set_path_policy_write_default_action(config: &mut Config, value: &str) -> Result<()> {
+    config.path_policy.write.default_action =
+        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
+    Ok(())
+}
+fn set_path_policy_write_allow(config: &mut Config, value: &str) -> Result<()> {
+    let patterns: Vec<String> = serde_json::from_str(value)?;
+    for pattern in &patterns {
+        crate::policy::validate_path_pattern(pattern)?;
+    }
+    config.path_policy.write.allow = patterns;
+    Ok(())
+}
+fn set_path_policy_write_confirm(config: &mut Config, value: &str) -> Result<()> {
+    let patterns: Vec<String> = serde_json::from_str(value)?;
+    for pattern in &patterns {
+        crate::policy::validate_path_pattern(pattern)?;
+    }
+    config.path_policy.write.confirm = patterns;
+    Ok(())
+}
+fn set_path_policy_write_deny(config: &mut Config, value: &str) -> Result<()> {
+    let patterns: Vec<String> = serde_json::from_str(value)?;
+    for pattern in &patterns {
+        crate::policy::validate_path_pattern(pattern)?;
+    }
+    config.path_policy.write.deny = patterns;
+    Ok(())
+}
+
 fn set_sandbox_enabled(config: &mut Config, value: &str) -> Result<()> {
     config.sandbox.enabled = value.parse::<bool>()?;
     Ok(())
@@ -1149,6 +1252,15 @@ fn set_sandbox_enabled(config: &mut Config, value: &str) -> Result<()> {
 
 fn set_bubblewrap_path(config: &mut Config, value: &str) -> Result<()> {
     config.sandbox.bubblewrap_path = value.to_string();
+    Ok(())
+}
+
+fn set_sandbox_read_paths(config: &mut Config, value: &str) -> Result<()> {
+    config.sandbox.read_paths = serde_json::from_str(value)?;
+    Ok(())
+}
+fn set_sandbox_write_paths(config: &mut Config, value: &str) -> Result<()> {
+    config.sandbox.write_paths = serde_json::from_str(value)?;
     Ok(())
 }
 

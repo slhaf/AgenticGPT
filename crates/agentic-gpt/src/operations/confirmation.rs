@@ -13,7 +13,6 @@ use crate::{
         confirmation_language_is_zh, Config, ConfirmationChannel, ConfirmationProviderConfig,
     },
     hub,
-    policy::shell_script_risk_level,
     state::AppState,
     utils::{
         command_preview, log_info, log_warn, mcp_tool_command_preview, risk_level,
@@ -22,344 +21,135 @@ use crate::{
 };
 
 #[derive(Clone, Debug)]
-pub(crate) struct BatchConfirmationElement {
-    pub(crate) index: usize,
-    pub(crate) command: String,
-    pub(crate) cwd: Option<String>,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct TemporaryMcpAllow {
     pub(crate) agent_id: String,
     pub(crate) server_id: String,
     pub(crate) expires_at: DateTime<Utc>,
 }
 
-pub(crate) fn batch_confirmation_preview(
-    config: &Config,
-    needs_confirmation: &[BatchConfirmationElement],
-    all_elements: &[BatchConfirmationElement],
-) -> String {
-    let zh = confirmation_language_is_zh(config);
-    let mut lines = vec![if zh {
-        format!(
-            "该批次共有 {} 条命令，其中 {} 条需要确认：",
-            all_elements.len(),
-            needs_confirmation.len()
-        )
-    } else {
-        format!(
-            "Batch requires confirmation for {} of {} commands:",
-            needs_confirmation.len(),
-            all_elements.len()
-        )
-    }];
-    for element in needs_confirmation.iter().take(8) {
-        let cwd = element
-            .cwd
-            .as_ref()
-            .map(|directory| {
-                if zh {
-                    format!("（工作目录：{directory}）")
-                } else {
-                    format!(" (cwd: {directory})")
-                }
-            })
-            .unwrap_or_default();
-        lines.push(format!("[{}] {}{}", element.index, element.command, cwd));
-    }
-    if needs_confirmation.len() > 8 {
-        lines.push(if zh {
-            format!(
-                "……另外还有 {} 条需要确认的命令",
-                needs_confirmation.len() - 8
-            )
-        } else {
-            format!(
-                "... and {} more commands requiring confirmation",
-                needs_confirmation.len() - 8
-            )
-        });
-    }
-    let other_count = all_elements.len().saturating_sub(needs_confirmation.len());
-    if other_count > 0 {
-        lines.push(if zh {
-            format!("另外包含 {other_count} 条不需要确认的命令。")
-        } else {
-            format!("Also included: {other_count} command(s) that do not require confirmation.")
-        });
-    }
-    lines.push(if zh {
-        "是否允许整个批次执行一次？".to_string()
-    } else {
-        "Allow the entire batch once?".to_string()
-    });
-    lines.join("\n")
-}
-
-pub(crate) async fn request_batch_confirmation(
-    state: &AppState,
-    config: &Config,
-    confirm_method: Option<&str>,
-    needs_confirmation: &[BatchConfirmationElement],
-    all_elements: &[BatchConfirmationElement],
-) -> String {
-    let channels = confirmation_channels(config, confirm_method);
-    let preview = batch_confirmation_preview(config, needs_confirmation, all_elements);
-    for channel in channels {
-        let result = match channel {
-            ConfirmationChannel::Freedesktop => {
-                request_freedesktop_batch_confirmation(config, &preview, needs_confirmation).await
-            }
-            ConfirmationChannel::Ntfy => {
-                request_hub_batch_confirmation(state, config, &preview, needs_confirmation).await
-            }
-        };
-        if result != "provider_unavailable" {
-            return result;
-        }
-    }
-    "provider_unavailable".to_string()
-}
-
-fn confirmation_channels(
-    config: &Config,
-    confirm_method: Option<&str>,
-) -> Vec<ConfirmationChannel> {
-    let override_value = confirm_method.filter(|method| !method.trim().is_empty());
-    match override_value {
-        None => config.confirmation_provider.channels.clone(),
-        Some("default") => config.confirmation_provider.channels.clone(),
+fn confirmation_channels(config: &Config, method: Option<&str>) -> Vec<ConfirmationChannel> {
+    match method {
+        None | Some("default") => config.confirmation_provider.channels.clone(),
         Some(value) => ConfirmationProviderConfig::from_legacy(value)
-            .map(|provider| provider.channels)
+            .map(|c| c.channels)
             .unwrap_or_default(),
     }
 }
 
-async fn request_freedesktop_batch_confirmation(
-    config: &Config,
-    preview: &str,
-    needs_confirmation: &[BatchConfirmationElement],
-) -> String {
-    let supports_actions = crate::notify::freedesktop_supports_actions().await;
-    if !supports_actions {
-        return "provider_unavailable".to_string();
-    }
-    let has_risky_file_mutation = needs_confirmation
-        .iter()
-        .any(|element| shell_script_risk_level(&element.command) == "HIGH");
-    let zh = confirmation_language_is_zh(config);
-    let warning = if !config.sandbox.enabled && has_risky_file_mutation {
-        if zh {
-            "\n警告：bubblewrap 未启用；该批次包含文件变更命令，对宿主机的可见范围更大。"
-        } else {
-            "\nWARNING: bubblewrap is disabled; this batch includes file mutation commands with broader host visibility."
-        }
-    } else {
-        ""
-    };
-    let body = format!("{preview}{warning}");
-    let provider = notify_rust::Notification::new()
-        .summary(if zh {
-            "Agentic GPT 批量确认"
-        } else {
-            "Agentic GPT batch confirmation"
-        })
-        .body(&body)
-        .action(
-            "allow_once",
-            if zh {
-                "允许本批次"
-            } else {
-                "Allow batch once"
-            },
-        )
-        .action("deny", if zh { "拒绝本批次" } else { "Deny batch" })
-        .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
-        .show();
-    match provider {
-        Ok(handle) => {
-            let action = tokio::task::spawn_blocking(move || {
-                let mut selected = "timeout".to_string();
-                handle.wait_for_action(|action| selected = action.to_string());
-                selected
-            })
-            .await
-            .unwrap_or_else(|_| "timeout".to_string());
-            if action == "allow_once" {
-                action
-            } else {
-                "deny".to_string()
-            }
-        }
-        Err(_) => "provider_unavailable".to_string(),
-    }
+#[derive(Clone, Debug)]
+pub(crate) struct OperationAuthorization {
+    pub(crate) approved: bool,
+    pub(crate) result: Option<String>,
 }
 
-async fn request_hub_batch_confirmation(
+pub(crate) async fn authorize_operation(
     state: &AppState,
     config: &Config,
-    preview: &str,
-    needs_confirmation: &[BatchConfirmationElement],
-) -> String {
-    let risk = if needs_confirmation
-        .iter()
-        .any(|element| shell_script_risk_level(&element.command) == "HIGH")
-    {
-        "HIGH"
-    } else {
-        "MEDIUM"
-    };
-    let payload = ConfirmationPayload {
-        program: "process.batch".to_string(),
-        args: Vec::new(),
-        command_preview: truncate_chars(preview, 1000),
-        risk_level: risk.to_string(),
-        reason: if confirmation_language_is_zh(config) {
-            "批量命令中包含匹配确认策略的命令".to_string()
-        } else {
-            "Batch contains command(s) matching confirm policy".to_string()
-        },
-        kind: Some("process.batch".to_string()),
-        server_id: None,
-        tool_name: None,
-    };
-    request_hub_confirmation_payload(state, payload).await
-}
-pub(crate) async fn request_shell_confirmation_cancellable(
-    state: &AppState,
-    config: &Config,
-    confirm_method: Option<&str>,
-    command: &str,
-    cwd: Option<&str>,
-    cancel_requested: Arc<AtomicBool>,
-) -> String {
-    if cancel_requested.load(Ordering::Acquire) {
-        return "cancelled".to_string();
-    }
-    let preview = shell_command_preview(command, cwd);
-    let risk = shell_script_risk_level(command);
-    for channel in confirmation_channels(config, confirm_method) {
-        let result = match channel {
-            ConfirmationChannel::Freedesktop => tokio::select! {
-                result = request_freedesktop_shell_confirmation(config, &preview, risk) => result,
-                _ = wait_for_cancellation(cancel_requested.clone()) => "cancelled".to_string(),
-            },
-            ConfirmationChannel::Ntfy => {
-                let payload = ConfirmationPayload {
-                    program: "bash".to_string(),
-                    args: vec!["-c".to_string(), command.to_string()],
-                    command_preview: truncate_chars(&preview, 1000),
-                    risk_level: risk.to_string(),
-                    reason: if confirmation_language_is_zh(config) {
-                        "Shell 脚本需要确认".to_string()
-                    } else {
-                        "Shell script requires confirmation".to_string()
-                    },
-                    kind: Some("process.shell".to_string()),
-                    server_id: None,
-                    tool_name: None,
-                };
-                request_hub_confirmation_payload_cancellable(
-                    state,
-                    payload,
-                    Some(cancel_requested.clone()),
-                )
-                .await
-            }
-        };
-        if result != "provider_unavailable" {
-            return result;
-        }
-    }
-    "provider_unavailable".to_string()
-}
-
-fn shell_command_preview(command: &str, cwd: Option<&str>) -> String {
-    match cwd {
-        Some(cwd) => format!("{command}\n(cwd: {cwd})"),
-        None => command.to_string(),
-    }
-}
-
-async fn request_freedesktop_shell_confirmation(
-    config: &Config,
-    preview: &str,
-    risk: &str,
-) -> String {
-    let supports_actions = crate::notify::freedesktop_supports_actions().await;
-    if !supports_actions {
-        return "provider_unavailable".to_string();
-    }
-    let zh = confirmation_language_is_zh(config);
-    let warning = if !config.sandbox.enabled && risk == "HIGH" {
-        if zh {
-            "\n警告：bubblewrap 未启用；该脚本可能包含文件变更，对宿主机的可见范围更大。"
-        } else {
-            "\nWARNING: bubblewrap is disabled; this script may include file mutations with broader host visibility."
-        }
-    } else {
-        ""
-    };
-    let body = format!(
-        "{preview}{warning}{}",
-        if zh {
-            "\n是否允许本次执行？"
-        } else {
-            "\nAllow once?"
-        }
-    );
-    let provider = notify_rust::Notification::new()
-        .summary(if zh {
-            "Agentic GPT 确认"
-        } else {
-            "Agentic GPT confirmation"
-        })
-        .body(&body)
-        .action("allow_once", if zh { "允许本次" } else { "Allow once" })
-        .action("deny", if zh { "拒绝" } else { "Deny" })
-        .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
-        .show();
-    match provider {
-        Ok(handle) => {
-            let action = tokio::task::spawn_blocking(move || {
-                let mut selected = "timeout".to_string();
-                handle.wait_for_action(|action| selected = action.to_string());
-                selected
-            })
-            .await
-            .unwrap_or_else(|_| "timeout".to_string());
-            if action == "allow_once" {
-                action
-            } else {
-                "deny".to_string()
-            }
-        }
-        Err(_) => "provider_unavailable".to_string(),
-    }
-}
-
-pub(crate) async fn request_confirmation(
-    state: &AppState,
-    config: &Config,
-    confirm_method: Option<&str>,
+    acquisition: Option<&agentic_gpt_protocol::AcquireConfirmation>,
+    default_acquire: bool,
+    decision: crate::policy::PolicyDecision,
     program: &str,
     args: &[String],
-) -> String {
-    for channel in confirmation_channels(config, confirm_method) {
-        let result = match channel {
-            ConfirmationChannel::Freedesktop => {
-                request_freedesktop_confirmation(config, program, args).await
+    strict: bool,
+) -> Result<OperationAuthorization, String> {
+    authorize_operation_cancellable(
+        state,
+        config,
+        acquisition,
+        default_acquire,
+        decision,
+        program,
+        args,
+        strict,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn authorize_operation_cancellable(
+    state: &AppState,
+    config: &Config,
+    acquisition: Option<&agentic_gpt_protocol::AcquireConfirmation>,
+    default_acquire: bool,
+    decision: crate::policy::PolicyDecision,
+    program: &str,
+    args: &[String],
+    strict: bool,
+    cancelled: Arc<AtomicBool>,
+) -> Result<OperationAuthorization, String> {
+    use crate::policy::PolicyDecision;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    let acquire = acquisition
+        .map(|a| a.effective_acquire(default_acquire))
+        .unwrap_or(default_acquire);
+    let method = acquisition
+        .and_then(|a| a.method.as_ref())
+        .map(|m| m.as_str());
+    let mut attempted = None;
+    if acquire {
+        let result = request_confirmation_cancellable(
+            state,
+            config,
+            method,
+            program,
+            args,
+            cancelled.clone(),
+        )
+        .await;
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        if result == "allow_once" {
+            return Ok(OperationAuthorization {
+                approved: true,
+                result: Some(result),
+            });
+        }
+        if strict
+            || !matches!(
+                result.as_str(),
+                "timeout" | "expired" | "provider_unavailable"
+            )
+        {
+            return Err(result);
+        }
+        attempted = Some(result);
+    }
+    match decision {
+        PolicyDecision::Deny => Err("policy_denied".into()),
+        PolicyDecision::Allow => Ok(OperationAuthorization {
+            approved: false,
+            result: attempted,
+        }),
+        PolicyDecision::Confirm => {
+            if let Some(result) = attempted {
+                return Err(result);
             }
-            ConfirmationChannel::Ntfy => {
-                request_hub_confirmation(state, config, program, args).await
+            let result = request_confirmation_cancellable(
+                state,
+                config,
+                None,
+                program,
+                args,
+                cancelled.clone(),
+            )
+            .await;
+            if cancelled.load(Ordering::Acquire) {
+                return Err("cancelled".into());
             }
-        };
-        if result != "provider_unavailable" {
-            return result;
+            if result == "allow_once" {
+                Ok(OperationAuthorization {
+                    approved: true,
+                    result: Some(result),
+                })
+            } else {
+                Err(result)
+            }
         }
     }
-    "provider_unavailable".to_string()
 }
 
 /// Confirmation used by an asynchronously registered process. Hub-backed
@@ -439,44 +229,34 @@ async fn request_freedesktop_confirmation(
         .show();
     match provider {
         Ok(handle) => {
-            let action = tokio::task::spawn_blocking(move || {
-                let mut selected = "timeout".to_string();
-                handle.wait_for_action(|action| selected = action.to_string());
-                selected
-            })
-            .await
-            .unwrap_or_else(|_| "timeout".to_string());
-            if action == "allow_once" {
-                action
+            let mut selected = "provider_unavailable".to_string();
+            let waited = timeout(
+                Duration::from_secs(CONFIRM_TIMEOUT_SECS),
+                handle.wait_for_action_async(|response| {
+                    selected = match response {
+                        notify_rust::ActionResponse::Custom("allow_once") => "allow_once",
+                        notify_rust::ActionResponse::Custom("deny") => "deny",
+                        notify_rust::ActionResponse::Closed(notify_rust::CloseReason::Expired) => {
+                            "timeout"
+                        }
+                        notify_rust::ActionResponse::Closed(
+                            notify_rust::CloseReason::Dismissed,
+                        ) => "deny",
+                        _ => "provider_unavailable",
+                    }
+                    .to_string();
+                }),
+            )
+            .await;
+            let _ = timeout(Duration::from_secs(2), handle.close_async()).await;
+            if waited.is_err() {
+                "timeout".to_string()
             } else {
-                "deny".to_string()
+                selected
             }
         }
         Err(_) => "provider_unavailable".to_string(),
     }
-}
-
-async fn request_hub_confirmation(
-    state: &AppState,
-    _config: &Config,
-    program: &str,
-    args: &[String],
-) -> String {
-    let payload = ConfirmationPayload {
-        program: program.to_string(),
-        args: args.to_vec(),
-        command_preview: truncate_chars(&command_preview(program, args), 1000),
-        risk_level: risk_level(program),
-        reason: if confirmation_language_is_zh(_config) {
-            format!("命令匹配确认策略：{program}")
-        } else {
-            format!("Command matched confirm policy: {program}")
-        },
-        kind: None,
-        server_id: None,
-        tool_name: None,
-    };
-    request_hub_confirmation_payload(state, payload).await
 }
 
 async fn request_hub_confirmation_cancellable(
@@ -501,13 +281,6 @@ async fn request_hub_confirmation_cancellable(
         tool_name: None,
     };
     request_hub_confirmation_payload_cancellable(state, payload, Some(cancel_requested)).await
-}
-
-async fn request_hub_confirmation_payload(
-    state: &AppState,
-    payload: ConfirmationPayload,
-) -> String {
-    request_hub_confirmation_payload_cancellable(state, payload, None).await
 }
 
 async fn request_hub_confirmation_payload_cancellable(

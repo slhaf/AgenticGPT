@@ -1490,17 +1490,11 @@ async fn room_process_exec_preserves_literal_shell_syntax_across_newlines() -> a
     {
         let mut config = server.state.config.write().await;
         config.confirmation_provider.channels.clear();
-        config
-            .policy
-            .allow
-            .extend(
-                ["printf", "cat", "true"]
-                    .into_iter()
-                    .map(|program| crate::config::Rule {
-                        program: program.to_string(),
-                        args_prefix: Vec::new(),
-                    }),
-            );
+        config.policy.allow.extend(
+            ["printf", "cat", "true"]
+                .into_iter()
+                .map(|program| format!("{program} **")),
+        );
     }
 
     let cases = [
@@ -1552,10 +1546,7 @@ async fn room_process_exec_preserves_deny_and_confirmation_boundaries() -> anyho
     {
         let mut config = server.state.config.write().await;
         config.confirmation_provider.channels.clear();
-        config.policy.allow.push(crate::config::Rule {
-            program: "printf".to_string(),
-            args_prefix: Vec::new(),
-        });
+        config.policy.allow.push("printf **".to_string());
         config.policy.deny.extend(
             [
                 ("printf", vec!["blocked".to_string()]),
@@ -1564,10 +1555,7 @@ async fn room_process_exec_preserves_deny_and_confirmation_boundaries() -> anyho
                 ("declare", Vec::new()),
             ]
             .into_iter()
-            .map(|(program, args_prefix)| crate::config::Rule {
-                program: program.to_string(),
-                args_prefix,
-            }),
+            .map(|(program, args_prefix)| format!("{} {} **", program, args_prefix.join(" "))),
         );
     }
 
@@ -1626,7 +1614,7 @@ async fn room_process_exec_preserves_deny_and_confirmation_boundaries() -> anyho
     );
     assert!(stdout.is_empty(), "unsupported script executed a prefix");
 
-    server
+    *server
         .state
         .config
         .write()
@@ -1634,9 +1622,8 @@ async fn room_process_exec_preserves_deny_and_confirmation_boundaries() -> anyho
         .policy
         .deny
         .iter_mut()
-        .find(|rule| rule.program == "unset")
-        .expect("unset deny rule")
-        .args_prefix = vec!["blocked".to_string()];
+        .find(|rule| rule.as_str() == "unset  **")
+        .expect("unset deny rule") = "unset blocked **".to_string();
     let (response, _) = room_process_exec_output(&server, "unset bl\\\nocked").await?;
     assert_eq!(response["error"]["code"], "policy_denied");
     for command in [
@@ -2013,7 +2000,7 @@ async fn managed_batch_uses_one_confirmation_for_all_elements() -> anyhow::Resul
             "process.batch",
             json!({
                 "elements": [{"command": "true"}, {"command": "true"}],
-                "needConfirm": true,
+                "acquireConfirmation": {"acquire": true},
                 "waitSeconds": 5
             }),
         )
@@ -2066,7 +2053,7 @@ async fn denied_process_batch_creates_no_processes() -> anyhow::Result<()> {
             "process.batch",
             json!({
                 "elements": [{"command": "true"}, {"command": "true"}],
-                "needConfirm": true,
+                "acquireConfirmation": {"acquire": true},
                 "waitSeconds": 5
             }),
         )
@@ -2972,7 +2959,7 @@ async fn file_edit_add_creates_nested_parents_after_whole_patch_preflight() -> a
     let confirmation_rejected = server
         .dispatch(
             "file.edit",
-            json!({"patch":"*** Begin Patch\n*** Add File: confirmation/nested/new.txt\n+new\n*** End Patch","needConfirm":true}),
+            json!({"patch":"*** Begin Patch\n*** Add File: confirmation/nested/new.txt\n+new\n*** End Patch","acquireConfirmation": {"acquire": true}}),
         )
         .await?;
     assert_eq!(
@@ -3014,7 +3001,7 @@ async fn file_edit_add_reserves_audit_path_under_symlinked_workspace() -> anyhow
     std::os::unix::fs::symlink(&workspace, &alias)?;
     let mut config = server.state.config.read().await.clone();
     config.workspace_root = alias.clone();
-    config.path_policy.write_roots = vec![alias];
+    config.path_policy = crate::config::seed_path_policy(&alias);
     *server.state.config.write().await = config;
 
     let audit_path = workspace.join(".agentic-gpt-audit.jsonl");
@@ -3041,7 +3028,10 @@ async fn file_edit_add_keeps_path_policy_for_missing_parents_and_symlinks() -> a
     let alias = workspace.join("alias");
     std::fs::create_dir(&real)?;
     std::os::unix::fs::symlink(&real, &alias)?;
-    server.state.config.write().await.path_policy.deny_roots = vec![alias.join("blocked/nested")];
+    server.state.config.write().await.path_policy.write.deny =
+        vec![crate::config::path_subtree_pattern(
+            &alias.join("blocked/nested"),
+        )];
 
     let denied = server
         .dispatch(
@@ -3199,7 +3189,7 @@ async fn file_edit_apply_patch_context_mismatch_and_confirmation_do_not_write() 
         .channels
         .clear();
     let denied = server
-            .dispatch("file.edit", json!({"patch":"*** Begin Patch\n*** Update File: good.txt\n@@\n-good\n+confirmed\n*** End Patch","needConfirm":true}))
+            .dispatch("file.edit", json!({"patch":"*** Begin Patch\n*** Update File: good.txt\n@@\n-good\n+confirmed\n*** End Patch","acquireConfirmation": {"acquire": true}}))
             .await?;
     assert_eq!(denied["error"]["code"], "file_confirmation_unavailable");
     assert_eq!(
@@ -3291,17 +3281,11 @@ fn test_state(profile: CapabilityProfile) -> AppState {
     let workspace_root = root.join("workspace");
     let mut config = Config::default_config().expect("default config");
     config.shell.init_file = ShellInitFile::Disabled;
-    config
-        .policy
-        .allow
-        .extend(
-            ["true", "false", "sleep"]
-                .into_iter()
-                .map(|program| crate::config::Rule {
-                    program: program.to_string(),
-                    args_prefix: Vec::new(),
-                }),
-        );
+    config.policy.allow.extend(
+        ["true", "false", "sleep"]
+            .into_iter()
+            .map(|program| format!("{program} **")),
+    );
     config.agent_id = "stdio-test-agent".to_string();
     config.toolsets = if profile == CapabilityProfile::Room {
         ToolsetConfig::room()
@@ -3309,7 +3293,7 @@ fn test_state(profile: CapabilityProfile) -> AppState {
         ToolsetConfig::normal()
     };
     config.workspace_root = workspace_root.clone();
-    config.path_policy.write_roots = vec![workspace_root.clone()];
+    config.path_policy = crate::config::seed_path_policy(&workspace_root);
     config.ensure_workspace().expect("workspace");
     let bootstrap_root = workspace_root.join("bootstrap");
     std::fs::create_dir_all(&bootstrap_root).expect("bootstrap directory");
@@ -3376,10 +3360,7 @@ async fn allow_test_printf(server: &AgentMcpServer) {
         .await
         .policy
         .allow
-        .push(crate::config::Rule {
-            program: "printf".to_string(),
-            args_prefix: Vec::new(),
-        });
+        .push("printf **".to_string());
 }
 
 fn state_with_browser_runtime(docs_root: PathBuf, result: CallToolResult) -> AppState {

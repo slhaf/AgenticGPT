@@ -280,44 +280,41 @@ pub(crate) enum ToolsetCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum RuleCommand {
-    Add {
-        program: String,
-        args_prefix: Vec<String>,
-    },
-    Remove {
-        program: String,
-        args_prefix: Vec<String>,
-    },
+    Add { pattern: String },
+    Remove { pattern: String },
 }
 
 #[derive(Subcommand)]
 pub(crate) enum PathCommand {
     List,
+    Read {
+        #[command(subcommand)]
+        command: PathPolicyCommand,
+    },
     Write {
         #[command(subcommand)]
-        command: PathRootCommand,
-    },
-    Readonly {
-        #[command(subcommand)]
-        command: PathRootCommand,
-    },
-    Deny {
-        #[command(subcommand)]
-        command: PathRootCommand,
+        command: PathPolicyCommand,
     },
 }
 
 #[derive(Subcommand)]
-pub(crate) enum PathRootCommand {
-    Add { path: PathBuf },
-    Remove { path: PathBuf },
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum PathRootKind {
-    Write,
-    Readonly,
-    Deny,
+pub(crate) enum PathPolicyCommand {
+    DefaultAction {
+        #[arg(value_enum)]
+        action: PolicyDecision,
+    },
+    Allow {
+        #[command(subcommand)]
+        command: RuleCommand,
+    },
+    Confirm {
+        #[command(subcommand)]
+        command: RuleCommand,
+    },
+    Deny {
+        #[command(subcommand)]
+        command: RuleCommand,
+    },
 }
 
 pub(crate) async fn handle_config(

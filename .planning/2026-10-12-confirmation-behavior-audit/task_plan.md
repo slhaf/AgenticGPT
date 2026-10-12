@@ -1,37 +1,26 @@
-# confirmation 行为调查
+# confirmation 与命令/路径策略重构
 
 ## 目标
-核对当前源码中的确认规则、命令策略、needConfirm 参数、执行与失败行为，提供可追溯说明；不改变运行行为。
+实现已确认的 acquireConfirmation、单源通配符策略、文件批准、Process临时范围、公开契约和手动迁移；MCP批准不变，不保留旧格式兼容。
 
 ## 当前阶段
-全部设计确认阶段完成
+阶段二：实际执行回归与审查修复（进行中）。
 
-## 阶段
-1. 定位入口和所有者，阅读规范（完成）。
-2. 核对命令策略、确认生命周期及各工具参数（完成）。
-3. 整合证据与边界说明（完成）。
+## 代码阶段（每阶段独立提交）
+1. 策略配置/匹配、初始化、确认请求类型与判定基础（完成）。
+2. Process/tmux/file实际执行授权及sandbox范围、接口映射和执行回归（进行中；生产链路已接入）。
+3. 文档、公开schema、迁移脚本与消费者/既有测试同步（待执行）。
+4. 隔离验证、独立审查、修复与交付（待执行）。
 
-## 验证
-只读源码和契约核对；不启动真实 Agent/Hub，不新增测试。
+## 已确定语义
+- acquire默认为false，paste例外true；method仅ntfy/freedesktop，省略配置fallback。
+- 主动批准覆盖本请求命令及路径策略；拒绝/取消终止；超时/不可用回规则，Confirm复用失败不再询问；paste启用主动确认时任何未批准终止。
+- Process可在acquireConfirmation提供read/write具体文件/目录，非空要求acquire=true；批准临时开放且不改全局，file请求自行确定范围且不接受read/write。
+- command policy defaultAction=confirm，allow/confirm/deny字符串patterns，deny>confirm>allow。单独*全命令含不完整脚本；token *字符、尾部**剩余参数。
+- pathPolicy.read/write分区各defaultAction=deny，路径*不跨/，**跨目录，单独*全路径；初始化写明规则，运行无builtin或隐式workspace grant。
+- file.search批准指定目录递归范围+过滤条件，正常访问逐实际路径检查；edit全patch批准，身份/revision/资源限制保留。
+- sandbox基础具体挂载独立于pathPolicy glob；临时read/write须正确覆盖实际已存在目录/文件；不静默扩大到父目录。
+- 全面升级旧字段报错，独立手动迁移脚本预览/备份/差异，不自动执行真实配置迁移。
 
-## 后续方案评估
-4. 核对 acquireConfirmation、初始化策略与匹配变更影响（完成）。
-5. 比较可行方案、整合用户澄清并给出建议（完成）。
-
-本轮仅评估，不实现、不迁移真实配置；每阶段提交调查记录。
-
-6. 记录全命令通配符及 paste 默认主动确认例外（完成）。
-
-用户已确认paste在主动获取许可时必须批准，超时/不可用也终止；本轮仅记录方案，尚未实施。
-
-7. 提出配置策略字符串数组格式及通配符语义（完成；待用户确认提案）。
-
-8. 实施前假设与升级兼容核对（完成；全面升级并提供手动迁移脚本）。
-
-9. 路径策略纳入通配符及批准覆盖，核对file/Process/tmux与sandbox影响（完成）。
-
-用户明确新约束：路径策略改为通配符，主动批准覆盖配置路径限制；撤销先前不覆盖路径策略的约定。
-
-阶段九完成：file读写默认deny、搜索许可覆盖递归范围；Process采用本次read/write范围批准，字段归入acquireConfirmation。尚未实现。
-
-10. 接受Process scope约束并说明file.*批准生效方式（完成；文件API不接收scope字段为提案）。
+## 验证与测试保留价值
+新增/改写前先评估保护的长期行为、回归信号及与具名既有测试的重复；只主动增加真实跨组件授权/副作用回归。测试外层和子进程使用隔离HOME/XDG/TMP/D-Bus，结束清理。

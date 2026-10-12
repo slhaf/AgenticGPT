@@ -35,7 +35,7 @@ use crate::{
     audit::{write_audit, AuditRecord},
     config::Config,
     confirmation, exec,
-    policy::{policy_decision_for_profile, PolicyDecision},
+    policy::{command_policy_decision, PolicyDecision},
     skills::{package_sha256, SkillLease},
     state::AppState,
     utils::command_preview,
@@ -1646,23 +1646,31 @@ pub(crate) async fn start_process_batch(
         request.elements.len(),
         response_budget,
     )?;
-    let config = Arc::new(state.config.read().await.clone());
+    let mut config = Arc::new(state.config.read().await.clone());
+    if let Some(a) = &request.acquire_confirmation {
+        a.validate_scope(true)?;
+    }
     let mut prepared = Vec::with_capacity(request.elements.len());
     for (index, element) in request.elements.into_iter().enumerate() {
         let cwd = element.cwd.clone().or_else(|| request.cwd.clone());
-        let decision = crate::policy::shell_policy_decision_for_profile(
-            &config,
-            state.runtime.profile,
-            &element.command,
-            request.need_confirm,
-        );
-        let resolved_working_directory = exec::resolve_working_directory(&config, cwd.as_deref())?;
-        if decision == PolicyDecision::Deny {
-            return Err(format!(
-                "batch_element_rejected; index={index}; reason=policy_denied"
-            ));
-        }
-        preflight_shell_paths(&config, &resolved_working_directory, &element.command)?;
+        let decision = crate::policy::shell_policy_decision(&config, &element.command);
+        let resolved_working_directory =
+            exec::resolve_working_directory(&exec::permissive_paths(&config), cwd.as_deref())?;
+        let execution = exec::ExecutionSpec::Shell {
+            command: element.command.clone(),
+        };
+        let decision = decision
+            .max(exec::execution_path_decision(
+                &config,
+                &resolved_working_directory,
+                &execution,
+            )?)
+            .max(exec::declared_scope_decision(
+                &config,
+                &resolved_working_directory,
+                &execution,
+                request.acquire_confirmation.as_ref(),
+            )?);
         prepared.push(exec::PreparedBatchElement {
             index,
             command: element.command,
@@ -1671,39 +1679,69 @@ pub(crate) async fn start_process_batch(
             decision,
         });
     }
-    let all_confirmation_elements = prepared
+    let decision = prepared
         .iter()
-        .map(|element| confirmation::BatchConfirmationElement {
-            index: element.index,
-            command: element.command.clone(),
-            cwd: element.cwd.clone(),
-        })
-        .collect::<Vec<_>>();
-    let needs_confirmation = prepared
-        .iter()
-        .filter(|element| element.decision == PolicyDecision::Confirm)
-        .map(|element| confirmation::BatchConfirmationElement {
-            index: element.index,
-            command: element.command.clone(),
-            cwd: element.cwd.clone(),
-        })
-        .collect::<Vec<_>>();
-    let confirmation_result = if needs_confirmation.is_empty() {
-        None
-    } else {
-        let result = confirmation::request_batch_confirmation(
-            &state,
-            &config,
-            request.confirm_method.as_deref(),
-            &needs_confirmation,
-            &all_confirmation_elements,
-        )
-        .await;
-        if result != "allow_once" {
-            return Err(result);
+        .map(|e| e.decision)
+        .max()
+        .unwrap_or(PolicyDecision::Allow);
+    let mut preview = Vec::new();
+    let mut scope_identities = Vec::new();
+    for element in &prepared {
+        scope_identities.push(exec::scope_identity(
+            &element.resolved_working_directory,
+            &exec::ExecutionSpec::Shell {
+                command: element.command.clone(),
+            },
+            request.acquire_confirmation.as_ref(),
+        )?);
+        preview.push(format!("element {}", element.index));
+        preview.extend(exec::approval_preview(
+            &element.resolved_working_directory,
+            &exec::ExecutionSpec::Shell {
+                command: element.command.clone(),
+            },
+            request.acquire_confirmation.as_ref(),
+        )?);
+    }
+    let authorization = confirmation::authorize_operation(
+        &state,
+        &config,
+        request.acquire_confirmation.as_ref(),
+        false,
+        decision,
+        "process.batch",
+        &preview,
+        false,
+    )
+    .await?;
+    for (element, identity) in prepared.iter().zip(scope_identities) {
+        if exec::scope_identity(
+            &element.resolved_working_directory,
+            &exec::ExecutionSpec::Shell {
+                command: element.command.clone(),
+            },
+            request.acquire_confirmation.as_ref(),
+        )? != identity
+        {
+            return Err("scope_target_changed".into());
         }
-        Some(result)
-    };
+    }
+    let confirmation_result = authorization.result;
+    if authorization.approved {
+        let mut granted = (*config).clone();
+        for element in &mut prepared {
+            granted = exec::granted_execution_config(
+                &granted,
+                &element.resolved_working_directory,
+                &exec::ExecutionSpec::Shell {
+                    command: element.command.clone(),
+                },
+                request.acquire_confirmation.as_ref(),
+            )?;
+            element.decision = PolicyDecision::Allow;
+        }
+        config = Arc::new(granted);
+    }
     let specs = prepared
         .into_iter()
         .map(|element| ManagedProcessSpec {
@@ -1712,8 +1750,7 @@ pub(crate) async fn start_process_batch(
                 execution: exec::ExecutionSpec::Shell {
                     command: element.command,
                 },
-                need_confirm: request.need_confirm,
-                confirm_method: request.confirm_method.clone(),
+                acquire_confirmation: request.acquire_confirmation.clone(),
                 cwd: element.cwd,
                 wait_seconds: request.wait_seconds,
             },
@@ -2094,7 +2131,11 @@ pub(crate) async fn start_prepared_managed_batch(
             let audit = ManagedAuditContext {
                 config: config.clone(),
                 request_source: spec.request_source.clone(),
-                need_confirm: spec.request.need_confirm,
+                need_confirm: spec
+                    .request
+                    .acquire_confirmation
+                    .as_ref()
+                    .is_some_and(|a| a.effective_acquire(false)),
                 policy_decision: format!("{:?}", spec.decision),
                 confirmation_result: spec.confirmation_result.clone(),
                 skill_id: None,
@@ -2194,7 +2235,8 @@ async fn start_managed_process_inner(
         && matches!(&request.execution, exec::ExecutionSpec::Shell { .. })
         && prepared.is_none()
     {
-        exec::resolve_working_directory(&config, request.cwd.as_deref()).ok()
+        exec::resolve_working_directory(&exec::permissive_paths(&config), request.cwd.as_deref())
+            .ok()
     } else {
         None
     };
@@ -2209,12 +2251,8 @@ async fn start_managed_process_inner(
                     .as_ref()
                     .map(|(_, decision)| decision == &PolicyDecision::Deny)
                     .unwrap_or_else(|| {
-                        execution_policy_decision(
-                            &config,
-                            state.runtime.profile,
-                            &request.execution,
-                            request.need_confirm,
-                        ) == PolicyDecision::Deny
+                        execution_policy_decision(&config, &request.execution)
+                            == PolicyDecision::Deny
                     });
                 !denied
             })
@@ -2229,7 +2267,10 @@ async fn start_managed_process_inner(
     let audit = ManagedAuditContext {
         config: config.clone(),
         request_source: options.request_source,
-        need_confirm: request.need_confirm,
+        need_confirm: request
+            .acquire_confirmation
+            .as_ref()
+            .is_some_and(|a| a.effective_acquire(false)),
         policy_decision: prepared
             .as_ref()
             .map(|(_, decision)| format!("{decision:?}"))
@@ -2427,54 +2468,15 @@ fn process_runtime(skill_lease: Option<SkillLease>) -> ManagedProcessRuntime {
     }
 }
 
-fn execution_policy_decision(
-    config: &Config,
-    profile: crate::state::CapabilityProfile,
-    execution: &exec::ExecutionSpec,
-    need_confirm: bool,
-) -> PolicyDecision {
+fn execution_policy_decision(config: &Config, execution: &exec::ExecutionSpec) -> PolicyDecision {
     match execution {
         exec::ExecutionSpec::Shell { command } => {
-            crate::policy::shell_policy_decision_for_profile(config, profile, command, need_confirm)
+            crate::policy::shell_policy_decision(config, command)
         }
         exec::ExecutionSpec::Argv { program, args } => {
-            policy_decision_for_profile(config, profile, program, args, need_confirm)
+            command_policy_decision(config, program, args)
         }
     }
-}
-
-fn preflight_execution(
-    config: &Config,
-    working_directory: &Path,
-    execution: &exec::ExecutionSpec,
-) -> std::result::Result<(), String> {
-    match execution {
-        exec::ExecutionSpec::Shell { command } => {
-            preflight_shell_paths(config, working_directory, command)
-        }
-        exec::ExecutionSpec::Argv { program, args } => {
-            exec::preflight(config, working_directory, program, args)
-        }
-    }
-}
-
-fn preflight_shell_paths(
-    config: &Config,
-    working_directory: &Path,
-    command: &str,
-) -> std::result::Result<(), String> {
-    let extraction = crate::policy::shell_parser::extract_literal_commands(command);
-    for invocation in extraction.commands {
-        if invocation.complete {
-            exec::preflight(
-                config,
-                working_directory,
-                &invocation.program,
-                &invocation.args,
-            )?;
-        }
-    }
-    Ok(())
 }
 
 /// `config` is the admission snapshot; workers must not reload live state here.
@@ -2494,16 +2496,14 @@ async fn run_async_process(
     let (working_directory, decision) = if let Some(prepared) = prepared {
         prepared
     } else {
-        let decision = execution_policy_decision(
-            &config,
-            state.runtime.profile,
-            &request.execution,
-            request.need_confirm,
-        );
+        let decision = execution_policy_decision(&config, &request.execution);
         set_policy_decision(&state, &process_id, format!("{decision:?}")).await;
         let working_directory = match resolved_working_directory {
             Some(directory) => directory,
-            None => match exec::resolve_working_directory(&config, request.cwd.as_deref()) {
+            None => match exec::resolve_working_directory(
+                &exec::permissive_paths(&config),
+                request.cwd.as_deref(),
+            ) {
                 Ok(directory) => directory,
                 Err(reason) => {
                     finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
@@ -2511,57 +2511,121 @@ async fn run_async_process(
                 }
             },
         };
-        if let Err(reason) = preflight_execution(&config, &working_directory, &request.execution) {
+        let path_decision =
+            match exec::execution_path_decision(&config, &working_directory, &request.execution) {
+                Ok(decision) => decision,
+                Err(reason) => {
+                    finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
+                    return;
+                }
+            };
+        let scoped = match exec::declared_scope_decision(
+            &config,
+            &working_directory,
+            &request.execution,
+            request.acquire_confirmation.as_ref(),
+        ) {
+            Ok(d) => d,
+            Err(reason) => {
+                finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
+                return;
+            }
+        };
+        (working_directory, decision.max(path_decision).max(scoped))
+    };
+    let acquisition = request.acquire_confirmation.as_ref();
+    if let Some(a) = acquisition {
+        if let Err(reason) = a.validate_scope(true) {
             finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
             return;
         }
-        (working_directory, decision)
-    };
-    if decision == PolicyDecision::Deny {
-        finish_process(&state, &process_id, ProcessState::Rejected, "policy_denied").await;
-        return;
     }
-    if decision == PolicyDecision::Confirm {
+    let preview = match exec::approval_preview(&working_directory, &request.execution, acquisition)
+    {
+        Ok(value) => value,
+        Err(reason) => {
+            finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
+            return;
+        }
+    };
+    set_policy_decision(&state, &process_id, format!("{decision:?}")).await;
+    if decision == PolicyDecision::Confirm
+        || acquisition.is_some_and(|a| a.effective_acquire(false))
+    {
         set_process_state(&state, &process_id, ProcessState::WaitingConfirmation).await;
-        let confirmation = if let Some(confirmation) = prepared_confirmation_result {
-            confirmation
-        } else {
-            match &request.execution {
-                exec::ExecutionSpec::Shell { command } => {
-                    confirmation::request_shell_confirmation_cancellable(
-                        &state,
-                        &config,
-                        request.confirm_method.as_deref(),
-                        command,
-                        request.cwd.as_deref(),
-                        cancel_requested.clone(),
-                    )
-                    .await
-                }
-                exec::ExecutionSpec::Argv { program, args } => {
-                    confirmation::request_confirmation_cancellable(
-                        &state,
-                        &config,
-                        request.confirm_method.as_deref(),
-                        program,
-                        args,
-                        cancel_requested.clone(),
-                    )
-                    .await
-                }
-            }
-        };
-        set_confirmation_result(&state, &process_id, confirmation.clone()).await;
-        if confirmation != "allow_once" {
-            let terminal = if cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
+    }
+    let identity = match exec::scope_identity(&working_directory, &request.execution, acquisition) {
+        Ok(i) => i,
+        Err(reason) => {
+            finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
+            return;
+        }
+    };
+    let authorization = if let Some(result) = prepared_confirmation_result {
+        Ok(confirmation::OperationAuthorization {
+            approved: result == "allow_once",
+            result: Some(result),
+        })
+    } else {
+        confirmation::authorize_operation_cancellable(
+            &state,
+            &config,
+            acquisition,
+            false,
+            decision,
+            "process.exec",
+            &preview,
+            false,
+            cancel_requested.clone(),
+        )
+        .await
+    };
+    let authorization = match authorization {
+        Ok(value) => value,
+        Err(reason) => {
+            set_confirmation_result(&state, &process_id, reason.clone()).await;
+            let terminal = if cancel_requested.load(Ordering::Acquire) {
                 ProcessState::Cancelled
             } else {
                 ProcessState::Rejected
             };
-            finish_process(&state, &process_id, terminal, &confirmation).await;
+            finish_process(&state, &process_id, terminal, &reason).await;
             return;
         }
+    };
+    if exec::scope_identity(&working_directory, &request.execution, acquisition)
+        .ok()
+        .as_ref()
+        != Some(&identity)
+    {
+        finish_process(
+            &state,
+            &process_id,
+            ProcessState::Rejected,
+            "scope_target_changed",
+        )
+        .await;
+        return;
     }
+    if let Some(result) = authorization.result {
+        set_confirmation_result(&state, &process_id, result).await;
+    }
+    let config = if authorization.approved {
+        match exec::granted_execution_config(
+            &config,
+            &working_directory,
+            &request.execution,
+            acquisition,
+        ) {
+            Ok(value) => Arc::new(value),
+            Err(reason) => {
+                finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
+                return;
+            }
+        }
+    } else {
+        config
+    };
     if cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
         finish_process(&state, &process_id, ProcessState::Cancelled, "cancelled").await;
         return;
@@ -4527,8 +4591,7 @@ mod tests {
             agent_id: "test-agent".to_string(),
             group: None,
             command: command.to_string(),
-            need_confirm: false,
-            confirm_method: None,
+            acquire_confirmation: None,
             cwd: Some(working_directory.to_string_lossy().to_string()),
             wait_seconds: Some(2),
         }
@@ -4560,6 +4623,7 @@ mod tests {
         let mut config = Config::default_config().unwrap();
         config.agent_id = "test-agent".to_string();
         config.workspace_root = workspace.clone();
+        config.path_policy = crate::config::seed_path_policy(&workspace);
         config.shell.init_file = crate::config::ShellInitFile::Disabled;
         config.limits.max_active_processes =
             crate::config::MaxActiveProcesses::Explicit(max_active_processes);
@@ -4575,10 +4639,7 @@ mod tests {
             "__history_trigger_failure__",
         ]
         .into_iter()
-        .map(|program| crate::config::Rule {
-            program: program.to_string(),
-            args_prefix: Vec::new(),
-        })
+        .map(|program| format!("{program} **"))
         .collect();
         let private_state =
             crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
@@ -5443,8 +5504,7 @@ mod tests {
                     cwd: None,
                 },
             ],
-            need_confirm: false,
-            confirm_method: None,
+            acquire_confirmation: None,
             cwd: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(2),
         };
@@ -5579,8 +5639,7 @@ mod tests {
                     cwd: None,
                 })
                 .collect(),
-            need_confirm: false,
-            confirm_method: None,
+            acquire_confirmation: None,
             cwd: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(0),
         };
@@ -5614,10 +5673,7 @@ mod tests {
             .await
             .policy
             .deny
-            .push(crate::config::Rule {
-                program: "printf".to_string(),
-                args_prefix: Vec::new(),
-            });
+            .push("printf **".to_string());
         let finished = wait_terminal(&state, admitted).await;
         assert_eq!(finished.state, ProcessState::Completed);
         let output = wait_output_capture(&state, &finished.process_id).await;
@@ -5752,8 +5808,7 @@ mod tests {
                     cwd: None,
                 },
             ],
-            need_confirm: false,
-            confirm_method: None,
+            acquire_confirmation: None,
             cwd: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(0),
         };
@@ -5824,8 +5879,7 @@ mod tests {
                     cwd: None,
                 },
             ],
-            need_confirm: false,
-            confirm_method: None,
+            acquire_confirmation: None,
             cwd: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(30),
         };

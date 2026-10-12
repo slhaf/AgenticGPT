@@ -6,6 +6,9 @@ use anyhow::{Context, Result};
 use tokio::process::Command;
 
 use crate::{config::Config, policy::PolicyDecision};
+#[path = "path_authorization.rs"]
+mod path_authorization;
+pub(crate) use path_authorization::*;
 
 #[derive(Clone)]
 pub(crate) enum ExecutionSpec {
@@ -70,8 +73,7 @@ pub(crate) fn kernel_argument_limit_error(
 pub(crate) struct ExecutionRequest {
     pub(crate) group: Option<String>,
     pub(crate) execution: ExecutionSpec,
-    pub(crate) need_confirm: bool,
-    pub(crate) confirm_method: Option<String>,
+    pub(crate) acquire_confirmation: Option<agentic_gpt_protocol::AcquireConfirmation>,
     pub(crate) cwd: Option<String>,
     pub(crate) wait_seconds: Option<u64>,
 }
@@ -83,8 +85,7 @@ impl From<agentic_gpt_protocol::ProcessExecRequest> for ExecutionRequest {
             execution: ExecutionSpec::Shell {
                 command: request.command,
             },
-            need_confirm: request.need_confirm,
-            confirm_method: request.confirm_method,
+            acquire_confirmation: request.acquire_confirmation,
             cwd: request.cwd,
             wait_seconds: request.wait_seconds,
         }
@@ -102,8 +103,7 @@ impl ExecutionRequest {
         Self {
             group,
             execution: ExecutionSpec::Argv { program, args },
-            need_confirm: false,
-            confirm_method: None,
+            acquire_confirmation: None,
             cwd,
             wait_seconds,
         }
@@ -183,47 +183,21 @@ fn looks_like_path(arg: &str) -> bool {
 
 fn check_path_policy(
     config: &Config,
-    working_directory: &Path,
+    cwd: &Path,
     program: &str,
     args: &[String],
 ) -> std::result::Result<(), String> {
-    let access = classify_program_access(program);
-    let policy = expanded_path_policy(config).map_err(|_| "path_policy_error".to_string())?;
-    for arg in args {
-        if !looks_like_path(arg) {
-            continue;
-        }
-        let path = resolve_argument_path(working_directory, arg, access)?;
-        if path_in_roots(&path, &policy.deny_roots) {
-            return Err("path_denied".to_string());
-        }
-        if program == "df" && arg == "/" {
-            continue;
-        }
-        if path_in_roots(&path, &policy.write_roots) {
-            if access == PathAccessKind::Read && !path.exists() {
-                return Err("path_not_found".to_string());
-            }
-            continue;
-        }
-        if path_in_roots(&path, &policy.read_only_roots) {
-            if access == PathAccessKind::Read {
-                if !path.exists() {
-                    return Err("path_not_found".to_string());
-                }
-                continue;
-            }
-            return Err("path_readonly".to_string());
-        }
-        return Err("path_outside_allowed_roots".to_string());
+    match argument_path_decision(config, cwd, program, args)? {
+        PolicyDecision::Allow => Ok(()),
+        PolicyDecision::Confirm => Err("path_confirmation_required".into()),
+        PolicyDecision::Deny => Err("path_denied".into()),
     }
-    Ok(())
 }
 
 fn resolve_argument_path(
     workspace_root: &Path,
     arg: &str,
-    _access: PathAccessKind,
+    access: PathAccessKind,
 ) -> std::result::Result<PathBuf, String> {
     let expanded = expand_path(arg).map_err(|_| "path_policy_error".to_string())?;
     let candidate = if expanded.is_absolute() {
@@ -235,6 +209,9 @@ fn resolve_argument_path(
         return candidate
             .canonicalize()
             .map_err(|_| "path_policy_error".to_string());
+    }
+    if matches!(access, PathAccessKind::Read) {
+        return Err("path_not_found".into());
     }
     let parent = candidate
         .parent()
@@ -248,16 +225,6 @@ fn resolve_argument_path(
         .unwrap_or(parent))
 }
 
-fn path_in_roots(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
-}
-
-#[derive(Debug)]
-struct ExpandedPathPolicy {
-    write_roots: Vec<PathBuf>,
-    read_only_roots: Vec<PathBuf>,
-    deny_roots: Vec<PathBuf>,
-}
 #[derive(Debug)]
 pub(crate) enum PathRootNormalizationError {
     Expansion(anyhow::Error),
@@ -280,26 +247,6 @@ impl std::error::Error for PathRootNormalizationError {
             Self::Expansion(error) | Self::Resolution(error) => Some(error.as_ref()),
         }
     }
-}
-fn expanded_path_policy(config: &Config) -> Result<ExpandedPathPolicy> {
-    Ok(ExpandedPathPolicy {
-        write_roots: normalize_roots(
-            config
-                .path_policy
-                .write_roots
-                .iter()
-                .map(PathBuf::as_path)
-                .chain(std::iter::once(config.workspace_root.as_path())),
-        )?,
-        read_only_roots: normalize_roots(
-            config
-                .path_policy
-                .read_only_roots
-                .iter()
-                .map(PathBuf::as_path),
-        )?,
-        deny_roots: normalize_roots(config.path_policy.deny_roots.iter().map(PathBuf::as_path))?,
-    })
 }
 pub(crate) fn normalize_roots<'a>(
     roots: impl Iterator<Item = &'a Path>,
@@ -374,7 +321,7 @@ pub(crate) fn canonicalize_existing_or_parent(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-fn expand_path(value: &str) -> Result<PathBuf> {
+pub(crate) fn expand_path(value: &str) -> Result<PathBuf> {
     if value == "~" {
         return dirs::home_dir().context("home directory not found");
     }
@@ -418,12 +365,10 @@ pub(crate) fn resolve_working_directory(
     if !directory.is_dir() {
         return Err("working_directory_not_directory".to_string());
     }
-    let policy = expanded_path_policy(config).map_err(|_| "path_policy_error".to_string())?;
-    if path_in_roots(&directory, &policy.deny_roots) {
-        return Err("working_directory_denied".to_string());
-    }
-    if !path_in_roots(&directory, &policy.write_roots) {
-        return Err("working_directory_outside_allowed_roots".to_string());
+    match crate::policy::path_policy_decision(config, &directory, true)? {
+        PolicyDecision::Allow => {}
+        PolicyDecision::Confirm => return Err("path_confirmation_required".into()),
+        PolicyDecision::Deny => return Err("working_directory_denied".into()),
     }
     Ok(directory)
 }
@@ -450,7 +395,6 @@ pub(crate) fn build_command(
         ExecutionSpec::Argv { program, args } => (program.as_str(), args.clone()),
     };
     if config.sandbox.enabled {
-        let policy = expanded_path_policy(config)?;
         let mut command = Command::new(&config.sandbox.bubblewrap_path);
         command
             .arg("--die-with-parent")
@@ -460,20 +404,34 @@ pub(crate) fn build_command(
             .arg("--chdir")
             .arg(working_directory);
         let mut created_dirs = HashSet::new();
-        for path in &policy.write_roots {
+        let mut mounts = std::collections::BTreeMap::new();
+        for path in normalize_roots(
+            config
+                .sandbox
+                .required_runtime_paths
+                .iter()
+                .chain(&config.sandbox.read_paths)
+                .map(PathBuf::as_path),
+        )? {
             if path.exists() {
-                add_bwrap_bind(&mut command, &mut created_dirs, "--bind", path);
+                mounts.insert(path, "--ro-bind");
             }
         }
-        for path in &policy.read_only_roots {
+        for path in normalize_roots(config.sandbox.write_paths.iter().map(PathBuf::as_path))? {
             if path.exists() {
-                add_bwrap_bind(&mut command, &mut created_dirs, "--ro-bind", path);
+                mounts.insert(path, "--bind");
             }
         }
-        for path in &config.sandbox.required_runtime_paths {
-            if path.exists() {
-                add_bwrap_bind(&mut command, &mut created_dirs, "--ro-bind", path);
-            }
+        let mut mounts = mounts.into_iter().collect::<Vec<_>>();
+        mounts.sort_by(|(a, _), (b, _)| {
+            a.components()
+                .count()
+                .cmp(&b.components().count())
+                .then_with(|| a.cmp(b))
+        });
+        for (path, mode) in mounts {
+            add_bwrap_bind(&mut command, &mut created_dirs, mode, &path);
+            created_dirs.insert(path);
         }
         command.arg("--").arg(program).args(args);
         if matches!(execution, ExecutionSpec::Shell { .. }) {

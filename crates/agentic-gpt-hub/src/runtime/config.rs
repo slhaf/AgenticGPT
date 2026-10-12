@@ -1,6 +1,5 @@
 use agentic_gpt_protocol::{
-    SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePolicyRules,
-    SafeSandboxSummary,
+    SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -164,14 +163,22 @@ pub(crate) fn default_config_summary() -> SafeConfigSummary {
         sandbox: SafeSandboxSummary {
             enabled: false,
             mode: "unknown".to_string(),
+            read_paths: Vec::new(),
+            write_paths: Vec::new(),
         },
         path_policy: SafePathPolicySummary {
-            write_root_count: 0,
-            read_only_root_count: 0,
-            deny_root_count: 0,
-            write_roots: Vec::new(),
-            read_only_roots: Vec::new(),
-            deny_roots: Vec::new(),
+            read: SafePolicyRules {
+                default_action: "deny".into(),
+                allow: Vec::new(),
+                confirm: Vec::new(),
+                deny: Vec::new(),
+            },
+            write: SafePolicyRules {
+                default_action: "deny".into(),
+                allow: Vec::new(),
+                confirm: Vec::new(),
+                deny: Vec::new(),
+            },
         },
         policy_rule_counts: agentic_gpt_protocol::PolicyCounts {
             allow: 0,
@@ -182,10 +189,7 @@ pub(crate) fn default_config_summary() -> SafeConfigSummary {
             allow: Vec::new(),
             confirm: Vec::new(),
             deny: Vec::new(),
-            builtins: SafeBuiltinPolicyRules {
-                confirm: Vec::new(),
-                deny: Vec::new(),
-            },
+            default_action: "confirm".into(),
         },
         confirmation_provider: "unknown".to_string(),
         tunnel: None,

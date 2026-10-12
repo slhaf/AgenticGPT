@@ -1,3 +1,4 @@
+mod acquire_confirmation;
 mod envelopes;
 mod events;
 mod identity_config;
@@ -7,6 +8,7 @@ mod process;
 mod room;
 mod skill_bootstrap;
 
+pub use acquire_confirmation::*;
 pub use envelopes::*;
 pub use events::*;
 pub use identity_config::*;

@@ -1,4 +1,5 @@
 use crate::process_model::ProcessInfo;
+use agentic_gpt_protocol::AcquireConfirmation;
 #[path = "stdio_schema.rs"]
 mod stdio_schema;
 #[path = "stdio_transport.rs"]
@@ -501,6 +502,7 @@ impl AgentMcpServer {
                     let output = crate::file_ops::read_batch_with_images(
                         &self.state,
                         &requests.into_iter().map(Into::into).collect::<Vec<_>>(),
+                        args.acquire_confirmation,
                     )
                     .await;
                     let (value, special_result) =
@@ -508,31 +510,25 @@ impl AgentMcpServer {
                     file_read_result = special_result;
                     Ok(value)
                 } else {
-                    let config = self.state.config.read().await.clone();
-                    let path = args.path.expect("validated single file.read path");
-                    match crate::file_ops::resolve_path(
-                        &config,
-                        &path,
-                        crate::file_ops::Access::Read,
-                    ) {
-                        Ok(resolved) => match crate::file_ops::read_with_images(
-                            &resolved,
-                            args.metadata.unwrap_or(false),
-                            args.start_line,
-                            args.end_line,
-                            crate::file_ops::MAX_IMAGE_RESPONSE_BYTES,
-                        ) {
-                            Ok(output) => {
-                                let (value, special_result) = ordered_file_read_result(
-                                    output.value,
-                                    vec![output.images],
-                                    false,
-                                );
-                                file_read_result = special_result;
-                                Ok(value)
-                            }
-                            Err(error) => Ok(error.value()),
-                        },
+                    let request = crate::file_ops::ReadRequest {
+                        path: args.path.expect("validated single file.read path"),
+                        metadata: args.metadata.unwrap_or(false),
+                        start_line: args.start_line,
+                        end_line: args.end_line,
+                    };
+                    match crate::file_ops::read_request_with_images(
+                        &self.state,
+                        &request,
+                        args.acquire_confirmation,
+                    )
+                    .await
+                    {
+                        Ok(output) => {
+                            let (value, special_result) =
+                                ordered_file_read_result(output.value, vec![output.images], false);
+                            file_read_result = special_result;
+                            Ok(value)
+                        }
                         Err(error) => Ok(error.value()),
                     }
                 }
@@ -545,53 +541,30 @@ impl AgentMcpServer {
                         crate::file_ops::search_batch(
                             &self.state,
                             &requests.into_iter().map(Into::into).collect::<Vec<_>>(),
+                            args.acquire_confirmation,
                         )
                         .await,
                         None,
                     ));
                 }
-                let config = self.state.config.read().await.clone();
-                let resolved = crate::file_ops::resolve_path(
-                    &config,
-                    args.path
-                        .as_deref()
-                        .expect("validated single file.search path"),
-                    crate::file_ops::Access::Read,
-                );
-                match resolved {
-                    Ok(resolved) => crate::file_ops::to_result(
-                        crate::file_ops::search_with_context_limit(
-                            crate::file_ops::SearchOptions {
-                                root: &resolved,
-                                query: args.query.as_deref().expect("validated search query"),
-                                mode: if args.mode.as_deref() == Some("regex") {
-                                    crate::file_ops::SearchMode::Regex
-                                } else {
-                                    crate::file_ops::SearchMode::Literal
-                                },
-                                case_sensitive: args.case_sensitive.unwrap_or(true),
-                                include: args.include.as_deref().unwrap_or(&[]),
-                                exclude: args.exclude.as_deref().unwrap_or(&[]),
-                                context_lines: args.context_lines.unwrap_or(0),
-                                max_results: args.max_results.unwrap_or(50),
-                                hidden: args.hidden.unwrap_or(false),
-                                respect_gitignore: args.respect_gitignore.unwrap_or(true),
-                                scan_file_limit: crate::file_ops::MAX_SEARCH_FILES,
-                                scan_byte_limit: crate::file_ops::MAX_SEARCH_BYTES,
-                            },
-                            config.limits.max_file_search_context_lines,
-                        )
-                        .map(crate::file_ops::slim_search_response),
-                    ),
-                    Err(error) if error.code == "file_not_found" => {
-                        Ok(crate::file_ops::FileError::new(
-                            "file_search_path_not_found",
-                            "search path was not found",
-                        )
-                        .value())
-                    }
-                    Err(error) => Ok(error.value()),
-                }
+                let request = crate::file_ops::SearchRequest {
+                    path: args.path.expect("validated single file.search path"),
+                    query: args.query.expect("validated search query"),
+                    mode: args.mode,
+                    case_sensitive: args.case_sensitive.unwrap_or(true),
+                    include: args.include.unwrap_or_default(),
+                    exclude: args.exclude.unwrap_or_default(),
+                    context_lines: args.context_lines.unwrap_or(0),
+                    max_results: args.max_results.unwrap_or(50),
+                    hidden: args.hidden.unwrap_or(false),
+                    respect_gitignore: args.respect_gitignore.unwrap_or(true),
+                };
+                Ok(crate::file_ops::search_request(
+                    &self.state,
+                    &request,
+                    args.acquire_confirmation,
+                )
+                .await)
             }
             "file.edit" => {
                 let args: FileEditArgs = from_value(arguments)?;
@@ -599,7 +572,7 @@ impl AgentMcpServer {
                     &self.state,
                     crate::file_ops::EditRequest {
                         patch: args.patch,
-                        need_confirm: args.need_confirm,
+                        acquire_confirmation: args.acquire_confirmation,
                     },
                 )
                 .await)
@@ -623,7 +596,11 @@ impl AgentMcpServer {
                             .ok_or_else(|| anyhow::anyhow!("cwd is required for create"))?;
                         Ok(crate::tmux::create_session(
                             &self.state,
-                            agentic_gpt_protocol::TmuxCreateSessionRequest { name, cwd },
+                            agentic_gpt_protocol::TmuxCreateSessionRequest {
+                                name,
+                                cwd,
+                                acquire_confirmation: args.acquire_confirmation,
+                            },
                             RequestContext::new(self.ingress, "tmux.createSession"),
                         )
                         .await)
@@ -636,7 +613,7 @@ impl AgentMcpServer {
                             &self.state,
                             agentic_gpt_protocol::TmuxCloseSessionRequest {
                                 name,
-                                need_confirm: args.need_confirm.unwrap_or(true),
+                                acquire_confirmation: args.acquire_confirmation,
                             },
                             RequestContext::new(self.ingress, "tmux.closeSession"),
                         )
@@ -701,7 +678,7 @@ impl AgentMcpServer {
                         target: args.target,
                         text: args.text,
                         submit: args.submit,
-                        need_confirm: args.need_confirm.unwrap_or(true),
+                        acquire_confirmation: args.acquire_confirmation,
                     },
                     RequestContext::new(self.ingress, "tmux.pasteText"),
                 )
@@ -715,7 +692,7 @@ impl AgentMcpServer {
                         target: args.target,
                         program: args.program,
                         args: args.args,
-                        need_confirm: args.need_confirm,
+                        acquire_confirmation: args.acquire_confirmation,
                         wait_ms: args.wait_ms.unwrap_or(300),
                         capture_lines: args.capture_lines.unwrap_or(120),
                     },
@@ -1077,8 +1054,7 @@ impl AgentMcpServer {
                         agent_id: config.agent_id.clone(),
                         group: args.group,
                         command: args.command,
-                        need_confirm: args.need_confirm,
-                        confirm_method: None,
+                        acquire_confirmation: args.acquire_confirmation,
                         cwd: args.cwd,
                         wait_seconds: args.wait_seconds,
                     },
@@ -1134,8 +1110,7 @@ impl AgentMcpServer {
                             cwd: element.cwd,
                         })
                         .collect(),
-                    need_confirm: args.need_confirm,
-                    confirm_method: None,
+                    acquire_confirmation: args.acquire_confirmation,
                     cwd: args.cwd,
                     wait_seconds: args.wait_seconds,
                 };
@@ -1873,7 +1848,7 @@ struct ProcessExecArgs {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
-    need_confirm: bool,
+    acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default)]
     wait_seconds: Option<u64>,
 }
@@ -1895,7 +1870,7 @@ struct ProcessBatchArgs {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
-    need_confirm: bool,
+    acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default)]
     wait_seconds: Option<u64>,
 }
@@ -1907,6 +1882,8 @@ struct EmptyArgs {}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileReadArgs {
+    #[serde(default)]
+    acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
@@ -1934,6 +1911,8 @@ struct FileReadRequestArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileSearchArgs {
+    #[serde(default)]
+    acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
@@ -1986,7 +1965,7 @@ struct FileSearchRequestArgs {
 struct FileEditArgs {
     patch: String,
     #[serde(default)]
-    need_confirm: bool,
+    acquire_confirmation: Option<AcquireConfirmation>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2196,7 +2175,7 @@ struct TmuxSessionsArgs {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
-    need_confirm: Option<bool>,
+    acquire_confirmation: Option<AcquireConfirmation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2219,7 +2198,7 @@ struct TmuxExecArgs {
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
-    need_confirm: bool,
+    acquire_confirmation: Option<AcquireConfirmation>,
     #[serde(default)]
     wait_ms: Option<u64>,
     #[serde(default)]
@@ -2234,7 +2213,7 @@ struct TmuxPasteArgs {
     #[serde(default)]
     submit: bool,
     #[serde(default)]
-    need_confirm: Option<bool>,
+    acquire_confirmation: Option<AcquireConfirmation>,
 }
 
 async fn dispatch(server: &AgentMcpServer, command: HubCommand) -> Result<Value> {
@@ -2617,19 +2596,19 @@ fn validate_file_search_args(args: &FileSearchArgs) -> Result<()> {
 
 fn validate_tmux_sessions_args(args: &TmuxSessionsArgs) -> Result<()> {
     match args.action.as_str() {
-        "list" if args.name.is_none() && args.cwd.is_none() && args.need_confirm.is_none() => {
+        "list"
+            if args.name.is_none() && args.cwd.is_none() && args.acquire_confirmation.is_none() =>
+        {
             Ok(())
         }
-        "create" if args.name.is_some() && args.cwd.is_some() && args.need_confirm.is_none() => {
-            Ok(())
-        }
+        "create" if args.name.is_some() && args.cwd.is_some() => Ok(()),
         "close" if args.name.is_some() && args.cwd.is_none() => Ok(()),
         "list" => Err(anyhow::anyhow!("tmux.sessions list accepts only action")),
         "create" => Err(anyhow::anyhow!(
-            "tmux.sessions create accepts action, name, and cwd"
+            "tmux.sessions create accepts action, name, cwd, and acquireConfirmation"
         )),
         "close" => Err(anyhow::anyhow!(
-            "tmux.sessions close accepts action, name, and needConfirm"
+            "tmux.sessions close accepts action, name, and acquireConfirmation"
         )),
         _ => Err(anyhow::anyhow!("invalid tmux.sessions action")),
     }

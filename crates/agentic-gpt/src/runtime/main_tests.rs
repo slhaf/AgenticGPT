@@ -4,8 +4,7 @@ use crate::browser_discovery::{resolve_browser_runtime_with_sources, BrowserRunt
 use crate::cli::{read_local_arguments, MAX_LOCAL_ARGUMENT_BYTES};
 use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{Config, RuntimeMode};
-use crate::config::{PathPolicyConfig, Rule, TunnelConfig};
-use crate::config_cli::{PathRootCommand, PathRootKind};
+use crate::config::{PathPolicyConfig, PolicyConfig, TunnelConfig};
 use crate::startup::{build_app_state_with_private_state, reload_live_config_once};
 use crate::state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel};
 use agentic_gpt_protocol::{
@@ -322,12 +321,38 @@ fn local_arguments_are_bounded_objects_from_inline_or_file() {
     let _ = fs::remove_dir_all(root);
 }
 
+fn test_path_policy(
+    write: Vec<PathBuf>,
+    readonly: Vec<PathBuf>,
+    deny: Vec<PathBuf>,
+) -> PathPolicyConfig {
+    let patterns = |paths: Vec<PathBuf>| {
+        paths
+            .into_iter()
+            .map(|path| crate::config::path_subtree_pattern(&path))
+            .collect::<Vec<_>>()
+    };
+    let mut read = PolicyConfig::with_default(policy::PolicyDecision::Deny);
+    read.allow = patterns(write.iter().cloned().chain(readonly).collect());
+    read.deny = patterns(deny.clone());
+    let mut write_policy = PolicyConfig::with_default(policy::PolicyDecision::Deny);
+    write_policy.allow = patterns(write);
+    write_policy.deny = patterns(deny);
+    PathPolicyConfig {
+        read,
+        write: write_policy,
+    }
+}
+
 fn command_test_state(
     profile: CapabilityProfile,
     workspace_root: PathBuf,
 ) -> (AppState, mpsc::UnboundedReceiver<AgentMessage>) {
     let mut config = Config::default_config().unwrap();
     config.shell.init_file = config::ShellInitFile::Disabled;
+    config.policy.allow = vec!["*".to_string()];
+    config.path_policy.read.allow = vec!["*".to_string()];
+    config.path_policy.write.allow = vec!["*".to_string()];
     config.toolsets = if profile == CapabilityProfile::Room {
         config::ToolsetConfig::room()
     } else {
@@ -473,8 +498,7 @@ async fn hub_commands_require_their_live_owner_toolset_before_dispatch() {
                     agent_id: agent_id.clone(),
                     group: None,
                     command: "agentic-test-command-must-not-run".into(),
-                    need_confirm: false,
-                    confirm_method: None,
+                    acquire_confirmation: None,
                     cwd: None,
                     wait_seconds: Some(1),
                 },
@@ -503,7 +527,7 @@ async fn hub_commands_require_their_live_owner_toolset_before_dispatch() {
                     target: "missing-session".into(),
                     program: "agentic-test-command-must-not-run".into(),
                     args: Vec::new(),
-                    need_confirm: false,
+                    acquire_confirmation: None,
                     wait_ms: 1,
                     capture_lines: 1,
                 },
@@ -600,10 +624,7 @@ async fn hub_panel_failure_emits_live_event_source_without_terminal_response() {
         .await
         .policy
         .allow
-        .push(crate::config::Rule {
-            program: "true".to_string(),
-            args_prefix: Vec::new(),
-        });
+        .push("true **".to_string());
     let agent_id = state.config.read().await.agent_id.clone();
     let request_id = "req-panel-failure".to_string();
     let identity = hub::RunIdentity {
@@ -645,8 +666,7 @@ async fn hub_panel_failure_emits_live_event_source_without_terminal_response() {
                 agent_id,
                 group: None,
                 command: "true".to_string(),
-                need_confirm: false,
-                confirm_method: None,
+                acquire_confirmation: None,
                 cwd: None,
                 wait_seconds: Some(5),
             },
@@ -784,7 +804,9 @@ async fn room_mode_dispatches_current_diary_command() {
 
 #[test]
 fn read_only_system_file_is_allowed() {
-    let config = Config::default_config().unwrap();
+    let mut config = Config::default_config().unwrap();
+    config.path_policy = config::seed_path_policy(&config.workspace_root);
+    config.path_policy.read.allow.push("/".to_string());
     assert!(exec::preflight(
         &config,
         &config.workspace_root,
@@ -807,11 +829,7 @@ fn path_policy_allows_write_root_and_blocks_readonly_write() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy = PathPolicyConfig {
-        write_roots: vec![downloads.clone()],
-        read_only_roots: vec![cache.clone()],
-        deny_roots: Vec::new(),
-    };
+    config.path_policy = test_path_policy(vec![downloads.clone()], vec![cache.clone()], Vec::new());
 
     assert!(exec::preflight(
         &config,
@@ -828,7 +846,7 @@ fn path_policy_allows_write_root_and_blocks_readonly_write() {
             &[cache.join("test-file").to_string_lossy().to_string()]
         )
         .unwrap_err(),
-        "path_readonly"
+        "path_denied"
     );
     assert!(exec::preflight(
         &config,
@@ -850,11 +868,8 @@ fn deny_roots_override_read_and_write() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy = PathPolicyConfig {
-        write_roots: vec![downloads.clone()],
-        read_only_roots: Vec::new(),
-        deny_roots: vec![secret.clone()],
-    };
+    config.path_policy =
+        test_path_policy(vec![downloads.clone()], Vec::new(), vec![secret.clone()]);
 
     assert_eq!(
         exec::preflight(
@@ -888,11 +903,7 @@ fn unknown_program_defaults_to_write_access() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy = PathPolicyConfig {
-        write_roots: Vec::new(),
-        read_only_roots: vec![cache.clone()],
-        deny_roots: Vec::new(),
-    };
+    config.path_policy = test_path_policy(Vec::new(), vec![cache.clone()], Vec::new());
 
     assert_eq!(
         exec::preflight(
@@ -902,7 +913,7 @@ fn unknown_program_defaults_to_write_access() {
             &[cache.join("file").to_string_lossy().to_string()]
         )
         .unwrap_err(),
-        "path_readonly"
+        "path_denied"
     );
 }
 
@@ -920,11 +931,8 @@ fn working_directory_must_be_existing_writable_directory() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace.clone();
-    config.path_policy = PathPolicyConfig {
-        write_roots: Vec::new(),
-        read_only_roots: vec![cache],
-        deny_roots: vec![secret.clone()],
-    };
+    config.path_policy =
+        test_path_policy(vec![workspace.clone()], vec![cache], vec![secret.clone()]);
 
     assert_eq!(
         exec::resolve_working_directory(&config, None).unwrap(),
@@ -952,7 +960,7 @@ fn working_directory_must_be_existing_writable_directory() {
             Some(root.join("cache").to_string_lossy().as_ref())
         )
         .unwrap_err(),
-        "working_directory_outside_allowed_roots"
+        "working_directory_denied"
     );
 }
 
@@ -966,11 +974,8 @@ fn relative_path_arguments_are_resolved_from_working_directory() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy = PathPolicyConfig {
-        write_roots: Vec::new(),
-        read_only_roots: Vec::new(),
-        deny_roots: Vec::new(),
-    };
+    config.path_policy =
+        test_path_policy(vec![config.workspace_root.clone()], Vec::new(), Vec::new());
 
     assert_eq!(
         exec::preflight(
@@ -998,11 +1003,7 @@ fn symlink_to_denied_path_is_rejected() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy = PathPolicyConfig {
-        write_roots: Vec::new(),
-        read_only_roots: Vec::new(),
-        deny_roots: vec![secret],
-    };
+    config.path_policy = test_path_policy(Vec::new(), Vec::new(), vec![secret]);
 
     #[cfg(unix)]
     assert_eq!(
@@ -1018,7 +1019,7 @@ fn symlink_to_denied_path_is_rejected() {
 }
 
 #[test]
-fn load_old_config_without_path_policy_adds_defaults() {
+fn load_old_config_without_path_policy_requires_manual_migration() {
     let root = unique_temp_dir("old-config");
     let config_path = root.join("config.json");
     let config = Config::default_config().unwrap();
@@ -1026,14 +1027,12 @@ fn load_old_config_without_path_policy_adds_defaults() {
     value.as_object_mut().unwrap().remove("pathPolicy");
     fs::write(&config_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
-    let loaded = Config::load(&config_path).unwrap();
-    assert!(!loaded.path_policy.write_roots.is_empty());
-    assert!(!loaded.path_policy.read_only_roots.is_empty());
-    assert!(!loaded.path_policy.deny_roots.is_empty());
+    let error = Config::load(&config_path).unwrap_err().to_string();
+    assert!(error.contains("config_requires_policy_migration"));
 }
 
 #[test]
-fn load_partial_path_policy_uses_workspace_derived_defaults_for_missing_lists() {
+fn load_legacy_path_roots_requires_manual_migration() {
     let root = unique_temp_dir("partial-config");
     let config_path = root.join("config.json");
     let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
@@ -1042,15 +1041,12 @@ fn load_partial_path_policy_uses_workspace_derived_defaults_for_missing_lists() 
     });
     fs::write(&config_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
-    let loaded = Config::load(&config_path).unwrap();
-    assert_eq!(loaded.path_policy.write_roots.len(), 1);
-    let defaults = crate::config::default_path_policy(&loaded.workspace_root);
-    assert_eq!(loaded.path_policy.read_only_roots, defaults.read_only_roots);
-    assert_eq!(loaded.path_policy.deny_roots, defaults.deny_roots);
+    let error = Config::load(&config_path).unwrap_err().to_string();
+    assert!(error.contains("config_policy_manual_migration_required"));
 }
 
 #[test]
-fn old_rule_ids_are_ignored_when_loading_config() {
+fn old_rule_objects_require_manual_migration() {
     let root = unique_temp_dir("old-rule-id");
     let config_path = root.join("config.json");
     let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
@@ -1063,42 +1059,13 @@ fn old_rule_ids_are_ignored_when_loading_config() {
     ]);
     fs::write(&config_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
-    let loaded = Config::load(&config_path).unwrap();
-    assert_eq!(loaded.policy.allow.len(), 1);
-    assert_eq!(loaded.policy.allow[0].program, "bash");
-    assert!(serde_json::to_value(&loaded.policy.allow[0])
-        .unwrap()
-        .get("id")
-        .is_none());
-}
-
-#[test]
-fn path_root_remove_matches_expanded_equivalent_path() {
-    let root = unique_temp_dir("path-cli");
-    let target = root.join("target");
-    fs::create_dir_all(&target).unwrap();
-    let mut policy = PathPolicyConfig::default();
-
-    policy::mutate_path_roots(
-        &mut policy,
-        PathRootKind::Write,
-        PathRootCommand::Add {
-            path: target.clone(),
-        },
-    );
-    assert_eq!(policy.write_roots.len(), 1);
-    policy::mutate_path_roots(
-        &mut policy,
-        PathRootKind::Write,
-        PathRootCommand::Remove {
-            path: target.join("..").join("target"),
-        },
-    );
-    assert!(policy.write_roots.is_empty());
+    let error = Config::load(&config_path).unwrap_err().to_string();
+    assert!(error.contains("config_policy_manual_migration_required"));
 }
 
 #[tokio::test]
-async fn wp2_reload_preserves_live_path_policy_when_workspace_changes() -> anyhow::Result<()> {
+async fn wp2_reload_applies_explicit_path_policy_while_workspace_requires_restart(
+) -> anyhow::Result<()> {
     let root = unique_temp_dir("standalone-live-path-policy-boundary");
     fs::create_dir_all(&root)?;
     let config_path = root.join("config.json");
@@ -1132,37 +1099,30 @@ async fn wp2_reload_preserves_live_path_policy_when_workspace_changes() -> anyho
         api_key: "env:AGENTIC_TUNNEL_API_KEY".to_string(),
         ..TunnelConfig::default()
     });
-    initial.path_policy = PathPolicyConfig {
-        write_roots: vec![live_write_root],
-        read_only_roots: vec![live_read_only_root],
-        deny_roots: vec![live_deny_root],
-    };
-    let live_path_policy = initial.path_policy.clone();
+    initial.path_policy = test_path_policy(
+        vec![live_write_root],
+        vec![live_read_only_root],
+        vec![live_deny_root],
+    );
     *state.config.write().await = initial.clone();
 
     let mut candidate = initial;
     candidate.workspace_root = candidate_workspace;
-    candidate.path_policy = PathPolicyConfig {
-        write_roots: vec![candidate_write_root],
-        read_only_roots: vec![candidate_read_only_root],
-        deny_roots: vec![candidate_deny_root],
-    };
-    candidate.policy.allow.push(Rule {
-        program: "printf".to_string(),
-        args_prefix: Vec::new(),
-    });
+    candidate.path_policy = test_path_policy(
+        vec![candidate_write_root],
+        vec![candidate_read_only_root],
+        vec![candidate_deny_root],
+    );
+    candidate.policy.allow.push("printf **".to_string());
+    let candidate_path_policy = candidate.path_policy.clone();
     fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
 
     reload_live_config_once(&state).await?;
 
     let live = state.config.read().await.clone();
     assert_eq!(live.workspace_root, live_workspace);
-    assert_eq!(live.path_policy, live_path_policy);
-    assert!(live
-        .policy
-        .allow
-        .iter()
-        .any(|rule| rule.program == "printf"));
+    assert_eq!(live.path_policy, candidate_path_policy);
+    assert!(live.policy.allow.iter().any(|rule| rule == "printf **"));
 
     let _ = fs::remove_dir_all(root);
     Ok(())
@@ -1187,19 +1147,17 @@ async fn wp2_hub_live_reload_preserves_restart_fields() -> anyhow::Result<()> {
     initial.mode = RuntimeMode::Hub;
     initial.workspace_root = live_workspace.clone();
     initial.hub.agent_secret = "hub-secret".to_string();
-    initial.path_policy.write_roots = vec![live_write_root];
+    initial.path_policy.write.allow = vec![crate::config::path_subtree_pattern(&live_write_root)];
     let live_hub_url = initial.hub.url.clone();
-    let live_path_policy = initial.path_policy.clone();
     *state.config.write().await = initial.clone();
 
     let mut candidate = initial;
     candidate.hub.url = "http://127.0.0.1:18787".to_string();
     candidate.workspace_root = candidate_workspace;
-    candidate.path_policy.write_roots = vec![candidate_write_root];
-    candidate.policy.allow.push(Rule {
-        program: "printf".to_string(),
-        args_prefix: Vec::new(),
-    });
+    candidate.path_policy.write.allow =
+        vec![crate::config::path_subtree_pattern(&candidate_write_root)];
+    candidate.policy.allow.push("printf **".to_string());
+    let candidate_path_policy = candidate.path_policy.clone();
     fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
 
     reload_live_config_once(&state).await?;
@@ -1208,12 +1166,8 @@ async fn wp2_hub_live_reload_preserves_restart_fields() -> anyhow::Result<()> {
     assert_eq!(live.mode, RuntimeMode::Hub);
     assert_eq!(live.hub.url, live_hub_url);
     assert_eq!(live.workspace_root, live_workspace);
-    assert_eq!(live.path_policy, live_path_policy);
-    assert!(live
-        .policy
-        .allow
-        .iter()
-        .any(|rule| rule.program == "printf"));
+    assert_eq!(live.path_policy, candidate_path_policy);
+    assert!(live.policy.allow.iter().any(|rule| rule == "printf **"));
 
     let _ = fs::remove_dir_all(root);
     Ok(())
