@@ -112,9 +112,9 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         "workspace": {
             "root": exact_path(&config.workspace_root),
         },
-        "bubblewrap": config.bubblewrap,
         "policy": {
             "enabled": config.policy.enabled,
+            "bubblewrap": config.policy.bubblewrap,
             "command": command_summary,
             "path": {
                 "defaultAction": config.policy.path.default_action,
@@ -346,7 +346,6 @@ fn invalid_config_health(modified_at: Option<String>) -> ConfigHealth {
 fn live_subset(config: &Config) -> Value {
     json!({
         "policy": config.policy,
-        "bubblewrap": config.bubblewrap,
         "limits": config.limits,
         "mcpServers": config.mcp_servers,
         "toolsets": config.toolsets,

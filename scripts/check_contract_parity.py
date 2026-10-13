@@ -328,7 +328,7 @@ def init_agent(binary: Path, root: Path, mode: str, profile: str, agent_id: str,
         "command": {"defaultAction": "confirm", "allow": [], "confirm": [], "deny": []},
         "path": {"defaultAction": "deny", "readOnly": [], "write": [str(workspace)], "deny": []},
     }
-    config["bubblewrap"] = False
+    config["policy"]["bubblewrap"] = False
     config["confirmationProvider"] = {"channels": []}
     config["toolsets"] = {
         "enabled": ["agent", "file", "mcp", "process", "skills", "tmux", "room"]

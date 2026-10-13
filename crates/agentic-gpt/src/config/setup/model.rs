@@ -923,7 +923,7 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
             process_response_bytes: config.limits.process_response_bytes.to_string(),
         }),
         sandbox: Some(SandboxDraft {
-            enabled: config.bubblewrap,
+            enabled: config.policy.bubblewrap,
         }),
         shell: Some(match &config.shell.init_file {
             ShellInitFile::Default => ShellDraft {

@@ -531,8 +531,6 @@ pub(crate) struct Config {
     pub(crate) confirmation_provider: ConfirmationProviderConfig,
     #[serde(default = "default_confirmation_language")]
     pub(crate) confirmation_language: String,
-    #[serde(default)]
-    pub(crate) bubblewrap: bool,
     #[serde(default, skip_serializing_if = "ShellConfig::is_default")]
     pub(crate) shell: ShellConfig,
     #[serde(default, skip_serializing_if = "BrowserConfig::is_empty")]
@@ -695,6 +693,8 @@ impl<'de> Deserialize<'de> for ConfirmationProviderConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SecurityPolicyConfig {
     pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) bubblewrap: bool,
     pub(crate) command: PolicyConfig,
     pub(crate) path: PathPolicyConfig,
 }
@@ -703,6 +703,7 @@ impl Default for SecurityPolicyConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            bubblewrap: false,
             command: PolicyConfig::default(),
             path: PathPolicyConfig::default(),
         }
@@ -1129,7 +1130,6 @@ impl Config {
             mcp_servers: BTreeMap::new(),
             events: EventsConfig::default(),
             http_mcp: HttpMcpConfig::default(),
-            bubblewrap: false,
             shell: ShellConfig::default(),
             policy: SecurityPolicyConfig::default(),
             limits: LimitsConfig {
@@ -1428,7 +1428,6 @@ impl Config {
             "backupLimit",
             "confirmationProvider",
             "confirmationLanguage",
-            "bubblewrap",
             "shell",
             "mcpServers",
             "events",
@@ -1480,9 +1479,9 @@ impl Config {
     pub(crate) fn safe_summary(&self) -> SafeConfigSummary {
         SafeConfigSummary {
             workspace_root: workspace_root_summary(&self.workspace_root),
-            bubblewrap: self.bubblewrap,
             policy: SafePolicySummary {
                 enabled: self.policy.enabled,
+                bubblewrap: self.policy.bubblewrap,
                 command: safe_policy(&self.policy.command),
                 path: SafePathPolicySummary {
                     default_action: match self.policy.path.default_action {

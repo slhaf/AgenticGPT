@@ -106,9 +106,9 @@ pub(super) fn test_running_process(process_id: &str) -> ProcessInfo {
 pub(super) fn test_config_summary() -> SafeConfigSummary {
     serde_json::from_value(json!({
         "workspaceRoot": "configured",
-        "bubblewrap": false,
         "policy": {
             "enabled": true,
+            "bubblewrap": false,
             "command": {"defaultAction": "confirm", "allow": [], "confirm": [], "deny": []},
             "path": {
                 "defaultAction": "deny",

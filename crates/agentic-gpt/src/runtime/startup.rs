@@ -54,7 +54,7 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
         initial.agent_id,
         initial.hub.url,
         initial.workspace_root.display(),
-        if initial.policy.enabled && initial.bubblewrap {
+        if initial.policy.enabled && initial.policy.bubblewrap {
             "enabled"
         } else {
             "disabled"
@@ -381,7 +381,6 @@ pub(crate) fn apply_live_config_subset(
 ) -> config::ResolvedMaxActiveProcesses {
     let resolved = candidate.limits.max_active_processes.resolve();
     live.policy = candidate.policy;
-    live.bubblewrap = candidate.bubblewrap;
     live.limits = candidate.limits;
     live.shell = candidate.shell;
     live.mcp_servers = candidate.mcp_servers;

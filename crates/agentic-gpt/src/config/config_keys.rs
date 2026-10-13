@@ -87,7 +87,6 @@ pub(crate) enum ConfigSection {
     Hub,
     HttpMcp,
     Confirmation,
-    Sandbox,
     Policy,
     Shell,
     Limits,
@@ -105,7 +104,6 @@ impl ConfigSection {
             Self::Identity => "identity",
             Self::Hub => "hub",
             Self::Confirmation => "confirmation",
-            Self::Sandbox => "sandbox",
             Self::Policy => "policy",
             Self::Shell => "shell",
             Self::Limits => "limits",
@@ -130,8 +128,6 @@ impl ConfigSection {
             (Self::Confirmation, UiLanguage::ZhCn) => "确认",
             (Self::Policy, UiLanguage::En) => "Policy",
             (Self::Policy, UiLanguage::ZhCn) => "策略",
-            (Self::Sandbox, UiLanguage::En) => "Sandbox",
-            (Self::Sandbox, UiLanguage::ZhCn) => "沙箱",
             (Self::Shell, UiLanguage::En) => "Shell",
             (Self::Shell, UiLanguage::ZhCn) => "Shell",
             (Self::Limits, UiLanguage::En) => "Limits",
@@ -387,8 +383,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
     config_key!("policy.path.write", Policy, JsonPathArray, false, "Concrete writable path roots.", "具体的可写路径根目录。", r#"["~/.agentic_gpt/workspace"]"#, set_policy_path_write),
     config_key!("policy.path.deny", Policy, JsonPathArray, false, "Concrete denied path roots.", "具体的拒绝访问路径根目录。", r#"[]"#, set_policy_path_deny),
     config_key!(
-        "bubblewrap",
-        Sandbox,
+        "policy.bubblewrap",
+        Policy,
         Boolean,
         false,
         "Use bubblewrap to enforce the configured path roots for process execution.",
@@ -920,13 +916,12 @@ struct ConfigDescriptionOutput {
     zh_cn: &'static str,
 }
 
-const CONFIG_SECTION_ORDER: [ConfigSection; 13] = [
+const CONFIG_SECTION_ORDER: [ConfigSection; 12] = [
     ConfigSection::Runtime,
     ConfigSection::Identity,
     ConfigSection::Hub,
     ConfigSection::HttpMcp,
     ConfigSection::Confirmation,
-    ConfigSection::Sandbox,
     ConfigSection::Policy,
     ConfigSection::Shell,
     ConfigSection::Limits,
@@ -1191,7 +1186,7 @@ fn parse_path_roots(value: &str) -> Result<Vec<PathBuf>> {
     Ok(roots)
 }
 fn set_bubblewrap(config: &mut Config, value: &str) -> Result<()> {
-    config.bubblewrap = value.parse::<bool>()?;
+    config.policy.bubblewrap = value.parse::<bool>()?;
     Ok(())
 }
 

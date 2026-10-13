@@ -309,7 +309,7 @@ fn config_init_set_and_show_round_trip() {
         vec!["allow", "remove", removed_pattern],
         vec!["set", "policy.enabled", "false"],
         vec!["set", "policy.command.defaultAction", "deny"],
-        vec!["set", "bubblewrap", "true"],
+        vec!["set", "policy.bubblewrap", "true"],
         vec!["path", "default-action", "allow"],
         vec!["path", "readonly", "add", read_only_root.as_str()],
         vec!["path", "write", "add", write_root.as_str()],
@@ -382,7 +382,7 @@ fn config_init_set_and_show_round_trip() {
         .unwrap()
         .iter()
         .any(|path| path == &deny_root));
-    assert_eq!(value["bubblewrap"], true);
+    assert_eq!(value["policy"]["bubblewrap"], true);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -479,7 +479,7 @@ fn config_keys_json_lists_registry() {
         .any(|entry| entry["key"] == "confirmationProvider"));
     let bubblewrap = entries
         .iter()
-        .find(|entry| entry["key"] == "bubblewrap")
+        .find(|entry| entry["key"] == "policy.bubblewrap")
         .unwrap();
     assert_eq!(bubblewrap["choices"], serde_json::json!(["true", "false"]));
     let events = entries

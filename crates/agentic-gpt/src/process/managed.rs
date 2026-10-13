@@ -4991,7 +4991,7 @@ mod tests {
         fs::create_dir(&writable).unwrap();
         {
             let mut config = state.config.write().await;
-            config.bubblewrap = true;
+            config.policy.bubblewrap = true;
             config.policy.command.allow.clear();
             config.policy.command.deny = vec!["*".into()];
             config.policy.path = crate::config::PathPolicyConfig {
@@ -5087,7 +5087,7 @@ mod tests {
             fs::write(&denied_file, "file fixture").unwrap();
             {
                 let mut config = state.config.write().await;
-                config.bubblewrap = true;
+                config.policy.bubblewrap = true;
                 config.policy.command.allow = vec!["*".into()];
                 config.policy.path = crate::config::PathPolicyConfig {
                     write: vec![workspace.clone(), public.clone(), private.clone()],
@@ -5214,7 +5214,7 @@ mod tests {
         {
             let mut config = state.config.write().await;
             config.policy.enabled = false;
-            config.bubblewrap = true;
+            config.policy.bubblewrap = true;
             config.policy.command.deny = vec!["*".into()];
             config.policy.path.deny = vec![workspace.clone()];
             config.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];

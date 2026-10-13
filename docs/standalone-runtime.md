@@ -400,7 +400,7 @@ Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `boot
 
 当前的多文件变更边界见 file 合同矩阵：一份完整的 apply-patch 请求会先暂存和验证，然后才进行可选确认及提交。
 
-Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`bubblewrap`、`limits`、`mcpServers`、`toolsets.enabled` 和 `events`；这些配置会经过完整验证，再原子应用于新的准入、调用和工具发现。
+Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`limits`、`mcpServers`、`toolsets.enabled` 和 `events`；这些配置会经过完整验证，再原子应用于新的准入、调用和工具发现。
 
 MCP server id 只能使用
 `A-Z`、`a-z`、`0-9`、`.`、`_` 或 `-`，最长 64 字节；`streamable-http` 要求绝对 HTTP(S) URL，可选结构化 Bearer auth；
@@ -413,8 +413,7 @@ MCP server id 只能使用
 这些字段变更后必须重启。共享 watcher 会记录 `config changes require restart; fields=...`；Standalone supervisor 还会发出
 `restart_required`，Hub 模式则没有 supervisor 事件。
 
-若 `workspaceRoot` 发生变化，默认工作目录仍保持原值直到重启；统一的 `policy` 与 `bubblewrap`
-仍可独立热加载，并只影响之后接纳的请求。实时启用 `room` namespace 时，会依据当前实时 Room 配置执行 bootstrap；磁盘上需重启才生效的
+若 `workspaceRoot` 发生变化，默认工作目录仍保持原值直到重启；统一的 `policy`（包括 `policy.bubblewrap`）仍可独立热加载，并只影响之后接纳的请求。实时启用 `room` namespace 时，会依据当前实时 Room 配置执行 bootstrap；磁盘上需重启才生效的
 `room.*` 变更不会在重启前改变运行时 root。`agent.info.mcp` 仅报告生效的配置 revision、已配置/已启用计数和 client 生命周期，不会暴露 endpoint。
 
 Standalone worker 也会监视并协调 `httpMcp` 子集。启用或禁用 endpoint、变更 bearer-token reference 或其解析后的内容，以及变更 `host`、`port`、

@@ -38,7 +38,7 @@ HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上
 
 Normal 并不等于 Room：只有显式启用 `room` 命名空间时，Normal 运行时才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
 
-重载会应用现有的安全实时更新子集（`policy`、`bubblewrap`、`limits`、`mcpServers`、`toolsets`、`httpMcp`、`events`），且不会重建启动时派生的资源。新 policy 与 bubblewrap 只用于之后接纳的请求；已接纳操作保留准入快照。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
+重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`、`events`），且不会重建启动时派生的资源。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已接纳操作保留准入快照。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
 
 `agentic-gpt local` 是 Unix MCP 客户端，使用常规 MCP 操作准入门并记录 `local:` 来源。
 

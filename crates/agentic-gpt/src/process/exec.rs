@@ -394,7 +394,7 @@ pub(crate) fn build_command(
         ),
         ExecutionSpec::Argv { program, args } => (program.as_str(), args.clone()),
     };
-    if config.policy.enabled && config.bubblewrap {
+    if config.policy.enabled && config.policy.bubblewrap {
         let mut command = Command::new("bwrap");
         command
             .arg("--die-with-parent")
@@ -811,7 +811,7 @@ mod tests {
         .unwrap();
 
         let mut config = Config::default_config().unwrap();
-        config.bubblewrap = false;
+        config.policy.bubblewrap = false;
         config.shell.init_file = ShellInitFile::Path(init_name);
         let mut command = build_command(
             &config,
@@ -890,7 +890,7 @@ mod tests {
         .unwrap();
 
         let mut config = Config::default_config().unwrap();
-        config.bubblewrap = false;
+        config.policy.bubblewrap = false;
         config.shell.init_file = ShellInitFile::Path(init_file.to_string_lossy().to_string());
         let mut command = build_command(
             &config,

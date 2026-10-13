@@ -484,7 +484,7 @@ fn set_fixture_path_policy(config: &mut Value, roots: &[&Path]) {
         "write": paths,
         "deny": []
     });
-    config["bubblewrap"] = json!(false);
+    config["policy"]["bubblewrap"] = json!(false);
 }
 
 fn fixture_command(binary: &Path, root: &Path) -> Command {

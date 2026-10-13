@@ -273,7 +273,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         config.limits = limits;
     }
     if let Some(bubblewrap) = bubblewrap {
-        config.bubblewrap = bubblewrap;
+        config.policy.bubblewrap = bubblewrap;
     }
     if let Some(shell) = shell {
         config.shell = shell;

@@ -192,10 +192,9 @@ agentic-gpt run
 | `backupLimit` | Agentic 管理配置写入时保留的备份数量。 |
 | `confirmationProvider` | 有序的本地/远程确认通道。 |
 | `confirmationLanguage` | `en` 或 `zh-CN`。 |
-| `bubblewrap` | 是否对受管理 Process 启用 bubblewrap；默认 `false`。 |
 | `shell` | Bash 命令执行的 Shell 初始化文件设置。 |
 | `mcpServers` | `mcp.*` 转发的下游 MCP server。 |
-| `policy` | 统一的自动命令／路径策略：`enabled`、`command` 与 `path`。 |
+| `policy` | 统一的自动命令／路径策略：`enabled`、`command`、`path` 与 `bubblewrap`。 |
 | `limits` | Process 并发限制与最大活动 Process/Skill/MCP Job 容量。 |
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
@@ -525,6 +524,7 @@ CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会
 {
   "policy": {
     "enabled": true,
+    "bubblewrap": false,
     "command": {
       "defaultAction": "confirm",
       "allow": ["printf **"],
@@ -537,8 +537,7 @@ CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会
       "write": ["/path/to/workspace"],
       "deny": ["/path/to/workspace/private"]
     }
-  },
-  "bubblewrap": false
+  }
 }
 ```
 
@@ -727,7 +726,7 @@ replica。旧 JSONL append/update/remove 与 passage/date-selection 调用不会
 为 maintenance；请迁移到显式 slot/payload request，或删除旧调用。历史 release/migration
 记录只保留历史，不是当前 compatibility contract。
 
-顶层 `bubblewrap=true` 时，受管理 Process 的挂载直接由 `policy.path` 派生，不存在另一套可配置
+`policy.bubblewrap` 默认 `false`；设为 `true` 时，受管理 Process 的挂载直接由 `policy.path` 派生，不存在另一套可配置
 sandbox 列表。执行层提供的只读运行依赖挂载为 `/usr`、`/bin`、`/lib`、`/lib64`、`/etc/ssl`，并使用
 bubblewrap 内的 `PATH`。`defaultAction=deny` 时只挂载 `readOnly` 与 `write` 的具体根；
 `defaultAction=allow` 时以宿主 `/` 的读写挂载为基线，再将 `readOnly` 根收紧为只读并遮蔽 `deny` 根。
@@ -735,7 +734,7 @@ bubblewrap 内的 `PATH`。`defaultAction=deny` 时只挂载 `readOnly` 与 `wri
 若拒绝路径尚不存在且会被父目录挂载暴露，操作会因无法安全建立遮蔽而失败；不会在宿主机创建占位路径。
 
 Process 主动确认获准的 `read`／`write` 路径可追加到本次挂载，执行结束后失效。bubblewrap
-`bwrap` 可执行文件从 Agent 的 `PATH` 查找；启动或挂载失败时操作失败，不回退到未隔离执行。顶层 `bubblewrap=false`、或
+`bwrap` 可执行文件从 Agent 的 `PATH` 查找；启动或挂载失败时操作失败，不回退到未隔离执行。`policy.bubblewrap=false`、或
 `policy.enabled=false` 时不启用 OS 挂载隔离；显式主动确认仍生效。tmux、下游 MCP 和 Browser
 JavaScript 不属于受管理 Process 的 bubblewrap 范围。
 
@@ -766,7 +765,7 @@ agentic-gpt config set shell.initFile null
 agentic-gpt config set shell.initFile /path/to/protected/bashrc
 agentic-gpt config unset shell.initFile
 agentic-gpt config set policy.enabled true
-agentic-gpt config set bubblewrap true
+agentic-gpt config set policy.bubblewrap true
 agentic-gpt config set policy.path.readOnly '["/path/to/read-only"]'
 agentic-gpt config set policy.path.write '["/path/to/workspace"]'
 agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
@@ -778,7 +777,7 @@ agentic-gpt config set room.maintenance.autoPush false
 registry 包含以下常用 scalar：
 
 - `mode`、`profile`、`agentId`、`hub.url`、`hub.transport`、`hub.agentSecret`、`workspaceRoot`
-- `confirmationProvider.channels`、`confirmationLanguage`、`policy.enabled`、`bubblewrap`
+- `confirmationProvider.channels`、`confirmationLanguage`、`policy.enabled`、`policy.bubblewrap`
 - `tunnel.tunnelId`、`tunnel.apiKey`
 - 全部 `tunnel.client.*` 与 `tunnel.hubReporting.*`
 - `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
@@ -823,7 +822,7 @@ live subset。无效候选会保留上一份有效状态；候选修改需要重
 
 | 配置 | 行为 |
 | --- | --- |
-| `policy`、`bubblewrap`、`limits`、`mcpServers`、`toolsets.enabled` | 所有 Agent worker 共享热加载；policy 与 bubblewrap 对之后接纳的请求生效 |
+| `policy`、`limits`、`mcpServers`、`toolsets.enabled` | 所有 Agent worker 共享热加载；policy（包括 `policy.bubblewrap`）对之后接纳的请求生效 |
 | `shell.initFile` | 热加载；之后接纳的 Process 使用新设置，已接纳 Process 保留准入时的配置快照 |
 | `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone HTTP watcher 协调启用状态与 endpoint identity；identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
 | `httpMcp.bearerToken` 引用或其解析内容 | Standalone HTTP watcher 原地更新认证而不重新绑定；解析凭据可用时保留已有 session |

@@ -80,6 +80,7 @@
   },
   "policy": {
     "enabled": true,
+    "bubblewrap": false,
     "command": {
       "defaultAction": "confirm",
       "allow": [],
@@ -150,6 +151,5 @@
         "~/.config/gh"
       ]
     }
-  },
-  "bubblewrap": false
+  }
 }

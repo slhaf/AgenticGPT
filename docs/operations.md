@@ -170,11 +170,11 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 ## 配置重载与重启诊断
 
 实时更新/重启边界适用于 Standalone、Local 和 Hub 连接模式下的 Agent worker，
-并非 Standalone 独有。Agent worker 运行时，对 `policy`、`bubblewrap`、`limits`、`mcpServers`、
+并非 Standalone 独有。Agent worker 运行时，对 `policy`、`limits`、`mcpServers`、
 `toolsets.enabled` 和 `events` 的有效变更会以原子方式应用于后续准入、调用和工具发现。
 
 `events` 配置变更影响后续 process/skill-install 准入；已准入的 process 和安装任务保留准入时的配置快照。
-`policy.command`、`policy.path` 和 `bubblewrap` 的有效变更只用于之后接纳的请求；已接纳
+`policy.command`、`policy.path` 和 `policy.bubblewrap` 的有效变更只用于之后接纳的请求；已接纳
 Process 保留准入时的执行配置快照。`workspaceRoot` 变更仍须重启，不会阻止统一 policy 独立
 热加载；不得把磁盘文件已修改视为运行中操作已经切换配置。
 
@@ -364,8 +364,7 @@ agentic-gpt local call mcp.batch \
 
 ## 策略配置兼容性
 
-当前配置只接受统一的 `policy.enabled`、`policy.command`、`policy.path` 与顶层
-`bubblewrap`。旧 `pathPolicy`、`sandbox`、扁平命令 `policy`、`needConfirm`、
+当前配置只接受统一的 `policy.enabled`、`policy.command`、`policy.path` 与 `policy.bubblewrap`。旧 `pathPolicy`、`sandbox`、扁平命令 `policy`、`needConfirm`、
 `confirmMethod` 及更早的规则对象不会被自动转换。升级前保留原配置，根据
 [配置说明](configuration.zh-CN.md#命令与路径策略)显式重建具体路径根与命令规则，再通过隔离的
 `HOME` 验证。请求调用方使用 `acquireConfirmation`；下游 MCP 审批合同保持原有语义。

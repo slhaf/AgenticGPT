@@ -199,7 +199,9 @@ async fn request_freedesktop_confirmation(
         return "provider_unavailable".to_string();
     }
     let zh = confirmation_language_is_zh(config);
-    let warning = if !(config.policy.enabled && config.bubblewrap) && risky_file_mutation(program) {
+    let warning = if !(config.policy.enabled && config.policy.bubblewrap)
+        && risky_file_mutation(program)
+    {
         if zh {
             "\n警告：bubblewrap 未启用；该文件变更命令对宿主机的可见范围更大。"
         } else {

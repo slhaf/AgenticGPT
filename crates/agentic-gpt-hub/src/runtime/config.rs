@@ -160,9 +160,9 @@ fn set_private_file_mode(_options: &mut std::fs::OpenOptions) {}
 pub(crate) fn default_config_summary() -> SafeConfigSummary {
     SafeConfigSummary {
         workspace_root: "unknown".to_string(),
-        bubblewrap: false,
         policy: SafePolicySummary {
             enabled: false,
+            bubblewrap: false,
             command: SafePolicyRules {
                 allow: Vec::new(),
                 confirm: Vec::new(),

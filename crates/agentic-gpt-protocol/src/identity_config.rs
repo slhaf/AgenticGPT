@@ -25,6 +25,7 @@ pub struct SafePolicyRules {
 #[serde(rename_all = "camelCase")]
 pub struct SafePolicySummary {
     pub enabled: bool,
+    pub bubblewrap: bool,
     pub command: SafePolicyRules,
     pub path: SafePathPolicySummary,
 }
@@ -46,7 +47,6 @@ pub struct SafeTunnelSummary {
 #[serde(rename_all = "camelCase")]
 pub struct SafeConfigSummary {
     pub workspace_root: String,
-    pub bubblewrap: bool,
     pub policy: SafePolicySummary,
     pub confirmation_provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

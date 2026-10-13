@@ -1995,19 +1995,19 @@ components:
           type: boolean
     SafeConfigSummary:
       type: object
-      required: [workspaceRoot, bubblewrap, policy, confirmationProvider]
+      required: [workspaceRoot, policy, confirmationProvider]
       additionalProperties: false
       properties:
         workspaceRoot:
           type: string
-        bubblewrap:
-          type: boolean
         policy:
           type: object
-          required: [enabled, command, path]
+          required: [enabled, bubblewrap, command, path]
           additionalProperties: false
           properties:
             enabled:
+              type: boolean
+            bubblewrap:
               type: boolean
             command:
               $ref: "#/components/schemas/SafePolicyRules"
