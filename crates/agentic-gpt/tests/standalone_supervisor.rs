@@ -97,8 +97,8 @@ fn run_smoke(
     }
 
     let config_path = root.join("config.json");
-    let workspace = root.join("workspace");
-    let key_path = root.join("tunnel-api-key");
+    let workspace = root.join("h/.agentic_gpt/workspace");
+    let key_path = root.join("h/tunnel-api-key");
     let fake_tunnel = root.join("fake-tunnel.sh");
     let response_path = root.join("worker-response.jsonl");
     let worker_stderr_path = root.join("worker.stderr");
@@ -130,18 +130,18 @@ fn run_smoke(
     config["mode"] = Value::String("standalone".to_string());
     config["profile"] = Value::String(profile.to_string());
     config["toolsets"]["enabled"] = if profile == "room" {
-        json!(["agent", "file", "mcp", "process", "skills", "tmux", "room"])
+        json!(["agent", "file", "mcp", "process", "skills", "room"])
     } else {
-        json!(["agent", "file", "mcp", "process", "skills", "tmux"])
+        json!(["agent", "file", "mcp", "process", "skills"])
     };
     config["agentId"] = Value::String(agent_id.clone());
-    config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
+    config["workspaceRoot"] = Value::String("~/.agentic_gpt/workspace".to_string());
     set_fixture_path_policy(&mut config, &[&workspace]);
     config["shell"]["initFile"] = Value::Null;
     config["policy"]["command"]["allow"] = json!(["/usr/bin/printf **"]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_local_integration",
-        "apiKey": format!("file:{}", key_path.display()),
+        "apiKey": "file:~/tunnel-api-key",
         "client": {
             "version": null,
             "cacheDir": root.join("cache").to_string_lossy(),
@@ -1115,6 +1115,14 @@ fn fixture_command(binary: &Path, root: &Path) -> Command {
     }
     command.env_remove("TMUX");
     command.env("TMUX_TMPDIR", root.join("r"));
+    command.env(
+        "DBUS_SESSION_BUS_ADDRESS",
+        format!("unix:path={}/no-session-bus", root.display()),
+    );
+    command.env(
+        "DBUS_SYSTEM_BUS_ADDRESS",
+        format!("unix:path={}/no-system-bus", root.display()),
+    );
     command
 }
 

@@ -16,3 +16,9 @@
 
 - 两项UI提交边界已修，config_setup::validation::tests 4项通过；独立reviewer复核路径/核心Hub/资源并发/UI最终快照无可行动问题。
 - 末轮格式与严格Clippy PASS；阶段2实现及文档准备提交，阶段3运行最终快照的workspace gates、live contract parity及CLI/TUI实际入口检查。真实Supervisor fixture改用~路径的回归留在阶段3提交。
+
+- 阶段2提交 b053088。阶段3最终快照 cargo check --workspace、cargo test --workspace（522 passed，0 failed，1既有ignored）、cargo fmt --all -- --check、strict Clippy workspace all-targets及 live contract parity 均PASS。
+- 实际PTY运行中文config init Local模式：连接页显示辅助Hub开关，启用后显示地址/transport/Agent ID/secret；取消并清理独立HOME。修正Local模式中“不连接Hub”的过时中英文提示，重新构建Agent/Hub成功。
+- 真实Supervisor smoke使用file:~/tunnel-api-key与~/.agentic_gpt/workspace，全套6项通过；fixture关闭未使用的tmux并显式隔离D-Bus。
+- 最终资源检查发现既有local_control/parity fixture删除状态目录后仍遗留8个tmux server；逐一核对PID/进程类型/本次TMUX_TMPDIR后停止并等待退出，相关临时根已删除。未触碰用户会话。
+- 完成边界：本地实现、文档、独立审查与隔离集成验证完成；未推送、部署或重启用户服务。合同脚本明确不验证生产tunnel executable transport，其既有补充恢复场景仍采用临时DB checkpoint。

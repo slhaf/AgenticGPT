@@ -400,11 +400,11 @@ fn basic_inspector_copy(
             t(language, "Local", "Local"),
             match language {
                 UiLanguage::En => &[
-                    "Serve MCP only on this machine without connecting to Tunnel or Hub.",
+                    "Serve MCP on this machine without a Tunnel; optionally connect to Hub for confirmations.",
                     "Use it when no remote entry point is needed.",
                 ],
                 UiLanguage::ZhCn => &[
-                    "不连接 Tunnel 或 Hub，只在本机提供 MCP。",
+                    "在本机提供 MCP，不接入 Tunnel；可选连接 Hub 进行确认。",
                     "适合不需要远程入口的本地使用。",
                 ],
             },
