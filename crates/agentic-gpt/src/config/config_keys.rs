@@ -1086,7 +1086,7 @@ fn set_http_mcp_allow_hosts(config: &mut Config, value: &str) -> Result<()> {
 }
 
 fn set_workspace_root(config: &mut Config, value: &str) -> Result<()> {
-    config.workspace_root = PathBuf::from(value);
+    config.workspace_root = crate::exec::expand_path(value)?;
     Ok(())
 }
 

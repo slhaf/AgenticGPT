@@ -1218,6 +1218,7 @@ impl Config {
         let mut effective = serde_json::to_value(defaults)?;
         merge_json_values(&mut effective, value);
         let mut config: Self = serde_json::from_value(effective)?;
+        config.workspace_root = crate::exec::expand_pathbuf(&config.workspace_root)?;
         if let Some(public_url) = config.http_mcp.public_url.take() {
             config.http_mcp.public_url = Some(normalize_http_mcp_public_url(&public_url)?);
         }
@@ -1700,6 +1701,7 @@ fn materialize_import_value(value: &Value) -> Result<Config> {
     let mut effective = serde_json::to_value(defaults)?;
     merge_json_values(&mut effective, value.clone());
     let mut config: Config = serde_json::from_value(effective)?;
+    config.workspace_root = crate::exec::expand_pathbuf(&config.workspace_root)?;
     config.room.skills = config.skills.clone();
     config.validate_policies()?;
     Ok(config)
@@ -1997,6 +1999,17 @@ pub(crate) fn validate_secret_reference(reference: &str) -> Result<()> {
     Err(anyhow!("tunnel_api_key_reference_plaintext_rejected"))
 }
 
+pub(crate) fn normalize_secret_reference(reference: &str) -> Result<String> {
+    validate_secret_reference(reference)?;
+    match reference.strip_prefix("file:") {
+        Some(path) => Ok(format!(
+            "file:{}",
+            crate::exec::expand_path(path)?.display()
+        )),
+        None => Ok(reference.to_string()),
+    }
+}
+
 pub(crate) fn validate_http_mcp_host(host: &str, port: u16) -> Result<()> {
     if host.is_empty()
         || host.trim() != host
@@ -2145,6 +2158,8 @@ pub(crate) fn resolve_secret_reference(reference: &str) -> Result<String> {
     let raw = if let Some(name) = reference.strip_prefix("env:") {
         std::env::var(name).map_err(|_| anyhow!("secret_reference_unavailable"))?
     } else if let Some(path) = reference.strip_prefix("file:") {
+        let path =
+            crate::exec::expand_path(path).map_err(|_| anyhow!("secret_reference_unavailable"))?;
         fs::read_to_string(path).map_err(|_| anyhow!("secret_reference_unavailable"))?
     } else {
         return Err(anyhow!("secret_reference_invalid"));

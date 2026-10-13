@@ -8,6 +8,11 @@ Agentic GPT 的 Standalone、Local Unix MCP 与连接 Hub 的 Agent 共用一份
 
 对应页面：[配置说明](configuration.zh-CN.md)。
 
+路径字段支持 `~` 和 `~/…` 的当前用户主目录展开，不支持 `~user` 或 shell 环境变量替换。
+初始化与加载配置时会展开 `workspaceRoot`；路径策略的 `readOnly`、`write`、`deny`，
+Shell 初始化文件、Room 根目录及 Tunnel client 路径在各自使用边界展开。
+`file:~/…` 密钥引用读取时同样展开；初始化生成密钥文件后，配置引用使用实际写入目标的绝对路径。
+
 磁盘文件是稀疏的 Config v2 投影，始终包含权威的顶层 `mode`（`standalone`、`hub` 或
 `local`）和 `profile`（`normal` 或 `room`）；省略的值会从有效默认值重建。`config show`
 显示完整的有效配置，而 Agentic 管理的写入会保持文件稀疏。

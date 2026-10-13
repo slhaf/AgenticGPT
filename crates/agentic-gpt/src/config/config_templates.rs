@@ -259,6 +259,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     if let Some(workspace_root) = workspace_root {
         config.workspace_root = workspace_root;
     }
+    config.workspace_root = crate::exec::expand_pathbuf(&config.workspace_root)?;
     if !has_imported_base {
         config.policy.command = seed_command_policy(profile);
         config.policy.path = seed_path_policy(&config.workspace_root);
@@ -302,7 +303,10 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
             if tunnel_id == STANDALONE_TUNNEL_ID_PLACEHOLDER {
                 push_pending(&mut pending, PendingAction::ReplaceTunnelId);
             }
-            let api_key = non_empty_or_placeholder(tunnel_api_key, &default_secret_reference);
+            let api_key = crate::config::normalize_secret_reference(&non_empty_or_placeholder(
+                tunnel_api_key,
+                &default_secret_reference,
+            ))?;
             if api_key == default_secret_reference {
                 push_pending(&mut pending, PendingAction::ProvisionTunnelSecret);
             }

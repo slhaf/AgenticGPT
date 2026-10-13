@@ -108,6 +108,8 @@ fn resolve_secret(reference: &str) -> Result<String> {
     let value = if let Some(name) = reference.strip_prefix("env:") {
         std::env::var(name).map_err(|_| anyhow!("tunnel_api_key_unavailable"))?
     } else if let Some(path) = reference.strip_prefix("file:") {
+        let path =
+            crate::exec::expand_path(path).map_err(|_| anyhow!("tunnel_api_key_unavailable"))?;
         fs::read_to_string(path)
             .map_err(|_| anyhow!("tunnel_api_key_unavailable"))?
             .trim_end_matches(['\r', '\n'])

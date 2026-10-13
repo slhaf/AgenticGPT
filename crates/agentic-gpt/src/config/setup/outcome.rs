@@ -292,7 +292,7 @@ pub(crate) fn commit_wizard_outcome(
         return Err(anyhow!("config_path_symlink_rejected"));
     }
     let WizardOutcome {
-        build,
+        mut build,
         secret_write,
         summary,
     } = outcome;
@@ -315,6 +315,9 @@ pub(crate) fn commit_wizard_outcome(
     let (target, parent, prior) = validate_and_capture_secret_target(&plan.path)?;
     if paths_refer_to_same_file(config_path, &target)? {
         return Err(anyhow!("config_init_secret_path_invalid"));
+    }
+    if let Some(tunnel) = build.config.tunnel.as_mut() {
+        tunnel.api_key = format!("file:{}", target.display());
     }
     fs::create_dir_all(&parent).map_err(|_| anyhow!("config_init_secret_parent_invalid"))?;
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
@@ -621,6 +624,94 @@ mod tests {
         session.standalone_mut().provision_secret_now = true;
         session.standalone_mut().secret_value = Some(SecretValue::new(value));
         session.into_wizard_outcome().unwrap()
+    }
+
+    #[test]
+    fn generated_home_paths_are_consumable_after_commit() {
+        const CHILD_ROOT: &str = "AGENTIC_SETUP_PATH_TEST_ROOT";
+        let Ok(root) = std::env::var(CHILD_ROOT) else {
+            struct Cleanup(PathBuf);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    let _ = fs::remove_dir_all(&self.0);
+                }
+            }
+            let root = std::env::temp_dir().join(format!("ap-{}", uuid::Uuid::new_v4().simple()));
+            fs::create_dir_all(&root).unwrap();
+            let _cleanup = Cleanup(root.clone());
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    std::thread::current().name().unwrap(),
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(CHILD_ROOT, &root)
+                .env("HOME", &root)
+                .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+                .env("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/nonexistent");
+            for (key, directory) in [
+                ("XDG_CONFIG_HOME", "config"),
+                ("XDG_DATA_HOME", "data"),
+                ("XDG_CACHE_HOME", "cache"),
+                ("XDG_RUNTIME_DIR", "runtime"),
+                ("TMPDIR", "tmp"),
+            ] {
+                let path = root.join(directory);
+                fs::create_dir_all(&path).unwrap();
+                command.env(key, path);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "isolated path regression failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let root = PathBuf::from(root);
+        assert_eq!(
+            crate::utils::agentic_home().unwrap(),
+            root.join(".agentic_gpt")
+        );
+        let config_path = root.join("config.json");
+        let mut session = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                tunnel_id: Some("tunnel-test".to_string()),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            config_path.clone(),
+        );
+        session.standalone_mut().provision_secret_now = true;
+        session.standalone_mut().secret_value = Some(SecretValue::new("path-regression-secret"));
+        let workspace = session.optional_draft(OptionalSection::Workspace);
+        session.save_optional_section_for_review(workspace).unwrap();
+        let outcome = session.into_wizard_outcome().unwrap();
+        commit_wizard_outcome(&config_path, outcome).unwrap();
+        let config = crate::config::Config::load(&config_path).unwrap();
+        let reference = &config.tunnel.as_ref().unwrap().api_key;
+        assert!(
+            crate::config::resolve_secret_reference(reference).unwrap() == "path-regression-secret"
+        );
+        config.ensure_workspace().unwrap();
+        assert!(root.join(".agentic_gpt/workspace").is_dir());
+        assert_eq!(config.workspace_root, root.join(".agentic_gpt/workspace"));
+
+        // Existing files with home-relative references must remain usable too.
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        legacy["workspaceRoot"] = serde_json::json!("~/.agentic_gpt/workspace");
+        legacy["tunnel"]["apiKey"] =
+            serde_json::json!("file:~/.agentic_gpt/secrets/tunnel-api-key");
+        fs::write(&config_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let legacy = crate::config::Config::load(&config_path).unwrap();
+        assert_eq!(legacy.workspace_root, config.workspace_root);
+        assert!(
+            crate::config::resolve_secret_reference(&legacy.tunnel.unwrap().api_key).unwrap()
+                == "path-regression-secret"
+        );
     }
     fn staged_recovery_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
         let root = fresh_root(label);
