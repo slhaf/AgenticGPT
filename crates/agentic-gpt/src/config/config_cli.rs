@@ -47,6 +47,8 @@ pub(crate) struct ConfigInitArgs {
     pub(crate) tunnel_api_key: Option<String>,
     #[arg(long)]
     pub(crate) hub_url: Option<String>,
+    #[arg(long)]
+    pub(crate) hub_enabled: Option<bool>,
     #[arg(long, value_parser = ["websocket", "sse"])]
     pub(crate) hub_transport: Option<String>,
     #[arg(long)]
@@ -88,6 +90,7 @@ pub(crate) fn init_non_interactive(
     input.tunnel_id = args.tunnel_id.clone();
     input.tunnel_api_key = args.tunnel_api_key.clone();
     input.hub_url = args.hub_url.clone();
+    input.hub_enabled = args.hub_enabled;
     input.hub_transport = args.hub_transport.clone();
     input.agent_id = args.agent_id.clone();
     input.agent_secret = args
@@ -123,6 +126,7 @@ pub(crate) fn setup_seed_from_args(args: &ConfigInitArgs) -> SetupSeed {
         tunnel_id: args.tunnel_id.clone(),
         tunnel_api_key: args.tunnel_api_key.clone(),
         hub_url: args.hub_url.clone(),
+        hub_enabled: args.hub_enabled,
         hub_transport: args.hub_transport.clone(),
         agent_id: args.agent_id.clone(),
         agent_secret: args

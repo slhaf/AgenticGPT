@@ -4662,7 +4662,7 @@ mod tests {
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state: private_state.clone(),
             process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
-            browser_runtime: None,
+            browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
             started_at: Utc::now(),
             boot_generation: "testboot0001".to_string(),

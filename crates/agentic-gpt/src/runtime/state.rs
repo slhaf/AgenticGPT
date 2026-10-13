@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak};
 
 use agentic_gpt_protocol::{AgentMessage, AgentRole};
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, OnceCell, RwLock};
 
 use crate::{browser_manager::BrowserRuntimeManager, browser_runtime::BrowserRuntimeDescriptor};
 use crate::{config::Config, confirmation, process, skills};
@@ -94,10 +94,18 @@ impl RuntimeModel {
     }
 
     pub(crate) fn local(profile: CapabilityProfile) -> Self {
+        Self::local_with_hub(profile, false)
+    }
+
+    pub(crate) fn local_with_hub(profile: CapabilityProfile, hub_enabled: bool) -> Self {
         Self {
             transport: Transport::LocalUnix,
             profile,
-            hub_mode: HubMode::Disabled,
+            hub_mode: if hub_enabled {
+                HubMode::ReportingOnly
+            } else {
+                HubMode::Disabled
+            },
         }
     }
 
@@ -174,7 +182,7 @@ pub(crate) struct AppState {
     pub(crate) event_store: Arc<crate::event_store::EventStore>,
     #[allow(dead_code)]
     pub(crate) process_history: std::sync::Arc<crate::process_history::ProcessHistoryStore>,
-    pub(crate) browser_runtime: Option<Arc<BrowserRuntimeContext>>,
+    pub(crate) browser_runtime: Arc<OnceCell<Option<Arc<BrowserRuntimeContext>>>>,
     pub(crate) runtime: RuntimeModel,
     pub(crate) started_at: DateTime<Utc>,
     pub(crate) boot_generation: String,

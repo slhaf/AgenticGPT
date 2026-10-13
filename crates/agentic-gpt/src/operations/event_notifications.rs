@@ -500,7 +500,7 @@ mod tests {
             private_state: private_state.clone(),
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
-            browser_runtime: None,
+            browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),

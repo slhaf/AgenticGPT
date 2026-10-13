@@ -249,7 +249,7 @@ async fn managed_test_state(max_active_processes: usize) -> (AppState, PathBuf) 
         private_state: private_state.clone(),
         event_store,
         process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
-        browser_runtime: None,
+        browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
         runtime: crate::state::RuntimeModel::local(crate::state::CapabilityProfile::Normal),
         started_at: chrono::Utc::now(),
         boot_generation: "mcpboot00001".to_string(),

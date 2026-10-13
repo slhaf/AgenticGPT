@@ -78,6 +78,7 @@ pub(crate) struct InitInput {
     pub(crate) tunnel_id: Option<String>,
     pub(crate) tunnel_api_key: Option<String>,
     pub(crate) hub_url: Option<String>,
+    pub(crate) hub_enabled: Option<bool>,
     pub(crate) hub_transport: Option<String>,
     pub(crate) agent_id: Option<String>,
     pub(crate) agent_secret: Option<SecretValue>,
@@ -113,6 +114,7 @@ impl InitInput {
             tunnel_id: None,
             tunnel_api_key: None,
             hub_url: None,
+            hub_enabled: None,
             hub_transport: None,
             agent_id: None,
             agent_secret: None,
@@ -184,6 +186,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         http_mcp_allow_hosts,
         tunnel_api_key,
         hub_url,
+        hub_enabled,
         hub_transport,
         agent_id,
         agent_secret,
@@ -204,6 +207,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     } = input;
 
     let has_imported_base = imported_base.is_some();
+    let explicit_confirmation = confirmation_provider.is_some();
     let mut config = imported_base.unwrap_or(Config::default_config()?);
     if let Some(events) = events {
         config.events = events;
@@ -294,6 +298,20 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     }
 
     let mut pending = Vec::new();
+    if let Some(enabled) = hub_enabled {
+        config.hub.enabled = enabled;
+    }
+    if mode != RuntimeMode::Hub {
+        if let Some(url) = hub_url.as_ref() {
+            config.hub.url = url.clone();
+        }
+        if let Some(transport) = hub_transport.as_ref() {
+            config.hub.transport = transport.clone();
+        }
+        if let Some(secret) = agent_secret.as_ref() {
+            config.hub.agent_secret = secret.expose().to_string();
+        }
+    }
     match mode {
         RuntimeMode::Standalone => {
             let default_secret_path = agentic_home()?.join("secrets").join("tunnel-api-key");
@@ -351,6 +369,17 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
             }
         }
         RuntimeMode::Local => config.validate_local()?,
+    }
+
+    if !has_imported_base
+        && !explicit_confirmation
+        && mode != RuntimeMode::Hub
+        && !config.auxiliary_hub_enabled()
+    {
+        config
+            .confirmation_provider
+            .channels
+            .retain(|channel| *channel != crate::config::ConfirmationChannel::Ntfy);
     }
 
     Ok(InitBuild {

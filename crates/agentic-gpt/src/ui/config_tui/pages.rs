@@ -57,6 +57,10 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
             "Confirmation channels must be an ordered list of supported channels without duplicates.",
             "确认通道必须是受支持且不重复的有序列表。",
         ),
+        "config_init_hub_confirmation_requires_connection" => (
+            "Enable the auxiliary Hub connection and configure its credentials to use ntfy confirmations.",
+            "使用 ntfy 确认前，请启用 Hub 辅助连接并填写连接凭据。",
+        ),
         "config_init_reporting_detail_invalid" => {
             ("Reporting detail is invalid.", "报告详细程度无效。")
         }
@@ -525,7 +529,9 @@ fn render_connection(
                 let label = connection_label(field, None, language);
                 if matches!(
                     field,
-                    SetupField::ProvisionTunnelSecret | SetupField::HttpMcpEnabled
+                    SetupField::ProvisionTunnelSecret
+                        | SetupField::HttpMcpEnabled
+                        | SetupField::HubEnabled
                 ) {
                     if let Some(row) = next_surface_row(left, &mut cursor) {
                         frame.render_widget(
@@ -657,7 +663,11 @@ fn render_connection_footer(
     } else if connection_secret_source_for_focus(session, state.focus).is_some()
         || matches!(
             field,
-            Some(SetupField::ProvisionTunnelSecret | SetupField::HttpMcpEnabled)
+            Some(
+                SetupField::ProvisionTunnelSecret
+                    | SetupField::HttpMcpEnabled
+                    | SetupField::HubEnabled
+            )
         )
     {
         t(language, "toggle", "切换")
@@ -946,6 +956,16 @@ fn connection_inspector_body(
                 "没有可用默认值，必须与 Hub 注册一致；它会以字符串保存在配置文件中。",
             ],
         },
+        Some(SetupField::HubEnabled) => match language {
+            UiLanguage::En => &[
+                "Connect to the Hub for ntfy confirmations. Standalone reporting is controlled separately.",
+                "The connection still sends Hello and heartbeats, but never accepts execution commands.",
+            ],
+            UiLanguage::ZhCn => &[
+                "连接 Hub 以使用 ntfy 确认；Standalone 上报由独立设置控制。",
+                "连接期间仍会发送 Hello 和心跳，但不会接收执行命令。",
+            ],
+        },
         _ => match language {
             UiLanguage::En => &[
                 "Continue with the current connection settings.",
@@ -1002,6 +1022,10 @@ pub(super) fn connection_focus_items(session: &SetupSession) -> Vec<ConnectionFo
                 ConnectionFocusItem::Field(SetupField::HttpMcpBearerToken),
                 ConnectionFocusItem::Field(SetupField::HttpMcpAllowHosts),
             ]);
+            items.push(ConnectionFocusItem::Field(SetupField::HubEnabled));
+            if session.auxiliary_hub_connection_enabled() {
+                append_hub_connection_items(&mut items);
+            }
             items
         }
         RuntimeMode::Hub => vec![
@@ -1010,8 +1034,23 @@ pub(super) fn connection_focus_items(session: &SetupSession) -> Vec<ConnectionFo
             ConnectionFocusItem::Field(SetupField::AgentId),
             ConnectionFocusItem::Field(SetupField::AgentSecret),
         ],
-        RuntimeMode::Local => Vec::new(),
+        RuntimeMode::Local => {
+            let mut items = vec![ConnectionFocusItem::Field(SetupField::HubEnabled)];
+            if session.auxiliary_hub_connection_enabled() {
+                append_hub_connection_items(&mut items);
+            }
+            items
+        }
     }
+}
+
+fn append_hub_connection_items(items: &mut Vec<ConnectionFocusItem>) {
+    items.extend([
+        ConnectionFocusItem::Field(SetupField::HubUrl),
+        ConnectionFocusItem::Field(SetupField::HubTransport),
+        ConnectionFocusItem::Field(SetupField::AgentId),
+        ConnectionFocusItem::Field(SetupField::AgentSecret),
+    ]);
 }
 
 pub(super) fn connection_focus_len(session: &SetupSession) -> usize {
@@ -1069,6 +1108,7 @@ fn connection_label(field: SetupField, _value: Option<&str>, language: UiLanguag
             t(language, "HTTP MCP allowHosts", "HTTP MCP allowHosts").to_string()
         }
         SetupField::HubUrl => t(language, "Hub URL", "Hub 地址").to_string(),
+        SetupField::HubEnabled => t(language, "Hub connection", "Hub 辅助连接").to_string(),
         SetupField::HubTransport => t(language, "Transport", "传输方式").to_string(),
         SetupField::AgentId => t(language, "Agent ID", "代理 ID").to_string(),
         SetupField::AgentSecret => t(language, "Agent Secret", "代理密钥").to_string(),
@@ -1099,6 +1139,7 @@ pub(super) fn connection_value(session: &SetupSession, field: SetupField) -> Opt
                 .unwrap_or_default(),
         ),
         SetupField::HubUrl => Some(session.hub().hub_url.clone()),
+        SetupField::HubEnabled => Some(session.hub().enabled.to_string()),
         SetupField::HubTransport => Some(session.hub().hub_transport.clone()),
         SetupField::AgentId => Some(session.hub().agent_id.clone()),
         SetupField::AgentSecret => Some(
@@ -4685,6 +4726,7 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "tunnel_secret_value" => t(language, "Secret value", "密钥值"),
         "http_mcp_public_url" => t(language, "HTTP MCP public URL", "HTTP MCP 公共 URL"),
         "hub_url" => t(language, "Hub URL", "Hub 地址"),
+        "hub_enabled" => t(language, "Auxiliary Hub connection", "Hub 辅助连接"),
         "hub_transport" => t(language, "Hub transport", "Hub 传输方式"),
         "agent_id" => t(language, "Agent ID", "代理 ID"),
         "agent_secret" => t(language, "Agent secret", "代理密钥"),

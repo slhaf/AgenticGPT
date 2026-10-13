@@ -26,11 +26,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             state.reporting_sender.lock().await.is_some()
         },);
     let (freedesktop_available, freedesktop_actions) = freedesktop_notification_support();
-    let ntfy_available = match state.runtime.transport {
-        Transport::Hub => hub_sender,
-        Transport::TunnelStdio => reporting_sender,
-        Transport::LocalUnix => false,
-    };
+    let ntfy_available = hub_sender;
     let local_mcp_enabled = matches!(
         state.runtime.transport,
         Transport::TunnelStdio | Transport::LocalUnix
@@ -141,9 +137,17 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "providers": providers,
         },
         "connections": {
+            "hubAuxiliary": {
+                "enabled": config.auxiliary_hub_enabled(),
+                "status": if config.auxiliary_hub_enabled() {
+                    if hub_sender { "connected" } else { "disconnected" }
+                } else { "disabled" },
+            },
             "hubReporting": {
-                "enabled": state.runtime.hub_mode != HubMode::Disabled,
-                "status": reporting_status(state.runtime, hub_sender, reporting_sender),
+                "enabled": state.runtime.transport == Transport::Hub || config.hub_reporting_enabled(),
+                "status": if state.runtime.transport == Transport::Hub || config.hub_reporting_enabled() {
+                    reporting_status(state.runtime, hub_sender, reporting_sender)
+                } else { "disabled" },
             },
             "localMcp": local_mcp,
         },
@@ -384,7 +388,7 @@ mod tests {
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,
             process_history,
-            browser_runtime: None,
+            browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             runtime: crate::state::RuntimeModel::tunnel(profile, false),
             started_at: Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),

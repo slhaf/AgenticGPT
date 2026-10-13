@@ -46,9 +46,7 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
     ));
     initial.validate_hub()?;
     initial.ensure_workspace()?;
-    if let Err(error) = tmux::ensure_default_session(&initial.workspace_root).await {
-        log_warn(format!("default tmux session unavailable: {error}"));
-    }
+    ensure_tmux_session_if_enabled(&initial).await;
     log_info(format!(
         "config loaded; agentId={}; hub.url={}; workspaceRoot={}; sandbox={}; {}",
         initial.agent_id,
@@ -98,17 +96,13 @@ pub(crate) async fn run_stdio_worker(
         config.policy.path.read_only.len(),
         config.policy.path.deny.len(),
     ));
-    let reporting_enabled = config
-        .tunnel
-        .as_ref()
-        .map(|tunnel| tunnel.hub_reporting.enabled)
-        .unwrap_or(false);
+    let hub_enabled = config.auxiliary_hub_enabled();
     let agent_id = config.agent_id.clone();
     let browser_runtime = resolve_browser_runtime(&config).await;
     let state = build_app_state(
         config_path,
         config,
-        RuntimeModel::tunnel(profile, reporting_enabled),
+        RuntimeModel::tunnel(profile, hub_enabled),
         supervised,
         browser_runtime,
     )?;
@@ -126,7 +120,7 @@ pub(crate) async fn run_stdio_worker(
         supervised,
         Some(http_updates),
     ));
-    if reporting_enabled {
+    if hub_enabled {
         tokio::spawn(hub::connect_loop(state.clone()));
     }
     let mut local_task = tokio::spawn(listener.serve(state.clone()));
@@ -198,6 +192,10 @@ pub(crate) fn build_app_state_with_private_state(
         log_warn(format!("process history recovery failed: {error}"));
     }
     let skill_installs_root = private_state.skill_installs.clone();
+    let browser_runtime_cell = Arc::new(tokio::sync::OnceCell::new());
+    if browser_runtime.is_some() || config.toolsets.is_enabled(config::ToolNamespace::Browser) {
+        let _ = browser_runtime_cell.set(browser_runtime);
+    }
     Ok(AppState {
         config_path,
         transport_agent_id: config.agent_id.clone(),
@@ -205,7 +203,7 @@ pub(crate) fn build_app_state_with_private_state(
         private_state,
         event_store,
         process_history,
-        browser_runtime,
+        browser_runtime: browser_runtime_cell,
         runtime,
         started_at: chrono::Utc::now(),
         boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -242,15 +240,14 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
     ));
     config.validate_local()?;
     config.ensure_workspace()?;
-    if let Err(error) = tmux::ensure_default_session(&config.workspace_root).await {
-        log_warn(format!("default tmux session unavailable: {error}"));
-    }
+    ensure_tmux_session_if_enabled(&config).await;
     let agent_id = config.agent_id.clone();
+    let hub_enabled = config.auxiliary_hub_enabled();
     let browser_runtime = resolve_browser_runtime(&config).await;
     let state = build_app_state(
         config_path,
         config,
-        RuntimeModel::local(profile),
+        RuntimeModel::local_with_hub(profile, hub_enabled),
         false,
         browser_runtime,
     )?;
@@ -262,18 +259,35 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         "local MCP ingress ready; transport=unix; path={}",
         listener.path().display()
     ));
+    let hub_task = hub_enabled.then(|| tokio::spawn(hub::connect_loop(state.clone())));
     let mut local_task = tokio::spawn(listener.serve(state));
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut local_task => match result {
             Ok(result) => result,
             Err(_) => Err(anyhow!("local_mcp_listener_task_failed")),
         },
         signal = wait_for_local_shutdown_signal() => {
-            signal?;
             local_task.abort();
             let _ = local_task.await;
-            Ok(())
+            signal
         }
+    };
+    if let Some(task) = hub_task {
+        task.abort();
+        let _ = task.await;
+    }
+    result
+}
+
+async fn ensure_tmux_session_if_enabled(config: &Config) {
+    if !config
+        .toolsets
+        .is_enabled(crate::config::ToolNamespace::Tmux)
+    {
+        return;
+    }
+    if let Err(error) = tmux::ensure_default_session(&config.workspace_root).await {
+        log_warn(format!("default tmux session unavailable: {error}"));
     }
 }
 
@@ -360,12 +374,28 @@ pub(crate) async fn reload_live_config_once(
         crate::state::Transport::Hub => candidate.validate_mcp_servers()?,
     }
     let restart_required_fields = config::restart_required_fields(&live, &candidate);
+    let tmux_was_enabled = live.toolsets.is_enabled(config::ToolNamespace::Tmux);
+    let tmux_is_enabled = candidate.toolsets.is_enabled(config::ToolNamespace::Tmux);
+    let skills_were_enabled = live.toolsets.is_enabled(config::ToolNamespace::Skills);
+    let skills_are_enabled = candidate.toolsets.is_enabled(config::ToolNamespace::Skills);
     let live_room_enabled = live.toolsets.is_enabled(config::ToolNamespace::Room);
     let candidate_room_enabled = candidate.toolsets.is_enabled(config::ToolNamespace::Room);
     if candidate_room_enabled && !live_room_enabled {
         room_repository::ensure_repository(&live)?;
     }
+    let workspace_root = live.workspace_root.clone();
     let resolved = apply_live_config_subset(&mut live, candidate);
+    drop(live);
+    if !skills_were_enabled && skills_are_enabled {
+        state.skill_installs.resume_queued(state).await?;
+    }
+    if !tmux_was_enabled && tmux_is_enabled {
+        if let Err(error) = tmux::ensure_default_session(&workspace_root).await {
+            log_warn(format!(
+                "default tmux session unavailable after toolset enable: {error}"
+            ));
+        }
+    }
     if !restart_required_fields.is_empty() {
         log_warn(format!(
             "config changes require restart; fields={}",

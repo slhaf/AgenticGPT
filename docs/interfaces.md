@@ -38,7 +38,13 @@ HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上
 
 Normal 并不等于 Room：只有显式启用 `room` 命名空间时，Normal 运行时才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
 
-重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`、`events`），且不会重建启动时派生的资源。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已接纳操作保留准入快照。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
+重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`、`events`），且不会重建已有的启动资源。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已接纳操作保留准入快照。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
+
+Tmux 与 Browser 工具集关闭时，启动不创建默认 tmux 会话，也不发现或准备 Browser 运行时。
+热启用 Tmux 时准备默认会话；热启用 Browser 后首次已准入调用初始化运行时。
+关闭 Skills 时保留重启恢复记录与提交日志协调，但不重新调度排队安装；热启用后幂等恢复。
+基础 Event API、历史状态协调与显式 CLI 管理入口继续保留。`agent.info.connections.hubAuxiliary`
+报告 Standalone/Local 辅助连接的启用与连接状态，`hubReporting` 单独报告运行上报状态。
 
 `agentic-gpt local` 是 Unix MCP 客户端，使用常规 MCP 操作准入门并记录 `local:` 来源。
 

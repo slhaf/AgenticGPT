@@ -11,7 +11,7 @@ Secure MCP Tunnel -> tunnel-client -> agentic-gpt worker
                                       |-> 仅所有者可访问的 Unix MCP 入口
                                       \-> 可选 HTTP MCP 入口：http://<host>:<port>/mcp
                                           （由 worker 持有，由 httpMcp 启用）
-                                      \-> 仅用于报告的可选 Hub 连接
+                                      \-> 用于确认与可选上报的辅助 Hub 连接
 
 本地集成模式：
 本地 rmcp CLI/client -> 仅所有者可访问的 Unix socket -> agentic-gpt worker
@@ -64,10 +64,10 @@ Local 模式下 `httpMcp` 不会添加 TCP listener。
 
 | 命令 | 命令传输 | 能力 profile | Hub 连接 |
 | --- | --- | --- | --- |
-| `agentic-gpt run` (`mode=standalone`, `profile=normal`) | Tunnel stdio + 本地 Unix MCP + 可选 HTTP MCP | Normal | 默认禁用；启用时仅用于报告 |
-| `agentic-gpt run` (`mode=standalone`, `profile=room`) | Tunnel stdio + 本地 Unix MCP + 可选 HTTP MCP | Room | 默认禁用；启用时仅用于报告 |
-| `agentic-gpt run` (`mode=local`, `profile=normal`) | 本地 Unix MCP | Normal | 禁用 |
-| `agentic-gpt run` (`mode=local`, `profile=room`) | 本地 Unix MCP | Room | 禁用 |
+| `agentic-gpt run` (`mode=standalone`, `profile=normal`) | Tunnel stdio + 本地 Unix MCP + 可选 HTTP MCP | Normal | 默认禁用；可选辅助确认/上报，不接收执行命令 |
+| `agentic-gpt run` (`mode=standalone`, `profile=room`) | Tunnel stdio + 本地 Unix MCP + 可选 HTTP MCP | Room | 默认禁用；可选辅助确认/上报，不接收执行命令 |
+| `agentic-gpt run` (`mode=local`, `profile=normal`) | 本地 Unix MCP | Normal | 默认禁用；可选辅助确认 |
+| `agentic-gpt run` (`mode=local`, `profile=room`) | 本地 Unix MCP | Room | 默认禁用；可选辅助确认 |
 | `agentic-gpt run` (`mode=hub`, `profile=normal`) | Hub | Normal | 可执行命令 |
 | `agentic-gpt run` (`mode=hub`, `profile=room`) | Hub | Room | 可执行命令 |
 
@@ -456,6 +456,7 @@ agentic-gpt config set tunnel.client.autoDownload true
 - `tunnel.client.version`, `tunnel.client.cacheDir`,
   `tunnel.client.autoDownload`, `tunnel.client.executable`,
   `tunnel.client.downloadUrl`, `tunnel.client.sha256`.
+- `hub.enabled`, `hub.url`, `hub.transport`, `hub.agentSecret`：辅助连接设置，变更需要重启。
 - `tunnel.hubReporting.enabled`, `tunnel.hubReporting.detail`.
 - `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.publicUrl`,
   `httpMcp.bearerToken`, `httpMcp.allowHosts`.
@@ -485,9 +486,17 @@ Tunnel 身份、secret reference、client 来源/版本/hash/cache、Browser 配
 托管资源身份包含版本、平台和 archive digest，因此自定义与官方 artifact 不会冲突。默认 cache 位于
 `~/.agentic_gpt/cache/tunnel-client`。
 
-## 可选 Hub 报告
+## 辅助 Hub 连接与可选上报
 
-Reporting 默认禁用，且与 Tunnel 命令执行相互独立。只有当本地配置已有 Agent 连接所需的 Hub 身份
+Standalone 和 Local 可通过 `hub.enabled=true` 显式开启辅助 Hub 连接，用于 `ntfy` 确认。
+`config init` 的 Connection 页面可以填写辅助连接的开关、URL、传输、Agent 身份和密钥。
+辅助连接标记为 `reporting-only`，不会接收远程执行命令；关闭运行上报时仍发送协议所需的
+Hello（含安全配置摘要）、心跳和确认请求。`agent.info.connections.hubAuxiliary` 报告其状态。
+Local 不提供运行上报，也不增加 HTTP listener。
+
+Standalone 的运行上报由 `tunnel.hubReporting.enabled` 独立控制，默认关闭。
+兼容已有配置：旧上报开关为 true 时仍会建立辅助连接，不要求再设置 `hub.enabled`。
+Reporting 与 Tunnel 命令执行相互独立。只有当本地配置已有 Agent 连接所需的 Hub 身份
 （`hub.url`、`hub.transport`、`agentId` 和 `hub.agentSecret`）时，才启用 reporting：
 
 ```bash

@@ -209,6 +209,7 @@ impl ReviewItem {
             Some(
                 SetupField::ProvisionTunnelSecret
                 | SetupField::HttpMcpEnabled
+                | SetupField::HubEnabled
                 | SetupField::Bubblewrap
                 | SetupField::TunnelAutoDownload
                 | SetupField::HubReportingEnabled
@@ -269,9 +270,7 @@ pub(crate) struct ReviewModel {
 impl ReviewModel {
     pub(crate) fn groups(&self) -> Vec<&ReviewGroup> {
         let mut groups = vec![&self.basic];
-        if self.mode != RuntimeMode::Local {
-            groups.push(&self.connection);
-        }
+        groups.push(&self.connection);
         groups.extend(
             self.optional_sections
                 .iter()
@@ -484,47 +483,72 @@ fn connection_group(session: &SetupSession) -> ReviewGroup {
                     ReviewEditorKind::Text,
                 ),
             ]);
+            items.push(ReviewItem::field(
+                SetupField::HubEnabled,
+                "hub_enabled",
+                session.hub().enabled.to_string(),
+                ReviewEditorKind::Choice,
+            ));
+            if session.auxiliary_hub_connection_enabled() {
+                append_hub_review_items(&mut items, session);
+            }
         }
         RuntimeMode::Hub => {
-            let draft = session.hub();
-            items.extend([
-                ReviewItem::field(
-                    SetupField::HubUrl,
-                    "hub_url",
-                    draft.hub_url.clone(),
-                    ReviewEditorKind::Text,
-                ),
-                ReviewItem::field(
-                    SetupField::HubTransport,
-                    "hub_transport",
-                    draft.hub_transport.clone(),
-                    ReviewEditorKind::Choice,
-                ),
-                ReviewItem::field(
-                    SetupField::AgentId,
-                    "agent_id",
-                    draft.agent_id.clone(),
-                    ReviewEditorKind::Text,
-                ),
-                ReviewItem::field(
-                    SetupField::AgentSecret,
-                    "agent_secret",
-                    if draft.agent_secret.is_some() {
-                        "[REDACTED]"
-                    } else {
-                        ""
-                    },
-                    ReviewEditorKind::Secret,
-                ),
-            ]);
+            append_hub_review_items(&mut items, session);
         }
-        RuntimeMode::Local => items.push(ReviewItem::read_only(None, "connection", "none")),
+        RuntimeMode::Local => {
+            items.push(ReviewItem::field(
+                SetupField::HubEnabled,
+                "hub_enabled",
+                session.hub().enabled.to_string(),
+                ReviewEditorKind::Choice,
+            ));
+            if session.hub().enabled {
+                append_hub_review_items(&mut items, session);
+            } else {
+                items.push(ReviewItem::read_only(None, "connection", "none"));
+            }
+        }
     }
     ReviewGroup {
         target: ReviewTarget::Connection,
         status: SectionStatus::Configured,
         items,
     }
+}
+
+fn append_hub_review_items(items: &mut Vec<ReviewItem>, session: &SetupSession) {
+    let draft = session.hub();
+    items.extend([
+        ReviewItem::field(
+            SetupField::HubUrl,
+            "hub_url",
+            draft.hub_url.clone(),
+            ReviewEditorKind::Text,
+        ),
+        ReviewItem::field(
+            SetupField::HubTransport,
+            "hub_transport",
+            draft.hub_transport.clone(),
+            ReviewEditorKind::Choice,
+        ),
+        ReviewItem::field(
+            SetupField::AgentId,
+            "agent_id",
+            draft.agent_id.clone(),
+            ReviewEditorKind::Text,
+        ),
+        ReviewItem::field(
+            SetupField::AgentSecret,
+            "agent_secret",
+            if draft.agent_secret.is_some() {
+                "[REDACTED]"
+            } else {
+                ""
+            },
+            ReviewEditorKind::Secret,
+        ),
+    ]);
 }
 
 fn tunnel_secret_reference(draft: &super::model::StandaloneDraft) -> String {

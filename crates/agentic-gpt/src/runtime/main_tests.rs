@@ -3,7 +3,7 @@ use super::*;
 use crate::browser_discovery::{resolve_browser_runtime_with_sources, BrowserRuntimeSources};
 use crate::cli::{read_local_arguments, MAX_LOCAL_ARGUMENT_BYTES};
 use crate::config::mcp_servers::McpServerConfig;
-use crate::config::{Config, RuntimeMode};
+use crate::config::{Config, RuntimeMode, ToolNamespace};
 use crate::config::{PathPolicyConfig, TunnelConfig};
 use crate::startup::{build_app_state_with_private_state, reload_live_config_once};
 use crate::state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel};
@@ -50,7 +50,11 @@ fn invalid_explicit_runtime_keeps_app_startup_fail_open() {
         crate::private_state::PrivateStatePaths::for_test(root.join("private-state")),
     )
     .unwrap();
-    assert!(state.browser_runtime.is_none());
+    assert!(state
+        .browser_runtime
+        .get()
+        .and_then(Option::as_ref)
+        .is_none());
     drop(state);
     let _ = fs::remove_dir_all(root);
 }
@@ -262,6 +266,33 @@ async fn unavailable_sources_fail_open_without_host_io() {
 }
 
 #[tokio::test]
+async fn disabled_browser_toolset_skips_discovery_provisioning_and_manager_creation() {
+    let root = unique_temp_dir("browser-toolset-disabled");
+    let codex_home = root.join("codex-home");
+    let provision_calls = Arc::new(AtomicUsize::new(0));
+    let desktop_calls = Arc::new(AtomicUsize::new(0));
+    let sources = injected_browser_sources(
+        root.clone(),
+        codex_home.clone(),
+        None,
+        Some(test_browser_descriptor("disabled", &codex_home, None)),
+        Some(test_browser_descriptor("desktop", &codex_home, None)),
+        provision_calls.clone(),
+        desktop_calls.clone(),
+    );
+    let mut config = managed_config(true);
+    config.toolsets.disable(ToolNamespace::Browser);
+
+    let context = resolve_browser_runtime_with_sources(&config, &sources).await;
+
+    assert!(context.is_none());
+    assert!(!codex_home.exists());
+    assert_eq!(provision_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(desktop_calls.load(Ordering::SeqCst), 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn builder_accepts_pre_resolved_browser_context_without_discovery() {
     let root = unique_temp_dir("browser-builder-resolved");
     let mut config = Config::default_config().unwrap();
@@ -282,7 +313,8 @@ async fn builder_accepts_pre_resolved_browser_context_without_discovery() {
     assert_eq!(
         state
             .browser_runtime
-            .as_ref()
+            .get()
+            .and_then(Option::as_ref)
             .unwrap()
             .descriptor
             .app_version,
@@ -365,7 +397,7 @@ fn command_test_state(
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,
             process_history,
-            browser_runtime: None,
+            browser_runtime: Arc::new(tokio::sync::OnceCell::new()),
             runtime: RuntimeModel::hub(profile),
             started_at: chrono::Utc::now(),
             boot_generation: "testboot0001".to_string(),

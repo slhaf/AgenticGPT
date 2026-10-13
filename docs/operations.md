@@ -174,6 +174,11 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 `toolsets.enabled` 和 `events` 的有效变更会以原子方式应用于后续准入、调用和工具发现。
 
 `events` 配置变更影响后续 process/skill-install 准入；已准入的 process 和安装任务保留准入时的配置快照。
+关闭 Tmux 或 Browser 工具集后，下次启动不会自动准备对应资源。运行期间重新启用 Tmux
+会准备默认会话；重新启用 Browser 后首次工具调用按当前有效配置初始化运行时。
+Skills 关闭或当前运行模式不支持 Skills 时，重启恢复只协调持久记录，不重新启动排队安装；
+重新启用 Skills 后恢复同一排队记录，重复重载不会启动重复安装。关闭开关不撤销已接纳任务，
+也不自动关闭已有 tmux 会话或 Browser 租约。
 `policy.command`、`policy.path` 和 `policy.bubblewrap` 的有效变更只用于之后接纳的请求；已接纳
 Process 保留准入时的执行配置快照。`workspaceRoot` 变更仍须重启，不会阻止统一 policy 独立
 热加载；不得把磁盘文件已修改视为运行中操作已经切换配置。
@@ -187,7 +192,7 @@ token 变更则会就地更新直接身份验证，并在吊销 OAuth 记录的�
 凭据无法解析时会 fail closed；候选配置无效时保留上一个有效监听器；端口绑定冲突
 会重试，不影响 tunnel 或 Unix 执行。
 
-`mode`、`profile`、`agentId`、`workspaceRoot`、`browser`、Room 设置、
+`mode`、`profile`、`agentId`、`hub`（含辅助连接开关）、`workspaceRoot`、`browser`、Room 设置、
 tunnel/客户端设置、上报模式和 Skill 安装并发度等由启动时拥有的字段
 发生变化时，需要重启。共享 watcher 会记录日志
 `config changes require restart; fields=...`，包含已变更字段名，但绝不包含密钥值。

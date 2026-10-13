@@ -58,8 +58,13 @@ pub(crate) async fn run(config_path: PathBuf) -> Result<()> {
     let profile = config.profile.capability_profile();
     config.validate_standalone()?;
     config.ensure_workspace()?;
-    if let Err(error) = crate::tmux::ensure_default_session(&config.workspace_root).await {
-        log_warn(format!("default tmux session unavailable: {error}"));
+    if config
+        .toolsets
+        .is_enabled(crate::config::ToolNamespace::Tmux)
+    {
+        if let Err(error) = crate::tmux::ensure_default_session(&config.workspace_root).await {
+            log_warn(format!("default tmux session unavailable: {error}"));
+        }
     }
 
     let runtime_paths = RuntimePaths::prepare(&config.agent_id)?;
@@ -178,6 +183,7 @@ struct StartupIdentity {
     workspace_root: PathBuf,
     hub_url: String,
     hub_transport: String,
+    hub_enabled: bool,
     hub_reporting_enabled: bool,
     hub_reporting_detail: crate::config::ReportingDetail,
     skill_max_concurrent_installs: usize,
@@ -204,6 +210,7 @@ impl StartupIdentity {
             workspace_root: config.workspace_root.clone(),
             hub_url: config.hub.url.clone(),
             hub_transport: config.hub.transport.clone(),
+            hub_enabled: config.hub.enabled,
             hub_reporting_enabled: tunnel.hub_reporting.enabled,
             hub_reporting_detail: tunnel.hub_reporting.detail,
             skill_max_concurrent_installs: config.skills.max_concurrent_installs,

@@ -11,8 +11,10 @@ mod tests {
     use crate::WorkerProfile;
 
     use super::super::model::{
-        OptionalSectionDraft, RoomDraft, SetupSeed, SetupSession, ShellDraft, ToolsetsDraft,
+        ConfirmationDraft, OptionalSectionDraft, RoomDraft, SetupSeed, SetupSession, ShellDraft,
+        ToolsetsDraft,
     };
+    use super::{build_active_input_unchecked, validate_for_review};
 
     fn session(mode: RuntimeMode, profile: WorkerProfile) -> SetupSession {
         SetupSession::new(
@@ -67,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn active_input_ignores_inactive_connection_secrets_and_restores_staged_drafts() {
+    fn active_input_keeps_hub_drafts_across_mode_changes_without_enabling_them() {
         let marker = "hub-secret-active-input-marker";
         let mut session = SetupSession::new(
             SetupSeed {
@@ -100,7 +102,17 @@ mod tests {
             standalone_input.tunnel_api_key.as_deref(),
             Some("file:/tmp/staged-tunnel-secret")
         );
-        assert!(standalone_input.agent_secret.is_none());
+        assert_eq!(
+            standalone_input.hub_url.as_deref(),
+            Some("https://hub.example.com")
+        );
+        assert_eq!(
+            standalone_input
+                .agent_secret
+                .as_ref()
+                .map(SecretValue::expose),
+            Some(marker)
+        );
 
         session.set_mode(RuntimeMode::Hub);
         let restored_hub = session.build_active_input().unwrap();
@@ -109,6 +121,106 @@ mod tests {
             Some("https://hub.example.com")
         );
         assert_eq!(restored_hub.agent_secret.unwrap().expose(), marker);
+    }
+
+    #[test]
+    fn local_auxiliary_hub_builds_confirmation_only_and_requires_connection_for_ntfy() {
+        let mut disabled = session(RuntimeMode::Local, WorkerProfile::Normal);
+        let disabled_input = build_active_input_unchecked(&disabled).unwrap();
+        assert!(disabled_input.agent_secret.is_none());
+        let disabled_build = build_config(disabled.build_active_input().unwrap()).unwrap();
+        assert!(!disabled_build.config.auxiliary_hub_enabled());
+        assert!(!disabled_build.config.hub_reporting_enabled());
+        assert!(!disabled_build
+            .config
+            .confirmation_provider
+            .channels
+            .contains(&crate::config::ConfirmationChannel::Ntfy));
+
+        assert!(disabled
+            .save_optional_section(OptionalSectionDraft::Confirmation(ConfirmationDraft {
+                channels: r#"["ntfy"]"#.to_string(),
+                language: "en".to_string(),
+            }))
+            .is_err());
+
+        let mut enabled = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Local),
+                hub_enabled: Some(true),
+                hub_url: Some("https://hub.example.invalid".to_string()),
+                agent_id: Some("local-agent".to_string()),
+                agent_secret: Some(SecretValue::new("local-hub-secret")),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/config.json"),
+        );
+        enabled
+            .save_optional_section(OptionalSectionDraft::Confirmation(ConfirmationDraft {
+                channels: r#"["ntfy"]"#.to_string(),
+                language: "en".to_string(),
+            }))
+            .unwrap();
+        let built = build_config(enabled.build_active_input().unwrap()).unwrap();
+        assert!(built.config.auxiliary_hub_enabled());
+        assert!(!built.config.hub_reporting_enabled());
+        assert!(built
+            .config
+            .confirmation_provider
+            .channels
+            .contains(&crate::config::ConfirmationChannel::Ntfy));
+
+        enabled.hub_mut().enabled = false;
+        assert!(validate_for_review(&enabled).is_err());
+        let closed_input = build_active_input_unchecked(&enabled).unwrap();
+        assert_eq!(
+            closed_input.hub_url.as_deref(),
+            Some("https://hub.example.invalid")
+        );
+        assert_eq!(closed_input.agent_id.as_deref(), Some("local-agent"));
+        assert_eq!(
+            closed_input.agent_secret.as_ref().map(SecretValue::expose),
+            Some("local-hub-secret")
+        );
+
+        let mut imported = crate::config::Config::default_config().unwrap();
+        imported.mode = RuntimeMode::Local;
+        imported.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
+        let legacy = SetupSession::new(
+            SetupSeed {
+                imported_base: Some(imported),
+                mode: Some(RuntimeMode::Local),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/config.json"),
+        );
+        assert!(validate_for_review(&legacy).is_ok());
+
+        let mut hub_config = crate::config::Config::default_config().unwrap();
+        hub_config.mode = RuntimeMode::Hub;
+        hub_config.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
+        let converted_hub = SetupSession::new(
+            SetupSeed {
+                imported_base: Some(hub_config),
+                mode: Some(RuntimeMode::Local),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/config.json"),
+        );
+        assert!(validate_for_review(&converted_hub).is_err());
+
+        enabled.hub_mut().enabled = true;
+        let review = enabled.review_model().unwrap();
+        assert!(review.connection.items.iter().any(|item| {
+            item.field == Some(crate::config_setup::SetupField::HubEnabled) && item.value == "true"
+        }));
+        assert!(review.connection.items.iter().any(|item| {
+            item.field == Some(crate::config_setup::SetupField::HubUrl)
+                && item.value == "https://hub.example.invalid"
+        }));
     }
     #[test]
     fn normal_profile_accepts_explicit_room_toolset_and_round_trips_room_settings() {
@@ -235,9 +347,16 @@ pub(super) fn validate_connection(session: &SetupSession) -> Result<(), Validati
                 session.http_mcp_seed_error(),
                 &mut errors,
             );
+            if session.auxiliary_hub_connection_enabled() {
+                validate_hub(session.hub(), &mut errors, true);
+            }
         }
-        RuntimeMode::Hub => validate_hub(session.hub(), &mut errors),
-        RuntimeMode::Local => {}
+        RuntimeMode::Hub => validate_hub(session.hub(), &mut errors, false),
+        RuntimeMode::Local => {
+            if session.hub().enabled {
+                validate_hub(session.hub(), &mut errors, true);
+            }
+        }
     }
     if errors.is_empty() {
         Ok(())
@@ -394,7 +513,7 @@ fn validate_http_mcp_draft(
     }
 }
 
-fn validate_hub(draft: &HubDraft, errors: &mut ValidationErrors) {
+fn validate_hub(draft: &HubDraft, errors: &mut ValidationErrors, require_secret: bool) {
     if draft.hub_url.trim().is_empty() {
         errors.push(error(
             SetupField::HubUrl,
@@ -414,7 +533,10 @@ fn validate_hub(draft: &HubDraft, errors: &mut ValidationErrors) {
     if draft
         .agent_secret
         .as_ref()
-        .map(|secret| secret.expose().trim().is_empty())
+        .map(|secret| {
+            let secret = secret.expose().trim();
+            secret.is_empty() || (require_secret && secret == "change-me")
+        })
         .unwrap_or(true)
     {
         errors.push(error(SetupField::AgentSecret, "config_init_secret_empty"));
@@ -441,7 +563,8 @@ pub(super) fn validate_field(
         | SetupField::HubUrl
         | SetupField::HubTransport
         | SetupField::AgentId
-        | SetupField::AgentSecret => validate_connection(session).err().unwrap_or_default(),
+        | SetupField::AgentSecret
+        | SetupField::HubEnabled => validate_connection(session).err().unwrap_or_default(),
         SetupField::DisplayName => validate_optional(
             OptionalSection::Identity,
             &session.optional_draft(OptionalSection::Identity),
@@ -555,7 +678,32 @@ pub(super) fn validate_optional_draft(
             "config_init_optional_section_invalid",
         )]);
     }
-    let errors = validate_optional(section, draft);
+    let mut errors = validate_optional(section, draft);
+    if let OptionalSectionDraft::Confirmation(value) = draft {
+        let channels = parse_confirmation_channels(&value.channels).ok();
+        let legacy_ntfy = session.imported_base().is_some_and(|config| {
+            config.mode != RuntimeMode::Hub
+                && !config.auxiliary_hub_enabled()
+                && config
+                    .confirmation_provider
+                    .channels
+                    .contains(&config::ConfirmationChannel::Ntfy)
+        });
+        if session.selected_mode() != RuntimeMode::Hub
+            && !session.auxiliary_hub_connection_enabled()
+            && !legacy_ntfy
+            && channels.is_some_and(|channels| {
+                channels
+                    .channels
+                    .contains(&config::ConfirmationChannel::Ntfy)
+            })
+        {
+            errors.push(error(
+                SetupField::ConfirmationChannels,
+                "config_init_hub_confirmation_requires_connection",
+            ));
+        }
+    }
     if errors.is_empty() {
         Ok(())
     } else {
@@ -926,7 +1074,11 @@ pub(super) fn validate_for_review(session: &SetupSession) -> Result<(), Validati
     }
     for section in session.available_optional_sections() {
         if let Some(draft) = configured_draft(session, section) {
-            errors.extend(validate_optional(section, &draft));
+            errors.extend(
+                validate_optional_draft(session, &draft)
+                    .err()
+                    .unwrap_or_default(),
+            );
         }
     }
     if !errors.is_empty() {
@@ -987,6 +1139,7 @@ pub(super) fn build_active_input_unchecked(
     input.mode = session.selected_mode();
     input.profile = session.selected_profile();
     input.imported_base = session.imported_base().cloned();
+    input.hub_enabled = Some(session.hub().enabled);
 
     match session.selected_mode() {
         RuntimeMode::Standalone => {
@@ -1016,18 +1169,14 @@ pub(super) fn build_active_input_unchecked(
                     .unwrap_or_default(),
             ));
             input.http_mcp_allow_hosts = Some(draft.http_mcp_allow_hosts.clone());
+            set_hub_input(&mut input, session);
         }
         RuntimeMode::Hub => {
-            input.hub_url = Some(session.hub().hub_url.clone());
-            input.hub_transport = Some(session.hub().hub_transport.clone());
-            input.agent_id = Some(session.hub().agent_id.clone());
-            input.agent_secret = session
-                .hub()
-                .agent_secret
-                .as_ref()
-                .map(|secret| SecretValue::new(secret.expose()));
+            set_hub_input(&mut input, session);
         }
-        RuntimeMode::Local => {}
+        RuntimeMode::Local => {
+            set_hub_input(&mut input, session);
+        }
     }
 
     for section in session.available_optional_sections() {
@@ -1036,6 +1185,17 @@ pub(super) fn build_active_input_unchecked(
         }
     }
     Ok(input)
+}
+
+fn set_hub_input(input: &mut InitInput, session: &SetupSession) {
+    input.hub_url = Some(session.hub().hub_url.clone());
+    input.hub_transport = Some(session.hub().hub_transport.clone());
+    input.agent_id = Some(session.hub().agent_id.clone());
+    input.agent_secret = session
+        .hub()
+        .agent_secret
+        .as_ref()
+        .map(|secret| SecretValue::new(secret.expose()));
 }
 
 fn apply_optional_draft(

@@ -64,6 +64,13 @@ pub(crate) async fn resolve_browser_runtime_with_sources(
     config: &Config,
     sources: &BrowserRuntimeSources,
 ) -> Option<Arc<BrowserRuntimeContext>> {
+    if !config
+        .toolsets
+        .is_enabled(crate::config::ToolNamespace::Browser)
+    {
+        return None;
+    }
+
     if let Some(explicit) = config.browser.runtime.as_ref() {
         let descriptor = match browser_runtime::explicit_runtime_descriptor(explicit) {
             Ok(descriptor) => descriptor,

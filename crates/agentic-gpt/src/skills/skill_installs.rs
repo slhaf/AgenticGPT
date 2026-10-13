@@ -98,6 +98,17 @@ impl InstallManager {
             if validate_install_id(&record.install_id).is_err() {
                 continue;
             }
+            if self
+                .cancellations
+                .lock()
+                .await
+                .contains_key(&record.install_id)
+            {
+                // This manager already owns this install, whether its worker
+                // is waiting for a slot or running. Reconciliation is for
+                // jobs left behind by a prior process, not live workers.
+                continue;
+            }
             if !is_terminal(record.status.status) && !record.event_completion_pending {
                 let source = crate::event_notifications::skill_install_source(&record.install_id);
                 crate::event_notifications::register_internal_source(
@@ -159,17 +170,61 @@ impl InstallManager {
             let _ = fs::remove_dir_all(staging_path(&self.records_root, &record.install_id));
             record.status.status = SkillInstallStatus::Queued;
             record.status.phase = None;
+            record.status.attempt = 0;
+            record.status.progress = initial_progress(&record.request.source);
+            record.status.started_at = None;
+            record.status.finished_at = None;
+            record.status.elapsed_ms = 0;
             record.status.cancel_requested_at = None;
+            record.status.result = None;
+            record.status.error = None;
             record.status.poll_after_ms = DEFAULT_POLL_AFTER_MS;
             touch_status(&mut record.status);
             self.insert_record(&config, record.clone()).await?;
-            self.cancellations
+        }
+        self.resume_queued(&state).await
+    }
+
+    /// Resume persisted queued installs after the current runtime supports them.
+    /// A cancellation token claims each job before spawning, so repeated live
+    /// config reloads cannot start duplicate workers.
+    pub(crate) async fn resume_queued(&self, state: &AppState) -> Result<()> {
+        let config = state.config.read().await.clone();
+        if !config
+            .toolsets
+            .is_enabled(crate::config::ToolNamespace::Skills)
+            || !state.runtime.capabilities().skills
+        {
+            return Ok(());
+        }
+
+        let queued_ids = self
+            .records
+            .lock()
+            .await
+            .values()
+            .filter(|record| record.status.status == SkillInstallStatus::Queued)
+            .map(|record| record.install_id.clone())
+            .collect::<Vec<_>>();
+
+        for install_id in queued_ids {
+            if !self.claim_worker(&install_id).await {
+                continue;
+            }
+            let is_queued = self
+                .records
                 .lock()
                 .await
-                .insert(record.install_id.clone(), Arc::new(AtomicBool::new(false)));
+                .get(&install_id)
+                .is_some_and(|record| record.status.status == SkillInstallStatus::Queued);
+            if !is_queued {
+                self.release_worker_claim(&install_id).await;
+                continue;
+            }
             let manager = self.clone();
             let worker_state = state.clone();
-            tokio::spawn(async move { manager.run_worker(worker_state, record.install_id).await });
+            let worker_install_id = install_id.clone();
+            tokio::spawn(async move { manager.run_worker(worker_state, worker_install_id).await });
         }
         Ok(())
     }
@@ -235,6 +290,14 @@ impl InstallManager {
             &config.events.internal_policy(),
             event_origin.as_ref(),
         )?;
+        if !self.claim_worker(&install_id).await {
+            crate::event_notifications::abort_unadmitted_source(
+                &state,
+                &source,
+                event_origin.as_ref(),
+            );
+            return Err(anyhow!("install_worker_already_claimed"));
+        }
         let record = SkillInstallJobRecord {
             schema_version: SKILL_INSTALL_JOB_SCHEMA_VERSION,
             install_id: install_id.clone(),
@@ -244,6 +307,7 @@ impl InstallManager {
             event_completion_pending: true,
         };
         if let Err(error) = self.insert_record(&config, record).await {
+            self.release_worker_claim(&install_id).await;
             crate::event_notifications::abort_unadmitted_source(
                 &state,
                 &source,
@@ -251,10 +315,6 @@ impl InstallManager {
             );
             return Err(error);
         }
-        self.cancellations
-            .lock()
-            .await
-            .insert(install_id.clone(), Arc::new(AtomicBool::new(false)));
         let manager = self.clone();
         tokio::spawn(async move { manager.run_worker(state, install_id).await });
         Ok(start_response(&status, false))
@@ -828,6 +888,29 @@ impl InstallManager {
             .entry(install_id.to_string())
             .or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone()
+    }
+
+    /// Atomically reserve an install id for exactly one worker. Both ordinary
+    /// starts and recovery/resume use this before publishing or spawning work.
+    async fn claim_worker(&self, install_id: &str) -> bool {
+        use std::collections::hash_map::Entry;
+
+        match self
+            .cancellations
+            .lock()
+            .await
+            .entry(install_id.to_string())
+        {
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::new(AtomicBool::new(false)));
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
+    async fn release_worker_claim(&self, install_id: &str) {
+        self.cancellations.lock().await.remove(install_id);
     }
 
     async fn is_cancelled(&self, install_id: &str) -> bool {
@@ -1898,7 +1981,7 @@ mod tests {
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state: private_state.clone(),
             process_history,
-            browser_runtime: None,
+            browser_runtime: Arc::new(tokio::sync::OnceCell::new()),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -1983,6 +2066,141 @@ mod tests {
             .skill_installs
             .join(format!("{}.json", response.install_id))
             .is_file());
+    }
+
+    #[tokio::test]
+    async fn recovery_defers_queued_install_until_toolset_and_runtime_support_it() {
+        let mut state = test_state();
+        let root = state.config.read().await.workspace_root.clone();
+        let records_root = state.private_state.skill_installs.clone();
+        let manager = Arc::new(InstallManager::for_test(records_root.clone()));
+        state.skill_installs = manager.clone();
+
+        let mut config = state.config.read().await.clone();
+        config
+            .toolsets
+            .disable(crate::config::ToolNamespace::Skills);
+        *state.config.write().await = config.clone();
+
+        let request = inline_request("deferred-recovery");
+        let install_id = format!("install-{}", Uuid::new_v4().simple());
+        let now = Utc::now();
+        let status = SkillInstallStatusResponse {
+            install_id: install_id.clone(),
+            id: request.id.clone(),
+            revision: 1,
+            status: SkillInstallStatus::Running,
+            phase: Some(SkillInstallPhase::Resolving),
+            attempt: 1,
+            max_attempts: config.skills.max_attempts.max(1),
+            progress: initial_progress(&request.source),
+            source: source_summary(&request.source),
+            created_at: now - ChronoDuration::seconds(1),
+            started_at: Some(now - ChronoDuration::seconds(1)),
+            updated_at: now,
+            finished_at: None,
+            elapsed_ms: 1_000,
+            cancel_requested_at: None,
+            result: None,
+            error: None,
+            poll_after_ms: DEFAULT_POLL_AFTER_MS,
+        };
+        manager
+            .insert_record(
+                &config,
+                SkillInstallJobRecord {
+                    schema_version: SKILL_INSTALL_JOB_SCHEMA_VERSION,
+                    install_id: install_id.clone(),
+                    request,
+                    canonical_request_sha256: "sha256:recovery-test".to_string(),
+                    status,
+                    event_completion_pending: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        let recovered = Arc::new(InstallManager::for_test(records_root));
+        state.skill_installs = recovered.clone();
+        recovered.recover(state.clone()).await.unwrap();
+
+        let deferred = recovered
+            .get(
+                &state,
+                SkillInstallGetRequest {
+                    install_id: install_id.clone(),
+                    wait_seconds: Some(0),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(deferred.status, SkillInstallStatus::Queued);
+        assert_eq!(deferred.phase, None);
+        assert_eq!(deferred.started_at, None);
+        assert_eq!(deferred.attempt, 0);
+        assert!(recovered.cancellations.lock().await.is_empty());
+        let config = state.config.read().await.clone();
+        assert!(!skills::skills_root(&config)
+            .join("deferred-recovery")
+            .exists());
+
+        let mut config = state.config.read().await.clone();
+        config.toolsets.enable(crate::config::ToolNamespace::Skills);
+        *state.config.write().await = config;
+        state.runtime = crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal);
+        recovered.resume_queued(&state).await.unwrap();
+        assert!(recovered.cancellations.lock().await.is_empty());
+
+        state.runtime = crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room);
+        let permit_a = recovered
+            .worker_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        let permit_b = recovered
+            .worker_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        recovered.resume_queued(&state).await.unwrap();
+        recovered.resume_queued(&state).await.unwrap();
+        assert_eq!(recovered.cancellations.lock().await.len(), 1);
+        recovered.recover(state.clone()).await.unwrap();
+        assert_eq!(recovered.cancellations.lock().await.len(), 1);
+        drop(permit_a);
+        drop(permit_b);
+
+        let completed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = recovered
+                    .get(
+                        &state,
+                        SkillInstallGetRequest {
+                            install_id: install_id.clone(),
+                            wait_seconds: Some(0),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                if is_terminal(status.status) {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("deferred install should finish after Skills is enabled");
+        assert_eq!(completed.status, SkillInstallStatus::Completed);
+        let config = state.config.read().await.clone();
+        assert!(skills::skills_root(&config)
+            .join("deferred-recovery/SKILL.md")
+            .is_file());
+
+        drop(recovered);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

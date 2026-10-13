@@ -3547,7 +3547,7 @@ fn test_state(profile: CapabilityProfile) -> AppState {
         private_state,
         event_store,
         process_history,
-        browser_runtime: None,
+        browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
         runtime: RuntimeModel::tunnel(profile, false),
         started_at: chrono::Utc::now(),
         boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -3600,7 +3600,7 @@ async fn allow_test_printf(server: &AgentMcpServer) {
 
 fn state_with_browser_runtime(docs_root: PathBuf, result: CallToolResult) -> AppState {
     let mut state = test_state(CapabilityProfile::Normal);
-    state.browser_runtime = Some(Arc::new(crate::state::BrowserRuntimeContext {
+    let browser_runtime = Arc::new(crate::state::BrowserRuntimeContext {
         descriptor: crate::browser_runtime::BrowserRuntimeDescriptor {
             app_version: "test-browser".to_string(),
             channel: "test".to_string(),
@@ -3615,6 +3615,9 @@ fn state_with_browser_runtime(docs_root: PathBuf, result: CallToolResult) -> App
             docs_root,
         },
         manager: crate::browser_manager::test_manager_with_result(result),
-    }));
+    });
+    let browser_runtime_cell = Arc::new(tokio::sync::OnceCell::new());
+    let _ = browser_runtime_cell.set(Some(browser_runtime));
+    state.browser_runtime = browser_runtime_cell;
     state
 }

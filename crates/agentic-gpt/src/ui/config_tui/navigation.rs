@@ -103,10 +103,11 @@ impl Navigation {
 }
 
 fn flow_for(mode: RuntimeMode) -> Vec<ConfigPage> {
-    let mut flow = vec![ConfigPage::Basic];
-    if mode != RuntimeMode::Local {
-        flow.push(ConfigPage::Connection);
-    }
-    flow.extend([ConfigPage::OptionalCenter, ConfigPage::Review]);
-    flow
+    let _ = mode;
+    vec![
+        ConfigPage::Basic,
+        ConfigPage::Connection,
+        ConfigPage::OptionalCenter,
+        ConfigPage::Review,
+    ]
 }

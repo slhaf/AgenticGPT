@@ -264,6 +264,16 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_workspace_root
     ),
     config_key!(
+        "hub.enabled",
+        Hub,
+        Boolean,
+        false,
+        "Enable an auxiliary Hub connection in standalone or local mode.",
+        "在 Standalone 或 Local 模式启用辅助 Hub 连接。",
+        "false",
+        set_hub_enabled
+    ),
+    config_key!(
         "hub.url",
         Hub,
         String,
@@ -1087,6 +1097,11 @@ fn set_http_mcp_allow_hosts(config: &mut Config, value: &str) -> Result<()> {
 
 fn set_workspace_root(config: &mut Config, value: &str) -> Result<()> {
     config.workspace_root = crate::exec::expand_path(value)?;
+    Ok(())
+}
+
+fn set_hub_enabled(config: &mut Config, value: &str) -> Result<()> {
+    config.hub.enabled = value.parse::<bool>()?;
     Ok(())
 }
 

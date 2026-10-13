@@ -1293,9 +1293,26 @@ impl AgentMcpServer {
         }
         Ok(())
     }
+    async fn browser_runtime(&self) -> Option<Arc<crate::state::BrowserRuntimeContext>> {
+        let config = self.state.config.read().await.clone();
+        if !config
+            .toolsets
+            .is_enabled(crate::config::ToolNamespace::Browser)
+        {
+            return None;
+        }
+        self.state
+            .browser_runtime
+            .get_or_init(|| async {
+                crate::browser_discovery::resolve_browser_runtime(&config).await
+            })
+            .await
+            .clone()
+    }
+
     async fn dispatch_browser_manual(&self, arguments: Value) -> Result<Value> {
         let args: BrowserManualArgs = from_value(arguments)?;
-        let Some(runtime) = self.state.browser_runtime.clone() else {
+        let Some(runtime) = self.browser_runtime().await else {
             return Ok(browser_runtime_unavailable_value());
         };
 
@@ -1336,7 +1353,7 @@ impl AgentMcpServer {
         let started = Instant::now();
         let name = args.name.clone();
         let idle_timeout_seconds = args.idle_timeout_seconds;
-        let runtime = self.state.browser_runtime.clone();
+        let runtime = self.browser_runtime().await;
         let runtime_app_version = runtime
             .as_ref()
             .map(|runtime| runtime.descriptor.app_version.clone());
@@ -1382,7 +1399,7 @@ impl AgentMcpServer {
         let code_sha256 = Some(browser_sha256(&args.code));
         let timeout_ms = args.timeout_ms.unwrap_or(20_000);
         let title = args.title.as_deref().map(bounded_browser_title);
-        let runtime = self.state.browser_runtime.clone();
+        let runtime = self.browser_runtime().await;
         let runtime_app_version = runtime
             .as_ref()
             .map(|runtime| runtime.descriptor.app_version.clone());
@@ -1433,7 +1450,7 @@ impl AgentMcpServer {
         let args: BrowserLeaseArgs = from_value(arguments)?;
         let started = Instant::now();
         let name = args.name;
-        let runtime = self.state.browser_runtime.clone();
+        let runtime = self.browser_runtime().await;
         let runtime_app_version = runtime
             .as_ref()
             .map(|runtime| runtime.descriptor.app_version.clone());
@@ -1465,7 +1482,7 @@ impl AgentMcpServer {
         let args: BrowserLeaseArgs = from_value(arguments)?;
         let started = Instant::now();
         let name = args.name;
-        let runtime = self.state.browser_runtime.clone();
+        let runtime = self.browser_runtime().await;
         let runtime_app_version = runtime
             .as_ref()
             .map(|runtime| runtime.descriptor.app_version.clone());
@@ -1495,7 +1512,7 @@ impl AgentMcpServer {
 
     async fn dispatch_browser_list(&self, arguments: Value) -> Result<Value> {
         let _: EmptyArgs = from_value(arguments)?;
-        let Some(runtime) = self.state.browser_runtime.clone() else {
+        let Some(runtime) = self.browser_runtime().await else {
             return Ok(browser_runtime_unavailable_list_value());
         };
         let mut leases = runtime

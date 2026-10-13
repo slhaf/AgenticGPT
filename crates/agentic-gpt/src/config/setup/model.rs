@@ -43,6 +43,7 @@ pub(crate) enum SetupField {
     HubTransport,
     AgentId,
     AgentSecret,
+    HubEnabled,
     DisplayName,
     WorkspaceRoot,
     PathDefaultAction,
@@ -143,6 +144,7 @@ pub(crate) struct SetupSeed {
     pub(crate) tunnel_api_key: Option<String>,
     pub(crate) hub_url: Option<String>,
     pub(crate) hub_transport: Option<String>,
+    pub(crate) hub_enabled: Option<bool>,
     pub(crate) agent_id: Option<String>,
     pub(crate) agent_secret: Option<SecretValue>,
     pub(crate) http_mcp_enabled: Option<bool>,
@@ -170,6 +172,7 @@ impl fmt::Debug for SetupSeed {
             )
             .field("hub_url", &self.hub_url)
             .field("hub_transport", &self.hub_transport)
+            .field("hub_enabled", &self.hub_enabled)
             .field("agent_id", &self.agent_id)
             .field(
                 "http_mcp_bearer_token",
@@ -202,6 +205,7 @@ pub(crate) struct StandaloneDraft {
 
 #[derive(Debug)]
 pub(crate) struct HubDraft {
+    pub(crate) enabled: bool,
     pub(crate) hub_url: String,
     pub(crate) hub_transport: String,
     pub(crate) agent_id: String,
@@ -479,6 +483,9 @@ impl SetupSession {
             });
         let imported_hub = imported_base.as_ref().map(|config| &config.hub);
         let hub = HubDraft {
+            enabled: seed
+                .hub_enabled
+                .unwrap_or_else(|| imported_hub.map(|hub| hub.enabled).unwrap_or(false)),
             hub_url: seed
                 .hub_url
                 .or_else(|| imported_hub.map(|hub| hub.url.clone()))
@@ -549,9 +556,29 @@ impl SetupSession {
         &mut self.hub
     }
     pub(crate) fn optional_draft(&self, section: OptionalSection) -> OptionalSectionDraft {
-        self.optional.get(section).unwrap_or_else(|| {
+        let mut draft = self.optional.get(section).unwrap_or_else(|| {
             default_optional_draft_for_profile(self.language, section, self.selected_profile)
-        })
+        });
+        if self.imported_base.is_none()
+            && self.selected_mode != RuntimeMode::Hub
+            && !self.auxiliary_hub_connection_enabled()
+            && self.optional.get(section).is_none()
+        {
+            if let OptionalSectionDraft::Confirmation(value) = &mut draft {
+                value.channels = r#"["freedesktop"]"#.to_string();
+            }
+        }
+        draft
+    }
+
+    pub(crate) fn auxiliary_hub_connection_enabled(&self) -> bool {
+        let reporting_enabled = self
+            .optional
+            .get(OptionalSection::HubReporting)
+            .is_some_and(
+                |draft| matches!(draft, OptionalSectionDraft::HubReporting(value) if value.enabled),
+            );
+        self.hub.enabled || (self.selected_mode == RuntimeMode::Standalone && reporting_enabled)
     }
     pub(crate) fn optional_drafts(&self) -> &OptionalDrafts {
         &self.optional

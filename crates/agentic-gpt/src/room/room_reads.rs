@@ -539,7 +539,7 @@ mod tests {
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,
             process_history,
-            browser_runtime: None,
+            browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             runtime: RuntimeModel::local(CapabilityProfile::Room),
             started_at: Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),

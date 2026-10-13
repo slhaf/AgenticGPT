@@ -190,11 +190,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
 async fn connect_reporting_loop(state: AppState) -> Result<()> {
     loop {
         let config = state.config.read().await.clone();
-        let enabled = config
-            .tunnel
-            .as_ref()
-            .map(|tunnel| tunnel.hub_reporting.enabled)
-            .unwrap_or(false);
+        let enabled = config.auxiliary_hub_enabled();
         if !enabled {
             return Ok(());
         }
@@ -237,7 +233,7 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
     let (control_tx, mut control_rx) = mpsc::unbounded_channel::<AgentMessage>();
     let (event_tx, mut event_rx) = mpsc::channel::<AgentMessage>(64);
     *state.hub_sender.lock().await = Some(control_tx.clone());
-    *state.reporting_sender.lock().await = Some(event_tx.clone());
+    *state.reporting_sender.lock().await = config.hub_reporting_enabled().then(|| event_tx.clone());
     let writer = tokio::spawn(async move {
         loop {
             let message = tokio::select! {
@@ -267,7 +263,9 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
         "hub reporting connected; transport=websocket; agentId={}",
         config.agent_id
     ));
-    send_current_process_snapshots(&state, &event_tx).await;
+    if config.hub_reporting_enabled() {
+        send_current_process_snapshots(&state, &event_tx).await;
+    }
     let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_heartbeat_ack = Instant::now();
@@ -295,6 +293,7 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
         }
     }
     writer.abort();
+    let _ = writer.await;
     clear_reporting_senders(&state, &control_tx, &event_tx).await;
     log_info("hub reporting disconnected; transport=websocket".to_string());
     Ok(())
@@ -330,7 +329,7 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
     let (control_tx, mut control_rx) = mpsc::unbounded_channel::<AgentMessage>();
     let (event_tx, mut event_rx) = mpsc::channel::<AgentMessage>(64);
     *state.hub_sender.lock().await = Some(control_tx.clone());
-    *state.reporting_sender.lock().await = Some(event_tx.clone());
+    *state.reporting_sender.lock().await = config.hub_reporting_enabled().then(|| event_tx.clone());
     let post_client = client.clone();
     let post_url = messages_url.clone();
     let post_secret = config.hub.agent_secret.clone();
@@ -366,7 +365,9 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
         "hub reporting connected; transport=sse; agentId={}",
         config.agent_id
     ));
-    send_current_process_snapshots(&state, &event_tx).await;
+    if config.hub_reporting_enabled() {
+        send_current_process_snapshots(&state, &event_tx).await;
+    }
     let heartbeat_tx = control_tx.clone();
     let heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -410,6 +411,8 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
     }
     writer.abort();
     heartbeat.abort();
+    let _ = writer.await;
+    let _ = heartbeat.await;
     clear_reporting_senders(&state, &control_tx, &event_tx).await;
     log_info("hub reporting disconnected; transport=sse".to_string());
     Ok(())
@@ -1414,7 +1417,7 @@ mod reporting_tests {
             private_state,
             event_store,
             process_history,
-            browser_runtime: None,
+            browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
             started_at: Utc::now(),
             boot_generation: "recovery-test".to_string(),
@@ -1433,6 +1436,130 @@ mod reporting_tests {
             skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
             skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
         }
+    }
+
+    #[tokio::test]
+    async fn auxiliary_hub_confirms_without_reporting_or_executing_commands() -> Result<()> {
+        for mode in [
+            crate::config::RuntimeMode::Local,
+            crate::config::RuntimeMode::Standalone,
+        ] {
+            let home = recovery_test_home();
+            let mut state = recovery_test_state(&home.root);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let mut config = state.config.read().await.clone();
+            config.mode = mode;
+            config.hub.enabled = true;
+            config.hub.url = format!("http://{}", listener.local_addr()?);
+            config.hub.agent_secret = "auxiliary-test-secret".to_string();
+            config.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
+            config.policy.enabled = false;
+            config.tunnel = None;
+            config.validate_local()?;
+            state.runtime = match mode {
+                crate::config::RuntimeMode::Local => crate::state::RuntimeModel::local_with_hub(
+                    crate::state::CapabilityProfile::Normal,
+                    true,
+                ),
+                _ => crate::state::RuntimeModel::tunnel(
+                    crate::state::CapabilityProfile::Normal,
+                    true,
+                ),
+            };
+            *state.config.write().await = config.clone();
+            let marker = home.root.join("remote-command-ran");
+            let peer = async {
+                let (stream, _) = listener.accept().await?;
+                let mut socket = tokio_tungstenite::accept_async(stream).await?;
+                let hello = socket
+                    .next()
+                    .await
+                    .ok_or_else(|| anyhow!("missing hello"))??;
+                anyhow::ensure!(matches!(
+                    serde_json::from_str::<AgentMessage>(hello.to_text()?)?,
+                    AgentMessage::Hello {
+                        connection_mode: AgentConnectionMode::ReportingOnly,
+                        ..
+                    }
+                ));
+                anyhow::ensure!(state.hub_sender.lock().await.is_some());
+                anyhow::ensure!(state.reporting_sender.lock().await.is_none());
+                let command = HubCommandEnvelope {
+                    event_id: "aux-command-event".to_string(),
+                    run_id: "aux-command-run".to_string(),
+                    request_id: "aux-command-request".to_string(),
+                    command_hash: "aux-command-hash".to_string(),
+                    command: HubCommand::Exec {
+                        request_id: "aux-command-request".to_string(),
+                        payload: agentic_gpt_protocol::ProcessExecRequest {
+                            agent_id: config.agent_id.clone(),
+                            group: None,
+                            command: format!("touch {}", marker.display()),
+                            acquire_confirmation: None,
+                            cwd: None,
+                            wait_seconds: Some(0),
+                        },
+                    },
+                };
+                socket
+                    .send(Message::Text(serde_json::to_string(&command)?.into()))
+                    .await?;
+                let receive_confirmation = async {
+                    loop {
+                        let message = socket
+                            .next()
+                            .await
+                            .ok_or_else(|| anyhow!("confirmation connection closed"))??;
+                        let message: AgentMessage = serde_json::from_str(message.to_text()?)?;
+                        match message {
+                            AgentMessage::Heartbeat { .. } => {}
+                            AgentMessage::ConfirmationRequest { request_id, .. } => {
+                                socket.send(Message::Text(serde_json::to_string(&HubMessage::ConfirmationResponse {
+                                    request_id,
+                                    decision: agentic_gpt_protocol::ConfirmationDecision::AllowOnce,
+                                    reason: "local test approval".to_string(),
+                                })?.into())).await?;
+                                break;
+                            }
+                            _ => {
+                                return Err(anyhow!(
+                                    "auxiliary connection sent reporting or execution output"
+                                ))
+                            }
+                        }
+                    }
+                    Ok::<_, anyhow::Error>(())
+                };
+                let confirmation = confirmation::authorize_operation(
+                    &state,
+                    &config,
+                    None,
+                    true,
+                    crate::policy::PolicyDecision::Allow,
+                    "true",
+                    &[],
+                    true,
+                );
+                let (approval, response) = tokio::join!(confirmation, receive_confirmation);
+                response?;
+                anyhow::ensure!(approval.map_err(|error| anyhow!(error))?.approved);
+                socket.close(None).await?;
+                Ok::<_, anyhow::Error>(())
+            };
+            let (transport, peer) = timeout(Duration::from_secs(5), async {
+                tokio::join!(
+                    connect_reporting_websocket(state.clone(), config.clone()),
+                    peer
+                )
+            })
+            .await
+            .map_err(|_| anyhow!("auxiliary Hub test timed out"))?;
+            peer?;
+            transport?;
+            anyhow::ensure!(!marker.exists());
+            anyhow::ensure!(state.hub_sender.lock().await.is_none());
+        }
+        Ok(())
     }
 
     #[tokio::test]

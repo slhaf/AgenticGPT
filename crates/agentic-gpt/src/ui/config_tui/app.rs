@@ -753,6 +753,17 @@ impl ConfigTuiApp {
                     Err(errors) => self.record_errors(errors),
                 }
             }
+            SetupField::HubEnabled => {
+                let enabled = !self.session().hub().enabled;
+                self.session_mut().hub_mut().enabled = enabled;
+                match self.session().validate_field(SetupField::HubEnabled) {
+                    Ok(()) => {
+                        self.field_errors.remove(&SetupField::HubEnabled);
+                    }
+                    Err(errors) => self.record_errors(errors),
+                }
+                self.sync_page();
+            }
             _ => {
                 let value = pages::connection_value(self.session(), field).unwrap_or_default();
                 self.state.editing = Some(EditState::new(field, value));
@@ -1787,6 +1798,11 @@ impl ConfigTuiApp {
             return result;
         }
 
+        if field == SetupField::HubEnabled {
+            self.session_mut().hub_mut().enabled = value == "true";
+            return Ok(());
+        }
+
         let previous = match field {
             SetupField::TunnelId => Some(std::mem::replace(
                 &mut self.session_mut().standalone_mut().tunnel_id,
@@ -2471,6 +2487,7 @@ impl ConfigTuiApp {
             | SetupField::ProvisionTunnelSecret
             | SetupField::TunnelSecretValue
             | SetupField::HubUrl
+            | SetupField::HubEnabled
             | SetupField::HubTransport
             | SetupField::AgentId
             | SetupField::AgentSecret => {

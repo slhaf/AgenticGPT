@@ -243,6 +243,8 @@ impl Default for HttpMcpConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HubConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
     pub(crate) url: String,
     #[serde(default = "default_hub_transport")]
     pub(crate) transport: String,
@@ -254,6 +256,7 @@ pub(crate) struct HubConfig {
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             url: "http://localhost:8787".to_string(),
             transport: default_hub_transport(),
             agent_secret: "change-me".to_string(),
@@ -1561,7 +1564,11 @@ impl Config {
     pub(crate) fn validate_local(&self) -> Result<()> {
         self.events.validate()?;
         self.validate_policies()?;
-        self.validate_mcp_servers()
+        self.validate_mcp_servers()?;
+        if self.auxiliary_hub_enabled() {
+            self.validate_hub_connection()?;
+        }
+        Ok(())
     }
     pub(crate) fn validate_http_mcp(&self) -> Result<()> {
         validate_http_mcp_config(&self.http_mcp)
@@ -1569,6 +1576,22 @@ impl Config {
 
     pub(crate) fn validate_hub(&self) -> Result<()> {
         self.validate_local()?;
+        self.validate_hub_connection()
+    }
+
+    pub(crate) fn auxiliary_hub_enabled(&self) -> bool {
+        self.mode != RuntimeMode::Hub && (self.hub.enabled || self.hub_reporting_enabled())
+    }
+
+    pub(crate) fn hub_reporting_enabled(&self) -> bool {
+        self.mode == RuntimeMode::Standalone
+            && self
+                .tunnel
+                .as_ref()
+                .is_some_and(|tunnel| tunnel.hub_reporting.enabled)
+    }
+
+    pub(crate) fn validate_hub_connection(&self) -> Result<()> {
         validate_hub_url_shape(&self.hub.url)?;
         validate_hub_transport(&self.hub.transport)?;
         if self.agent_id.trim().is_empty() {

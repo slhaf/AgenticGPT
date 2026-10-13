@@ -103,7 +103,8 @@ agentic-gpt config init \
 
 ### 交互式流程
 
-全屏流程为 Basic → Connection（Local 除外）→ Optional settings → Review → Completion。
+全屏流程为 Basic → Connection → Optional settings → Review → Completion。Local 的 Connection
+页可选启用 Hub 辅助连接；Standalone 与 Hub 也在该页配置各自连接字段。
 
 - 交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。
 - Optional settings 可配置身份/显示名称、工作区/路径策略、确认方式/语言、限制、沙箱、
@@ -114,6 +115,10 @@ agentic-gpt config init \
   namespace selection，而不是 `profile` 字段本身。
 - 只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会
   显示这些 tunnel 部分。
+- Standalone 和 Local 的 Connection 页默认关闭 Hub 辅助连接。打开后可配置 Hub URL、传输方式、
+  Agent ID 和密钥；这条连接可为 `ntfy` 确认提供响应，但不会接受 Hub 执行命令。连接仍会发送
+  Hello 和心跳。Standalone 的上报由独立的 `tunnel.hubReporting.enabled` 控制；旧配置启用上报时
+  仍会保持辅助连接。Local 只使用确认连接，不新增上报。
 - 不选可选部分时会保留模板默认值。
 
 键盘操作如下：
@@ -205,7 +210,7 @@ agentic-gpt run
 | `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
 | `browser` | 可选的高级 Browser runtime 覆盖；普通 runtime discovery/provisioning 默认仍自动进行。 |
-| `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
+| `hub` | `enabled` 在 Standalone/Local 启用确认用的 Hub 辅助连接，默认 `false`；Hub 模式仍始终使用命令连接。Standalone 的上报由 `tunnel.hubReporting.enabled` 独立控制。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
 | `events` | 持久事件收件箱中 `low` 严重级别事件的保留时长，以及内部事件严重级别覆盖。 |
 
@@ -488,6 +493,20 @@ Hub 模式需要：
 
 `hub.transport` 可为 `websocket` 或 `sse`。旧的顶层 `hubUrl`、`hubTransport`、`workerUrl`、`agentSecret` 仅由显式 `config import` 识别；普通 v2 load 会拒绝它们。
 
+Standalone 和 Local 可在 Connection 页启用辅助连接，或用 CLI 设置 `hub.enabled`：
+
+```bash
+agentic-gpt config init --non-interactive --mode local --hub-enabled true \
+  --hub-url https://agentic-gpt.example.com --hub-transport websocket \
+  --agent-id laptop --agent-secret '<与 Hub 匹配的 agent secret>'
+```
+
+`hub.enabled` 默认 `false`，不会自动建立外部连接。辅助连接只支持确认响应；Hub 仍会收到 Hello
+和心跳。Standalone 的 `tunnel.hubReporting.enabled` 是独立开关：开启上报也会保持辅助连接，
+但关闭上报不会关闭由 `hub.enabled` 启用的确认连接。Local 不提供 Hub reporting。Hub 模式
+保留命令接收语义，不受该辅助连接开关影响。配置 `ntfy` 确认通道时，Standalone/Local 必须启用
+辅助连接并提供有效凭据；默认未选择 `ntfy`，旧配置中已有的 `ntfy` 设置仍兼容。
+
 Hub credential 与 Standalone tunnel API key 是两套独立凭据，不要复用。
 
 ## 确认机制
@@ -517,7 +536,7 @@ Hub credential 与 Standalone tunnel API key 是两套独立凭据，不要复�
 
 此检测超时与等待用户点击确认的超时不同。
 
-Standalone 未配置 Hub reporting 时，建议只使用 `freedesktop`。所有配置通道均不可用时，需要确认的操作会 fail closed。本地拒绝或超时不会继续回退到其他通道。
+未启用 Hub 模式、Hub 辅助连接或旧的 Hub reporting 连接时，使用 `freedesktop`。新建且未启用 Hub 连接的配置默认选择 `freedesktop`；启用 Hub 连接后才可选择 `ntfy`，不要求同时启用上报。所有配置通道均不可用时，需要确认的操作会 fail closed。本地拒绝或超时不会继续回退到其他通道。
 
 CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会序列化为规范有序数组。
 
