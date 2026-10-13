@@ -90,3 +90,12 @@
 - 修复独立审查发现的写完配置后中断恢复缺口；外层提交区任何可捕获异常均尝试恢复配置并撤回本次状态，复审通过。
 - 新增 8 个⑤档真实文件/SQLite 集成回归，并接入 CI；隔离 HOME/XDG/TMP/D-Bus 下全部通过。Python AST 与 git diff --check 通过；无真实配置/状态读写，无 Rust 改动，不重复 Rust CI，也未推送或运行远端 CI。
 - 更新运维和私有状态迁移指南，所有当前文档旧入口引用已替换。
+
+## 阶段 7：0.10.0 版本准备
+- Agent、Hub、Protocol Cargo 包和 Cargo.lock 升至 0.10.0；其他产品/契约版本独立，未修改。
+- 新建 docs/release-notes-v0.10.0.md，记录相对 v0.9.1 的累计功能、破坏性契约、升级步骤、迁移覆盖范围与发布边界；同步两份 README 和发布指南。
+- 本地隔离检查：fmt、workspace check、严格 all-targets Clippy、workspace tests 518 passed/0 failed/1 ignored、Agent/Hub build通过；两个 --version 均为0.10.0；迁移集成8 passed。live parity最终PASS，详情见下方收尾记录。
+- 使用独立临时 HOME/XDG/TMP/D-Bus，Cargo/Rustup沿用已安装工具链；不打tag、不推送、不实际迁移用户配置。
+- live check_contract_parity.py 最终 PASS。收尾 trap 删除临时 HOME 因 Browser fixture 只读缓存失败，功能检查已通过；仅对本次 /tmp/av.VbKSl8 的真实目录恢复 owner权限（不跟随符号链接）后完整清理。
+- 发布说明补齐验证结果；来源复核确认 strict runtime 要求顶层 toolsets，config import 可补默认是不同入口，无需改发布事实。文档链接/diffcheck通过。
+- 用户一度要求删除迁移测试，随后明确允许保留；保留现有8项，不扩展测试。

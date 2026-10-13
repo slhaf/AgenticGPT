@@ -53,11 +53,11 @@ ChatGPT Actions 或 Apps MCP
 - `process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 与 `mcp.batch` 可创建受管进程。
 - 使用 `process.read`、`process.list` 和 `process.cancel`，通过 `processId` 查询或控制进程。`process.read` 合并自动输出/状态视图；默认等待 5 秒（最多 30 秒，显式为 0 时立即观察）。
 - 批量接纳具有原子性，确认边界有界。
-- 可配置 allow / confirm / deny 命令策略，以及可写、只读和拒绝访问的路径根目录。
+- 命令策略使用显式 `defaultAction` 与 allow / confirm / deny 通配模式分组；路径策略分别为读、写配置显式的 allow / confirm / deny 通配模式分组。
 - 支持本地桌面确认，以及可选的 Hub 中继 ntfy 确认。
 - 可选集成 bubblewrap 沙箱。
 - 下游 MCP 参数/结果有界；支持按精确 request-id 取消；无法证明远端终止时如实返回 `detached` 状态。
-- 每个 Agent 独立的持久事件收件箱，提供有界提醒及显式 list/get/mark；接口契约见[接口参考](docs/interfaces.md#持久事件收件箱)。
+- 本地持久事件收件箱，提供有界提醒及显式 list/get/mark；接口契约见[接口参考](docs/interfaces.md#持久事件收件箱)。
 - 可选 Rust Hub 提供 Actions OpenAPI、兼容 Apps 的 `/mcp`、OAuth shim、HTTP API、WebSocket/SSE Agent、历史记录、报告和通知。
 
 ## 仓库结构
@@ -66,7 +66,7 @@ ChatGPT Actions 或 Apps MCP
 - `crates/agentic-gpt-hub`：可选的 Rust Hub HTTP/WebSocket/SSE/MCP 服务。
 - `crates/agentic-browser-host`：供自托管 ChatGPT Chrome 扩展 Browser backend 使用的可选 Linux Native Messaging 桥接程序。
 - `crates/agentic-gpt-protocol`：共享 JSON 协议类型。
-- `config.example.json`：严格的 v0.9、以 Standalone 为优先的配置示例，不含可用密钥。
+- `config.example.json`：严格的 v0.10 Config v2、以 Standalone 为优先的配置示例，不含可用密钥。
 - `openapi/hub.yaml`：Hub 模式 Custom GPT Actions schema。
 - `docs/configuration.zh-CN.md`：按运行时区分的配置、密钥与热加载边界。
 - `docs/standalone-runtime.md`：Tunnel/local 拓扑、信任、恢复、报告与工具矩阵。
@@ -103,6 +103,14 @@ install -m 0755 agentic-browser-host ~/.local/bin/
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
 
+## 升级到 v0.10.0
+
+替换已部署工件前先阅读 [v0.10.0 发布说明](docs/release-notes-v0.10.0.md)。旧部署应先停止使用目标 `HOME` 的所有 Agent，再从本仓库运行 `python3 scripts/migrate-agentic.py` 预览迁移；核对报告后加上脚本唯一接受的选项 `--write`。脚本固定读取当前用户的标准 `~/.agentic_gpt/config.json`，负责迁移旧命令／路径策略格式和私有状态布局，不会迁移所有旧配置字段。
+
+策略迁移完成后，若 Config v2 仍含旧 Hub 字段或缺少 selector，再单独使用 `agentic-gpt config import --config PATH [SOURCE]` 规范化；省略 `SOURCE` 时，该命令通过 Config Init TUI 与标准备份事务导入所选配置路径。加载或导入前还须将旧的 `limits.maxActiveJobs` 改为 `limits.maxActiveProcesses`，以保留原定上限。
+
+完整迁移顺序以发布说明的[升级步骤](docs/release-notes-v0.10.0.md#升级步骤)为准，私有状态检查见[运维指南](docs/operations.md)；Process API 与存储兼容性见 [Process 切换说明](docs/process-cutover.md)；当前 Room 配置与契约见[配置说明中的 Skills、Room 与 sandbox](docs/configuration.zh-CN.md#skillsroom-与-sandbox)和[接口说明](docs/interfaces.md#当前-room-边界与协调请求投影)。
+
 新增功能或模块，或修改配置、状态所有权及公共契约前，请先阅读[开发指南](docs/development/README.zh-CN.md)；打包与发布见[发布指南](docs/development/releasing.md)。
 自托管 Browser 扩展/Neko 的部署方法见[自托管 Browser 部署指南](docs/browser-self-hosted.zh-CN.md)。
 
@@ -133,7 +141,7 @@ agentic-gpt config init \
 
 第一条命令会写入安全的 Standalone + Normal 占位配置，并报告尚待处理的 tunnel ID 与密钥引用步骤；它不会自动配置密钥。`--mode` 选择运行时传输方式（Standalone、Hub 或 Local），`--profile` 选择默认工具集预设（normal 启用除 `room` 外的所有 namespace；room 启用所有 namespace）。显式 `toolsets.enabled` 选择优先于 profile 预设。全屏界面中的这些选项只会预填可编辑字段，不会锁定字段。配置流程为 Basic（基础信息）→ Connection（连接，Local 除外）→ Optional settings（可选设置）→ Review（复核）→ Completion（完成）；可反复进入可选设置，Review 会隐藏密钥值，也可跳回先前页面编辑。使用 Tab/Shift+Tab 和方向键移动焦点，Enter 编辑或执行操作，Esc 返回（在根 Basic 页面上不执行操作），Ctrl+C 取消。最终确认 Review 之前不会写入配置、备份或密钥文件。`--agent-secret` 是命令行参数；使用该参数会使密钥暴露于本地进程检查，若将密钥字面量写入 shell 命令还会进入 shell 历史记录。优先在全屏界面中通过隐藏输入设置。Tunnel API key 应使用 `file:`/`env:` 引用。本指南只说明键盘驱动的全屏配置流程，不承诺鼠标操作、行内模式、仪表盘模式或 Windows 行为。
 
-默认配置路径为 `~/.agentic_gpt/config.json`。开放写入根或启用 MCP server 前，请先检查 [`config.example.json`](config.example.json) 和[配置说明](docs/configuration.zh-CN.md)。
+默认配置路径为 `~/.agentic_gpt/config.json`。扩大写策略 allow 模式或启用 MCP server 前，请先检查 [`config.example.json`](config.example.json) 和[配置说明](docs/configuration.zh-CN.md)。
 Room 设置位于 `room`：`repositoryRoot` 为可选项，默认是 `<workspaceRoot>/room`；`maintenance.mode` 可设为 `local` 或 `workflow`，默认是 `local`；`maintenance.autoPush` 默认是 `false`。也可以使用 `agentic-gpt config set room.repositoryRoot null`、`agentic-gpt config set room.maintenance.mode local` 和 `agentic-gpt config set room.maintenance.autoPush false` 修改这些设置。
 使用 `agentic-gpt config keys [--section <SECTION>] [--json]` 查看受控的 `config set` 配置项登记表。
 使用以下命令管理工具 namespace：
@@ -253,7 +261,7 @@ agentic-gpt run
 
 将 `profile` 设为 `room` 后使用 `agentic-gpt run` 启动 Room profile。显式 `toolsets.enabled` 选择优先；`hub.transport` 可设为 `websocket` 或 `sse`。`config init --mode hub` 会打开全屏 TUI，并将 `mode` 预填为 Hub；请在“Connection（连接）”页面通过隐藏输入设置与 Hub 注册值相同的 Agent 密钥。不要将密钥作为 `config set hub.agentSecret` 或 `config init --agent-secret` 的参数传入：参数值会暴露于本地进程检查中，若直接将密钥写在命令中还会进入 shell 历史记录。
 
-对于现有 v0.9 配置或外部 JSON，请使用显式迁移流程 `agentic-gpt config import --config PATH [SOURCE]`（使用默认路径时可省略 `--config`）。省略 `SOURCE` 时会导入所选配置路径。该命令会将配置值填入标准 Config Init TUI，并通过常规备份事务写入当前嵌套 Hub schema。
+旧配置与状态须在启动 Agent 前完成 [v0.10.0 升级流程](#升级到-v0100)。
 
 ### 3. 将 ChatGPT 连接到 Hub
 
@@ -281,17 +289,18 @@ Hub 原生工具与转发执行使用相同的进程生命周期投影。使用 
 agentic-gpt config set confirmationProvider.channels '["freedesktop"]'
 agentic-gpt config set confirmationLanguage zh-CN
 
-agentic-gpt config allow add bash
-agentic-gpt config confirm add python -c
-agentic-gpt config deny add ssh
+agentic-gpt config allow add 'printf **'
+agentic-gpt config confirm add 'python -c **'
+agentic-gpt config deny add 'ssh **'
 
 agentic-gpt config path list
-agentic-gpt config path write add ~/Projects
-agentic-gpt config path readonly add /var/log
-agentic-gpt config path deny add ~/.secrets
+agentic-gpt config path read allow add '/var/log/**'
+agentic-gpt config path write allow add '/home/your-user/Projects/**'
+agentic-gpt config path read deny add '/home/your-user/.secrets/**'
+agentic-gpt config path write deny add '/home/your-user/.secrets/**'
 ```
 
-Hub 中继的 `ntfy` 是可选能力，只有在 Hub 模式或配置了 Standalone Hub 报告/确认中继时才有意义。本地拒绝或超时即为最终结果。
+Hub 中继的 `ntfy` 是可选能力，只有在 Hub 模式或配置了 Standalone Hub 报告/确认中继时才有意义。明确拒绝或取消会终止操作。对多数 `acquireConfirmation` 请求，超时、过期或提供方不可用时回退配置策略；若策略结果为 Confirm，则终止操作，不会再次等待确认。`tmux.pasteText` 默认启用主动确认，未获批准即终止。下游 MCP 的审批行为保持不变；详见[确认配置参考](docs/configuration.zh-CN.md#单次主动确认)。
 
 字段定义与热加载行为见[配置说明](docs/configuration.zh-CN.md)。
 
@@ -302,6 +311,8 @@ Hub 中继的 `ntfy` 是可选能力，只有在 Hub 模式或配置了 Standalo
 - [接口索引](docs/interfaces.md)：Hub HTTP、Actions、Apps MCP、协议与直接 MCP surface。
 - [工具契约矩阵](docs/tool-contract-matrix.md)：Normal/Room/Hub 工具契约、边界与 surface parity 矩阵。
 - [运维指南](docs/operations.md)：本地验证、Standalone-first 部署检查、Hub 检查与安全不变量。
+- [v0.10.0 发布说明](docs/release-notes-v0.10.0.md)：发布范围、兼容性变化与升级入口。
+- [Process 切换说明](docs/process-cutover.md)：Process API 与存储兼容性的权威说明。
 - [开发指南](docs/development/README.zh-CN.md)：新增功能/模块，或审查所有权、权限、配置与契约变更前阅读；包含验证方式与完成标准。
 - [发布指南](docs/development/releasing.md)：执行发布预检、打包或推送发布标签前阅读。
 
@@ -321,7 +332,7 @@ git push origin "v${rust_version}"
 
 - Tunnel API key、Hub API key、Agent 密钥与 ntfy topic 都应视为凭据。
 - Tunnel 密钥优先使用 `file:` 或受保护的 `env:` 引用，不要将其以明文写入配置。
-- 凭据、浏览器、云平台和 SSH 目录应放在 denied roots 中。
+- 为凭据、浏览器、云平台和 SSH 目录分别添加显式的读、写 deny 模式。
 - 对 shell、网络工具和陌生 MCP server 优先要求确认。
 - 使用有界的 `process.read` 获取输出或状态，避免 HTTP/MCP 请求无限期阻塞。
 - Hub 公开部署时必须使用 HTTPS。

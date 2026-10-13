@@ -53,12 +53,12 @@ Choose Hub mode when you need one public entry point for multiple Agents, Custom
 - `process.exec`, `process.batch`, `skills.run`, `mcp.callTool`, and `mcp.batch` can create managed processes.
 - Use `process.read`, `process.list`, and `process.cancel` to inspect or control a process by `processId`. `process.read` combines auto output/status views; its default wait is 5 seconds (maximum 30, or 0 for immediate observation).
 - Batch admission is atomic, with bounded confirmation boundaries.
-- Configurable allow / confirm / deny command policy.
-- Writable, read-only, and denied path roots.
+- Explicit command policy groups with `defaultAction` and allow / confirm / deny wildcard patterns.
+- Separate read and write path-policy groups with explicit allow / confirm / deny wildcard patterns.
 - Local desktop confirmation and optional Hub-relayed ntfy confirmation.
 - Optional bubblewrap sandbox integration.
 - Bounded downstream MCP arguments/results and exact request-ID cancellation; `detached` is reported when remote termination cannot be proven.
-- 每个 Agent 独立的持久事件收件箱，提供有界提醒及显式 list/get/mark；接口契约见[接口参考](docs/interfaces.md#持久事件收件箱)。
+- 本地持久事件收件箱，提供有界提醒及显式 list/get/mark；接口契约见[接口参考](docs/interfaces.md#持久事件收件箱)。
 - An optional Rust Hub with Actions OpenAPI, an Apps-compatible `/mcp`, OAuth shim, HTTP API, WebSocket/SSE Agents, history, reporting, and notifications.
 
 ## Repository layout
@@ -67,7 +67,7 @@ Choose Hub mode when you need one public entry point for multiple Agents, Custom
 - `crates/agentic-gpt-hub`: optional Rust Hub HTTP/WebSocket/SSE/MCP service.
 - `crates/agentic-browser-host`: optional Linux Native Messaging bridge for a self-hosted ChatGPT Chrome extension Browser backend.
 - `crates/agentic-gpt-protocol`: shared JSON protocol types.
-- `config.example.json`: strict v0.9, Standalone-first example without usable secrets.
+- `config.example.json`: strict v0.10 Config v2, Standalone-first example without usable secrets.
 - `openapi/hub.yaml`: Custom GPT Actions schema for Hub mode.
 - `docs/configuration.md`: configuration, secrets, and reload boundaries by runtime.
 - `docs/standalone-runtime.md`: Tunnel/local topology, trust, recovery, reporting, and tool matrix.
@@ -104,6 +104,14 @@ Supported targets:
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
 
+## Upgrade to v0.10.0
+
+Read the [v0.10.0 release notes](docs/release-notes-v0.10.0.md) before replacing deployed artifacts. For an older deployment, stop every Agent that uses the target `HOME`, then run `python3 scripts/migrate-agentic.py` from this repository to preview the migration; add the script's only option, `--write`, after reviewing the report. The script always uses the current user's standard `~/.agentic_gpt/config.json` and migrates the legacy command/path policy formats and private-state layout. It does not migrate every legacy configuration field.
+
+After the policy migration, use `agentic-gpt config import --config PATH [SOURCE]` separately when Config v2 legacy Hub fields or selectors still need normalization. Omitting `SOURCE` imports the selected configuration path through the Config Init TUI and standard backup transaction. Rename an old `limits.maxActiveJobs` field to `limits.maxActiveProcesses` before loading or importing the configuration so the intended limit is preserved.
+
+Follow the release notes' authoritative [upgrade steps](docs/release-notes-v0.10.0.md#升级步骤) for the complete order, and the [operations guide](docs/operations.md) for private-state checks. The [Process cutover guide](docs/process-cutover.md) covers API and storage compatibility. Current Room configuration and contracts are documented in the [configuration guide](docs/configuration.md#skillsroom-与-sandbox) and [interface guide](docs/interfaces.md#当前-room-边界与协调请求投影).
+
 See the [development guide](docs/development/README.md) before adding features or modules or changing configuration, state ownership, or public contracts. See the [release guide](docs/development/releasing.md) for packaging and publishing.
 See the [self-hosted Browser guide](docs/browser-self-hosted.md) for extension/Neko deployment.
 
@@ -134,7 +142,7 @@ agentic-gpt config init \
 
 The first command writes a safe Standalone + Normal placeholder configuration and reports the outstanding tunnel ID and secret-reference steps; it does not configure a secret automatically. `--mode` selects the runtime transport (Standalone, Hub, or Local); `--profile` selects a default toolset preset (normal enables every namespace except `room`; room enables all namespaces). Explicit `toolsets.enabled` overrides the profile preset. In full-screen mode, these options only prefill editable fields. The flow is Basic → Connection (except Local) → Optional settings → Review → Completion. You can revisit optional settings, Review masks secrets, and you can return to earlier pages to edit them. Use Tab/Shift+Tab and arrow keys to move focus, Enter to edit or act, Esc to go back (a no-op on the root Basic page), and Ctrl+C to cancel. Nothing is written to configuration, backup, or secret files before final confirmation on Review. `--agent-secret` is a command-line argument: passing it exposes the secret to local process inspection; typing a literal secret in a shell command also records it in shell history. Prefer the full-screen UI's masked input. Use `file:`/`env:` references for the Tunnel API key. This guide describes only the keyboard-driven full-screen flow; it makes no claim about mouse controls, inline/dashboard modes, or Windows behavior.
 
-The default configuration path is `~/.agentic_gpt/config.json`. Before opening writable roots or enabling MCP servers, review [`config.example.json`](config.example.json) and the [configuration guide](docs/configuration.md).
+The default configuration path is `~/.agentic_gpt/config.json`. Before broadening write-policy allow patterns or enabling MCP servers, review [`config.example.json`](config.example.json) and the [configuration guide](docs/configuration.md).
 Room settings live under `room`: `repositoryRoot` is optional and defaults to `<workspaceRoot>/room`; `maintenance.mode` accepts `local` or `workflow` and defaults to `local`; `maintenance.autoPush` defaults to `false`. You can also set these with `agentic-gpt config set room.repositoryRoot null`, `agentic-gpt config set room.maintenance.mode local`, and `agentic-gpt config set room.maintenance.autoPush false`.
 Use `agentic-gpt config keys [--section <SECTION>] [--json]` to inspect the controlled `config set` registry.
 Manage tool namespaces with:
@@ -254,7 +262,7 @@ agentic-gpt run
 
 Set `profile` to `room` and use `agentic-gpt run` to start a Room-profile Agent. Explicit `toolsets.enabled` takes precedence; `hub.transport` accepts `websocket` or `sse`. `config init --mode hub` opens the full-screen TUI with Hub mode prefilled. Enter the same Agent secret used for Hub registration through the masked input on the Connection page. Do not pass it via `config set hub.agentSecret` or `config init --agent-secret`: argument values are exposed to local process inspection, and a literal secret typed into a shell command also enters shell history.
 
-For an existing v0.9 configuration or external JSON, use the explicit migration flow `agentic-gpt config import --config PATH [SOURCE]` (`--config` is optional for the default path). Omitting `SOURCE` imports the selected configuration path. This loads values into the standard Config Init TUI and writes the current nested Hub schema through the usual backup transaction.
+For legacy configuration and state, complete the [v0.10.0 upgrade procedure](#upgrade-to-v0100) before starting the Agent.
 
 ### 3. Connect ChatGPT to the Hub
 
@@ -279,17 +287,18 @@ Hub-native tools and forwarded execution use the same process-lifecycle projecti
 agentic-gpt config set confirmationProvider.channels '["freedesktop"]'
 agentic-gpt config set confirmationLanguage zh-CN
 
-agentic-gpt config allow add bash
-agentic-gpt config confirm add python -c
-agentic-gpt config deny add ssh
+agentic-gpt config allow add 'printf **'
+agentic-gpt config confirm add 'python -c **'
+agentic-gpt config deny add 'ssh **'
 
 agentic-gpt config path list
-agentic-gpt config path write add ~/Projects
-agentic-gpt config path readonly add /var/log
-agentic-gpt config path deny add ~/.secrets
+agentic-gpt config path read allow add '/var/log/**'
+agentic-gpt config path write allow add '/home/your-user/Projects/**'
+agentic-gpt config path read deny add '/home/your-user/.secrets/**'
+agentic-gpt config path write deny add '/home/your-user/.secrets/**'
 ```
 
-Hub-relayed `ntfy` is optional and useful only in Hub mode or with Standalone Hub reporting/confirmation relay configured. A local denial or timeout is final.
+Hub-relayed `ntfy` is optional and useful only in Hub mode or with Standalone Hub reporting/confirmation relay configured. An explicit denial or cancellation terminates the operation. For most `acquireConfirmation` requests, timeout, expiry, or provider unavailability falls back to the configured policy; if that policy resolves to Confirm, the operation stops without waiting a second time. `tmux.pasteText`, whose proactive confirmation defaults to enabled, terminates whenever approval is not granted. Downstream MCP approval behavior is unchanged; see the [confirmation configuration reference](docs/configuration.md#单次主动确认).
 
 See the [configuration guide](docs/configuration.md) for field definitions and live-reload behavior.
 
@@ -300,6 +309,8 @@ See the [configuration guide](docs/configuration.md) for field definitions and l
 - [Interface index](docs/interfaces.md): Hub HTTP, Actions, Apps MCP, protocol, and direct MCP interfaces.
 - [Tool contract matrix](docs/tool-contract-matrix.md): Normal/Room/Hub tool contracts and cross-surface parity.
 - [Operations](docs/operations.md): local verification, Standalone-first deployment checks, Hub checks, and safety invariants.
+- [v0.10.0 release notes](docs/release-notes-v0.10.0.md): release scope, compatibility changes, and upgrade entry points.
+- [Process cutover](docs/process-cutover.md): authoritative Process API and storage compatibility notes.
 - [Development](docs/development/README.md): read before implementing features/modules or reviewing changes to ownership, permissions, configuration, or contracts; includes verification and completion criteria.
 - [Releases](docs/development/releasing.md): read before release preflight, packaging, or pushing a release tag.
 
@@ -319,11 +330,10 @@ The tag version is derived from the `agentic-gpt` Cargo package version; `agenti
 
 - Treat Tunnel API keys, Hub API keys, Agent secrets, and ntfy topics as credentials.
 - Prefer `file:` or protected `env:` secret references; never write a plaintext tunnel key into configuration.
-- Keep credentials, browser, cloud-platform, and SSH directories in denied roots.
+- Add explicit read and write deny patterns for credential, browser, cloud-platform, and SSH directories.
 - Prefer confirmation for shell commands, network tools, and unfamiliar MCP servers.
 - Retrieve results through bounded process output/result rather than leaving HTTP/MCP requests blocked for a long time.
 - Public Hub deployments require HTTPS.
-- Do not let v0.9 read an unmigrated v0.8 limits object.
 
 ## License
 

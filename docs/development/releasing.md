@@ -1,6 +1,6 @@
 # 发布指南
 
-本文只说明发布前检查、版本对应关系与 Rust/Linux 发布入口；源码开发和完整本地验证见[开发说明](README.md)。本指南描述仓库当前脚本与 GitHub Actions，不记录单次发布报告。
+本文只说明发布前检查、版本对应关系与 Rust/Linux 发布入口；源码开发和完整本地验证见[开发说明](README.md)。本指南描述仓库当前脚本与 GitHub Actions，不记录单次发布报告。当前 0.10.0 的变化和升级步骤见[发布说明](../release-notes-v0.10.0.md)。
 
 ## 发布前：本地非发布检查
 
@@ -58,6 +58,6 @@ rust_version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import
 
 ## CI 覆盖范围与证据边界
 
-[`ci.yml`](../../.github/workflows/ci.yml) 对 `main` 的推送和以其为目标的 pull request 运行 `fmt`、工作区 `check`、严格 Clippy（`cargo clippy --workspace --all-targets -- -D warnings`）、工作区测试、Agent/Hub 构建和跨端契约检查。严格 Clippy 属于 CI 门禁；本地发布预检与标签发布工作流都**不运行 Clippy**，因此预检成功不能证明严格 Clippy 已通过，也不能据此判断是否存在警告。
+[`ci.yml`](../../.github/workflows/ci.yml) 对 `main` 的推送和以其为目标的 pull request 运行 `fmt`、工作区 `check`、严格 Clippy（`cargo clippy --workspace --all-targets -- -D warnings`）、工作区测试、Agent/Hub 构建和跨端契约检查。CI 还会在隔离 HOME 中运行统一迁移脚本的 Python 集成测试。严格 Clippy 属于 CI 门禁；本地发布预检与标签发布工作流都**不运行 Clippy**，因此预检成功不能证明严格 Clippy 已通过，也不能据此判断是否存在警告。
 
 发布工作流检查标签提交的格式、编译、测试、Agent/Hub 构建、标签与 Cargo 版本配对及跨端契约，再构建两个 Linux 目标的包。其结果只证明这些步骤在该次运行中通过；不证明 ARM 上的实际运行行为、外部 Actions 导入、Console 构建或生产部署。请以对应工作流运行记录为准，不将本指南或本地预检视为这些独立范围的验证。

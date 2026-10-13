@@ -192,3 +192,8 @@
 - 实现为 scripts/migrate-agentic.py 单文件，删除两个旧入口；迁移/run/config 三锁贯穿验证与写入，配置先转换、状态副本先验证；无旧状态/已有新状态报告跳过，不阻止配置转换。
 - 长期测试价值：跨 CLI/文件/SQLite 验证配置与状态的共同写入、原数据保留、拒绝活动实例、错误与中断后撤回；原脚本无具名测试覆盖这些边界。新增 8 个真实文件/SQLite 集成用例（⑤档），纳入 CI；未新增纯字段/默认值快照测试。
 - 审查发现配置成功写入后中断的恢复缺口，已将恢复扩展至外层完整提交区，故障注入测试通过，独立复审无剩余 finding。
+
+## 0.10.0 版本准备
+- 用户批准更新版本号和发布说明，不打 tag、不推送。Agent/Hub/Protocol 共同升 0.10.0；Browser-host、apply-patch、Console、OpenAPI 保持独立版本。
+- 对照 v0.9.1 至 bb1b240 的主要改变：Process/Bash/read、确认和通配策略、Config v2/TUI/toolsets、事件、Room v2、HTTP MCP/OAuth、Browser、状态归属和 Hub 恢复。
+- 发布迁移说明必须写清统一脚本覆盖范围：策略与私有状态；旧 Config v2 selectors/hub 字段及 maxActiveJobs/client cutover 另处理，Job 历史不导入。
