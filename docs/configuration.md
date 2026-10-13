@@ -138,7 +138,7 @@ Optional settings 还提供以下编辑入口：
 
 `config init --non-interactive` 没有用于填写 `mcpServers` 集合的 CLI flags。自动化初始化后可
 使用 `config mcp` 配置 server；命令模式使用 `config allow`、`config confirm`、`config deny`；
-路径模式使用 `config path read/write` 的 allow/confirm/deny 子命令。
+路径基线使用 `config path` 的 `default-action`、`readonly`、`write`、`deny` 子命令。
 
 ## 各 runtime 必需项
 
@@ -188,15 +188,14 @@ agentic-gpt run
 | `toolsets` | 已启用的 tool namespace；显式 `enabled` 列表会覆盖配置档 preset。 |
 | `agentId` | 本地连接身份，用于 Hub 路由、协议身份及 `~/.agentic_gpt/runtime/agent/<agentId>/` 下的 runtime/socket 路径；私有持久状态统一位于 `~/.agentic_gpt/state/`，不按此字段分目录。 |
 | `displayName` | summary/reporting 中的人类可读机器名称。 |
-| `workspaceRoot` | 默认工作目录及 `.agentic-gpt-audit.jsonl` 所在位置；读写权限由显式 `pathPolicy` 指定。 |
+| `workspaceRoot` | 默认工作目录及 `.agentic-gpt-audit.jsonl` 所在位置；不会隐式扩大路径基线。 |
 | `backupLimit` | Agentic 管理配置写入时保留的备份数量。 |
 | `confirmationProvider` | 有序的本地/远程确认通道。 |
 | `confirmationLanguage` | `en` 或 `zh-CN`。 |
-| `sandbox` | 可选 bubblewrap 配置。 |
+| `bubblewrap` | 是否对受管理 Process 启用 bubblewrap；默认 `false`。 |
 | `shell` | Bash 命令执行的 Shell 初始化文件设置。 |
 | `mcpServers` | `mcp.*` 转发的下游 MCP server。 |
-| `pathPolicy` | 独立 read/write 策略；各含 defaultAction 和 allow/confirm/deny 字符串模式数组。 |
-| `policy` | 显式 allow / confirm / deny 命令规则。 |
+| `policy` | 统一的自动命令／路径策略：`enabled`、`command` 与 `path`。 |
 | `limits` | Process 并发限制与最大活动 Process/Skill/MCP Job 容量。 |
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
@@ -520,47 +519,59 @@ CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会
 
 ## 命令与路径策略
 
-命令 `policy`、路径 `pathPolicy.read` 和 `pathPolicy.write` 使用相同的显式结构：
+`policy` 是自动命令判定、路径准入与 bubblewrap 挂载的唯一配置来源：
 
 ```json
 {
   "policy": {
-    "defaultAction": "confirm",
-    "allow": ["printf **"],
-    "confirm": ["python -c **"],
-    "deny": ["ssh **"]
+    "enabled": true,
+    "command": {
+      "defaultAction": "confirm",
+      "allow": ["printf **"],
+      "confirm": ["python -c **"],
+      "deny": ["ssh **"]
+    },
+    "path": {
+      "defaultAction": "deny",
+      "readOnly": ["/var/log"],
+      "write": ["/path/to/workspace"],
+      "deny": ["/path/to/workspace/private"]
+    }
   },
-  "pathPolicy": {
-    "read": {"defaultAction": "deny", "allow": ["/path/to/workspace/**"], "confirm": [], "deny": []},
-    "write": {"defaultAction": "deny", "allow": ["/path/to/workspace/**"], "confirm": [], "deny": []}
-  }
+  "bubblewrap": false
 }
 ```
 
-同一策略中始终按 `deny > confirm > allow > defaultAction` 判定；更具体的 allow 不覆盖 deny 或 confirm。
-命令缺省动作是 confirm，读写路径缺省动作是 deny。`workspaceRoot` 仅指定默认工作目录，不隐式授予读写权限。
-`config init` 会按 profile 写入可编辑的命令预设，并显式写入工作区及常用目录的路径策略；加载和重载不会补回被删除的预设或追加隐藏规则。
+`policy.enabled=false` 会关闭自动命令与路径策略，并使 bubblewrap 保持关闭；请求显式提供的
+`acquireConfirmation` 仍按请求执行。命令策略始终按
+`deny > confirm > allow > defaultAction` 判定；命令缺省动作是 `confirm`。
+
+路径只接受具体目录或文件根，不接受 `*`、`**` 等通配模式；加载时会展开 home 并规范化路径。
+`defaultAction` 只接受 `allow` 或 `deny`，缺省为 `deny`。`write` 根同时授予读取，`readOnly`
+只授予读取，`deny` 在已挂载父目录下遮蔽对应子树。`workspaceRoot` 仅指定默认工作目录，是否可访问
+仍由 `policy.path` 决定。`config init` 会写入可编辑的命令预设和具体路径根；加载和重载不会补回
+已删除的预设或追加另一套隐藏规则。
 
 命令模式按 argv 逐项匹配：`*` 匹配一个参数内的任意字符，最后一个独立的 `**` 匹配零个或多个后续参数。
 参数中的字面 `*` 应使用模式引号或反斜杠转义。单独的模式 `*` 是全局规则，也作用于无法静态解析完整的脚本；这是显式授权范围，添加前须审查。
-路径模式先规范化实际路径和符号链接目标：`*` 不跨 `/`，`**` 可跨目录；`/path/**` 同时包含目录本身及子树。
-路径模式的 `\*` 表示字面星号，`\\` 表示字面反斜杠；`?` 是字面字符。
-
 ```bash
-agentic-gpt config set policy.defaultAction confirm
+agentic-gpt config set policy.enabled true
+agentic-gpt config set policy.command.defaultAction confirm
 agentic-gpt config allow add 'printf **'
 agentic-gpt config confirm add 'python -c **'
 agentic-gpt config deny add 'ssh **'
 agentic-gpt config path list
-agentic-gpt config path read allow add '/var/log/**'
-agentic-gpt config path write allow add '/path/to/workspace/**'
-agentic-gpt config path read deny add '/path/to/private/**'
-agentic-gpt config path write deny add '/path/to/private/**'
+agentic-gpt config path default-action deny
+agentic-gpt config path readonly add /var/log
+agentic-gpt config path write add /path/to/workspace
+agentic-gpt config path deny add /path/to/workspace/private
+agentic-gpt config path readonly remove /var/log
 ```
 
-`config set` 也支持 `policy.defaultAction/allow/confirm/deny`、`pathPolicy.read.*`、`pathPolicy.write.*`。
-数组值使用 JSON 字符串数组；模式作为一个 CLI 参数传入，不再使用 program/argsPrefix 规则对象或 writeRoots/readOnlyRoots/denyRoots。
-旧配置升级见[运维迁移说明](operations.md#确认与策略格式迁移)。
+`config set` 也支持 `policy.command.defaultAction/allow/confirm/deny` 与
+`policy.path.defaultAction/readOnly/write/deny`。数组值使用 JSON 字符串数组；命令模式作为一个
+CLI 参数传入，路径列表只接受具体根。旧的 `pathPolicy`、`sandbox` 和扁平命令 `policy` 形状
+不属于当前配置；运行时不会自动转换旧格式。
 
 ### 单次主动确认
 
@@ -693,7 +704,7 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 - TUI 会掩码 Bearer token，并在最终 JSON 预览中脱敏。
 - 在审查信任与确认策略之前，示例应保持 disabled。
 
-## Skills、Room 与 sandbox
+## Skills、Room 与 bubblewrap
 
 `skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；只有缺少顶层字段时才读取 legacy `room.skills`。
 
@@ -716,9 +727,17 @@ replica。旧 JSONL append/update/remove 与 passage/date-selection 调用不会
 为 maintenance；请迁移到显式 slot/payload request，或删除旧调用。历史 release/migration
 记录只保留历史，不是当前 compatibility contract。
 
-`sandbox.enabled` 启用 bubblewrap；`requiredRuntimePaths` 是运行时依赖的只读挂载，`readPaths`／`writePaths` 是显式的基线读取／写入挂载目录。
-挂载列表不从命令或路径策略推导；配置全局 `*` 不会自动扩大 OS 可见目录。Process 主动确认获准的 read/write 路径可追加到本次执行挂载，执行结束后失效。
-未启用 bubblewrap 时没有此 OS 挂载隔离；策略和确认仍生效。tmux、下游 MCP 和 Browser JavaScript 不属于受管理 Process 的 bubblewrap 沙箱。
+顶层 `bubblewrap=true` 时，受管理 Process 的挂载直接由 `policy.path` 派生，不存在另一套可配置
+sandbox 列表。执行层提供的只读运行依赖挂载为 `/usr`、`/bin`、`/lib`、`/lib64`、`/etc/ssl`，并使用
+bubblewrap 内的 `PATH`。`defaultAction=deny` 时只挂载 `readOnly` 与 `write` 的具体根；
+`defaultAction=allow` 时以宿主 `/` 的读写挂载为基线，再将 `readOnly` 根收紧为只读并遮蔽 `deny` 根。
+`write` 根包含读取权限，并优先于重叠的 `readOnly` 根；`deny` 优先于两者。位于已挂载父目录下的现存 `deny` 根会被遮蔽。
+若拒绝路径尚不存在且会被父目录挂载暴露，操作会因无法安全建立遮蔽而失败；不会在宿主机创建占位路径。
+
+Process 主动确认获准的 `read`／`write` 路径可追加到本次挂载，执行结束后失效。bubblewrap
+`bwrap` 可执行文件从 Agent 的 `PATH` 查找；启动或挂载失败时操作失败，不回退到未隔离执行。顶层 `bubblewrap=false`、或
+`policy.enabled=false` 时不启用 OS 挂载隔离；显式主动确认仍生效。tmux、下游 MCP 和 Browser
+JavaScript 不属于受管理 Process 的 bubblewrap 范围。
 
 ## CLI 可管理字段
 
@@ -728,8 +747,8 @@ replica。旧 JSONL append/update/remove 与 passage/date-selection 调用不会
 agentic-gpt config keys [--section <SECTION>] [--json]
 ```
 
-文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`shell`、`limits`、
-`skills`、`room`、`tunnel`、`http-mcp`、`policy` 和 `events` 分组：
+文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`policy`、`shell`、`limits`、
+`skills`、`room`、`tunnel`、`http-mcp` 和 `events` 分组：
 
 - `--section` 只显示其中一个分组。
 - `--json` 返回机器可读的类型、是否可为 null、示例、双语说明和别名元数据。
@@ -746,9 +765,10 @@ agentic-gpt config keys [--section <SECTION>] [--json]
 agentic-gpt config set shell.initFile null
 agentic-gpt config set shell.initFile /path/to/protected/bashrc
 agentic-gpt config unset shell.initFile
-agentic-gpt config set sandbox.requiredRuntimePaths '["/usr","/opt/runtime"]'
-agentic-gpt config set sandbox.readPaths '["/path/to/read-only"]'
-agentic-gpt config set sandbox.writePaths '["/path/to/workspace"]'
+agentic-gpt config set policy.enabled true
+agentic-gpt config set bubblewrap true
+agentic-gpt config set policy.path.readOnly '["/path/to/read-only"]'
+agentic-gpt config set policy.path.write '["/path/to/workspace"]'
 agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
 agentic-gpt config set room.repositoryRoot null
 agentic-gpt config set room.maintenance.mode local
@@ -758,7 +778,7 @@ agentic-gpt config set room.maintenance.autoPush false
 registry 包含以下常用 scalar：
 
 - `mode`、`profile`、`agentId`、`hub.url`、`hub.transport`、`hub.agentSecret`、`workspaceRoot`
-- `confirmationProvider.channels`、`confirmationLanguage`、`sandbox.enabled`
+- `confirmationProvider.channels`、`confirmationLanguage`、`policy.enabled`、`bubblewrap`
 - `tunnel.tunnelId`、`tunnel.apiKey`
 - 全部 `tunnel.client.*` 与 `tunnel.hubReporting.*`
 - `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
@@ -791,8 +811,8 @@ Tunnel secret 必须写成 `file:PATH` 或 `env:NAME` 引用；`file:` 路径可
 - `--config` 可省略，此时使用默认配置路径。
 - 省略 SOURCE 时会导入所选 `--config` 路径。
 - 该流程进入普通交互式 Config Init TUI。
-- 没有编辑器的已识别字段会保留，包括 MCP server、policy、path policy、limits、非活动
-  hub/tunnel/room 数据以及安全的未知扁平字段。
+- 没有编辑器的已识别当前字段会保留，包括 MCP server、统一 policy、limits、非活动
+  hub/tunnel/room 数据以及安全的未知扁平字段；旧 policy/path/sandbox 形状不会在这里自动转换。
 - 无法导入的字段会明确报告，最终通过标准备份/密钥事务写入。
 
 ## 热加载与重启边界
@@ -803,14 +823,13 @@ live subset。无效候选会保留上一份有效状态；候选修改需要重
 
 | 配置 | 行为 |
 | --- | --- |
-| `policy`、`limits`、`mcpServers`、`toolsets.enabled` | 所有 Agent worker 共享热加载，对新 admission/call 与工具发现生效 |
+| `policy`、`bubblewrap`、`limits`、`mcpServers`、`toolsets.enabled` | 所有 Agent worker 共享热加载；policy 与 bubblewrap 对之后接纳的请求生效 |
 | `shell.initFile` | 热加载；之后接纳的 Process 使用新设置，已接纳 Process 保留准入时的配置快照 |
-| `pathPolicy`、`sandbox.readPaths/writePaths` | 所有 Agent worker 共享热加载；独立显式规则对后续操作生效，不会随 workspace 重启需求延迟 |
 | `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone HTTP watcher 协调启用状态与 endpoint identity；identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
 | `httpMcp.bearerToken` 引用或其解析内容 | Standalone HTTP watcher 原地更新认证而不重新绑定；解析凭据可用时保留已有 session |
 | 已接纳 Process/Skill Job 与已创建下游调用 | Process 与 Skill Job 从准入开始保留同一份有效配置，贯穿容量、审计、包摘要、policy、工作目录、preflight、确认和异步执行。Process batch 的 preflight/确认、prepared admission 与排队 worker 使用同一份配置；后续新准入使用热加载后的配置。下游 MCP 调用保留各自资源专属快照，这不是全部操作的统一快照规则。 |
 | `events.lowTtlSeconds`、各 `events.internalOverrides.<event-type>` 键 | 热加载；新接纳操作与外部注入使用新配置，已接纳的 Process/Skill install 保留其接纳时快照，之后产生的事件也继续使用该快照。 |
-| `workspaceRoot` | 修改 workspace 需要重启；重启前默认工作目录仍使用原值，显式路径策略独立热加载 |
+| `workspaceRoot` | 修改 workspace 需要重启；重启前默认工作目录仍使用原值，`policy.path` 独立热加载 |
 | `mode`、`profile`、`agentId` | 需要重启 |
 | `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |
 | `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |

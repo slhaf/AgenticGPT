@@ -4,7 +4,7 @@ use crate::browser_discovery::{resolve_browser_runtime_with_sources, BrowserRunt
 use crate::cli::{read_local_arguments, MAX_LOCAL_ARGUMENT_BYTES};
 use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{Config, RuntimeMode};
-use crate::config::{PathPolicyConfig, PolicyConfig, TunnelConfig};
+use crate::config::{PathPolicyConfig, TunnelConfig};
 use crate::startup::{build_app_state_with_private_state, reload_live_config_once};
 use crate::state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel};
 use agentic_gpt_protocol::{
@@ -326,21 +326,11 @@ fn test_path_policy(
     readonly: Vec<PathBuf>,
     deny: Vec<PathBuf>,
 ) -> PathPolicyConfig {
-    let patterns = |paths: Vec<PathBuf>| {
-        paths
-            .into_iter()
-            .map(|path| crate::config::path_subtree_pattern(&path))
-            .collect::<Vec<_>>()
-    };
-    let mut read = PolicyConfig::with_default(policy::PolicyDecision::Deny);
-    read.allow = patterns(write.iter().cloned().chain(readonly).collect());
-    read.deny = patterns(deny.clone());
-    let mut write_policy = PolicyConfig::with_default(policy::PolicyDecision::Deny);
-    write_policy.allow = patterns(write);
-    write_policy.deny = patterns(deny);
     PathPolicyConfig {
-        read,
-        write: write_policy,
+        write,
+        read_only: readonly,
+        deny,
+        ..Default::default()
     }
 }
 
@@ -350,9 +340,10 @@ fn command_test_state(
 ) -> (AppState, mpsc::UnboundedReceiver<AgentMessage>) {
     let mut config = Config::default_config().unwrap();
     config.shell.init_file = config::ShellInitFile::Disabled;
-    config.policy.allow = vec!["*".to_string()];
-    config.path_policy.read.allow = vec!["*".to_string()];
-    config.path_policy.write.allow = vec!["*".to_string()];
+    config.policy.command.allow = vec!["*".to_string()];
+    config.policy.path.read_only = Vec::new();
+    config.policy.path.default_action = crate::config::PathDefaultAction::Allow;
+    config.policy.path.write = Vec::new();
     config.toolsets = if profile == CapabilityProfile::Room {
         config::ToolsetConfig::room()
     } else {
@@ -623,6 +614,7 @@ async fn hub_panel_failure_emits_live_event_source_without_terminal_response() {
         .write()
         .await
         .policy
+        .command
         .allow
         .push("true **".to_string());
     let agent_id = state.config.read().await.agent_id.clone();
@@ -805,8 +797,8 @@ async fn room_mode_dispatches_current_diary_command() {
 #[test]
 fn read_only_system_file_is_allowed() {
     let mut config = Config::default_config().unwrap();
-    config.path_policy = config::seed_path_policy(&config.workspace_root);
-    config.path_policy.read.allow.push("/".to_string());
+    config.policy.path = config::seed_path_policy(&config.workspace_root);
+    config.policy.path.read_only.push(PathBuf::from("/"));
     assert!(exec::preflight(
         &config,
         &config.workspace_root,
@@ -829,7 +821,7 @@ fn path_policy_allows_write_root_and_blocks_readonly_write() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy = test_path_policy(vec![downloads.clone()], vec![cache.clone()], Vec::new());
+    config.policy.path = test_path_policy(vec![downloads.clone()], vec![cache.clone()], Vec::new());
 
     assert!(exec::preflight(
         &config,
@@ -869,7 +861,7 @@ fn deny_patterns_override_read_and_write() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy =
+    config.policy.path =
         test_path_policy(vec![downloads.clone()], Vec::new(), vec![secret.clone()]);
 
     assert_eq!(
@@ -904,7 +896,7 @@ fn unknown_program_defaults_to_write_access() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy = test_path_policy(Vec::new(), vec![cache.clone()], Vec::new());
+    config.policy.path = test_path_policy(Vec::new(), vec![cache.clone()], Vec::new());
 
     assert_eq!(
         exec::preflight(
@@ -932,7 +924,7 @@ fn working_directory_must_be_existing_writable_directory() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace.clone();
-    config.path_policy =
+    config.policy.path =
         test_path_policy(vec![workspace.clone()], vec![cache], vec![secret.clone()]);
 
     assert_eq!(
@@ -975,7 +967,7 @@ fn relative_path_arguments_are_resolved_from_working_directory() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy =
+    config.policy.path =
         test_path_policy(vec![config.workspace_root.clone()], Vec::new(), Vec::new());
 
     assert_eq!(
@@ -1004,7 +996,7 @@ fn symlink_to_denied_path_is_rejected() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.path_policy = test_path_policy(Vec::new(), Vec::new(), vec![secret]);
+    config.policy.path = test_path_policy(Vec::new(), Vec::new(), vec![secret]);
 
     #[cfg(unix)]
     assert_eq!(
@@ -1017,51 +1009,6 @@ fn symlink_to_denied_path_is_rejected() {
         .unwrap_err(),
         "path_denied"
     );
-}
-
-#[test]
-fn load_old_config_without_path_policy_requires_manual_migration() {
-    let root = unique_temp_dir("old-config");
-    let config_path = root.join("config.json");
-    let config = Config::default_config().unwrap();
-    let mut value = serde_json::to_value(config).unwrap();
-    value.as_object_mut().unwrap().remove("pathPolicy");
-    fs::write(&config_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-
-    let error = Config::load(&config_path).unwrap_err().to_string();
-    assert!(error.contains("config_requires_policy_migration"));
-}
-
-#[test]
-fn load_legacy_path_roots_requires_manual_migration() {
-    let root = unique_temp_dir("partial-config");
-    let config_path = root.join("config.json");
-    let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
-    value["pathPolicy"] = serde_json::json!({
-        "writeRoots": [root.join("write")]
-    });
-    fs::write(&config_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-
-    let error = Config::load(&config_path).unwrap_err().to_string();
-    assert!(error.contains("config_policy_manual_migration_required"));
-}
-
-#[test]
-fn old_rule_objects_require_manual_migration() {
-    let root = unique_temp_dir("old-rule-id");
-    let config_path = root.join("config.json");
-    let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
-    value["policy"]["allow"] = serde_json::json!([
-        {
-            "id": "legacy-id",
-            "program": "bash",
-            "argsPrefix": []
-        }
-    ]);
-    fs::write(&config_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-
-    let error = Config::load(&config_path).unwrap_err().to_string();
-    assert!(error.contains("config_policy_manual_migration_required"));
 }
 
 #[tokio::test]
@@ -1100,7 +1047,7 @@ async fn wp2_reload_applies_explicit_path_policy_while_workspace_requires_restar
         api_key: "env:AGENTIC_TUNNEL_API_KEY".to_string(),
         ..TunnelConfig::default()
     });
-    initial.path_policy = test_path_policy(
+    initial.policy.path = test_path_policy(
         vec![live_write_root],
         vec![live_read_only_root],
         vec![live_deny_root],
@@ -1109,21 +1056,26 @@ async fn wp2_reload_applies_explicit_path_policy_while_workspace_requires_restar
 
     let mut candidate = initial;
     candidate.workspace_root = candidate_workspace;
-    candidate.path_policy = test_path_policy(
+    candidate.policy.path = test_path_policy(
         vec![candidate_write_root],
         vec![candidate_read_only_root],
         vec![candidate_deny_root],
     );
-    candidate.policy.allow.push("printf **".to_string());
-    let candidate_path_policy = candidate.path_policy.clone();
+    candidate.policy.command.allow.push("printf **".to_string());
+    let candidate_path_policy = candidate.policy.path.clone();
     fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
 
     reload_live_config_once(&state).await?;
 
     let live = state.config.read().await.clone();
     assert_eq!(live.workspace_root, live_workspace);
-    assert_eq!(live.path_policy, candidate_path_policy);
-    assert!(live.policy.allow.iter().any(|rule| rule == "printf **"));
+    assert_eq!(live.policy.path, candidate_path_policy);
+    assert!(live
+        .policy
+        .command
+        .allow
+        .iter()
+        .any(|rule| rule == "printf **"));
 
     let _ = fs::remove_dir_all(root);
     Ok(())
@@ -1148,17 +1100,16 @@ async fn wp2_hub_live_reload_preserves_restart_fields() -> anyhow::Result<()> {
     initial.mode = RuntimeMode::Hub;
     initial.workspace_root = live_workspace.clone();
     initial.hub.agent_secret = "hub-secret".to_string();
-    initial.path_policy.write.allow = vec![crate::config::path_subtree_pattern(&live_write_root)];
+    initial.policy.path.write = vec![live_write_root.to_path_buf()];
     let live_hub_url = initial.hub.url.clone();
     *state.config.write().await = initial.clone();
 
     let mut candidate = initial;
     candidate.hub.url = "http://127.0.0.1:18787".to_string();
     candidate.workspace_root = candidate_workspace;
-    candidate.path_policy.write.allow =
-        vec![crate::config::path_subtree_pattern(&candidate_write_root)];
-    candidate.policy.allow.push("printf **".to_string());
-    let candidate_path_policy = candidate.path_policy.clone();
+    candidate.policy.path.write = vec![candidate_write_root.to_path_buf()];
+    candidate.policy.command.allow.push("printf **".to_string());
+    let candidate_path_policy = candidate.policy.path.clone();
     fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
 
     reload_live_config_once(&state).await?;
@@ -1167,8 +1118,13 @@ async fn wp2_hub_live_reload_preserves_restart_fields() -> anyhow::Result<()> {
     assert_eq!(live.mode, RuntimeMode::Hub);
     assert_eq!(live.hub.url, live_hub_url);
     assert_eq!(live.workspace_root, live_workspace);
-    assert_eq!(live.path_policy, candidate_path_policy);
-    assert!(live.policy.allow.iter().any(|rule| rule == "printf **"));
+    assert_eq!(live.policy.path, candidate_path_policy);
+    assert!(live
+        .policy
+        .command
+        .allow
+        .iter()
+        .any(|rule| rule == "printf **"));
 
     let _ = fs::remove_dir_all(root);
     Ok(())

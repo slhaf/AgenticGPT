@@ -48,7 +48,7 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "config_init_secret_path_invalid" => ("Secret path is invalid.", "密钥路径无效。"),
         "config_init_secret_source_invalid" => ("Secret source is invalid.", "密钥来源无效。"),
         "config_init_number_invalid" => ("Enter a valid number.", "请输入有效数字。"),
-        "config_init_path_policy_invalid" => ("Enter a complete policy JSON object with valid absolute path patterns.", "请输入完整策略 JSON 对象及有效绝对路径模式。"),
+        "config_init_path_policy_invalid" => ("Choose allow or deny and enter valid path-root arrays.", "请选择 allow 或 deny，并输入有效的路径根目录数组。"),
         "config_init_runtime_paths_invalid" => (
             "Required runtime paths must be a JSON array.",
             "运行时路径必须是 JSON 数组。",
@@ -1310,42 +1310,11 @@ fn render_optional_form(
                 section,
                 draft,
                 state,
-                SetupField::SandboxEnabled,
+                SetupField::Bubblewrap,
                 language,
                 theme,
                 errors,
             );
-            push_long_form_field(
-                &mut lines,
-                &mut focused_line,
-                session,
-                section,
-                draft,
-                state,
-                SetupField::BubblewrapPath,
-                language,
-                theme,
-                errors,
-                left.width,
-            );
-            for field in [
-                SetupField::RequiredRuntimePaths,
-                SetupField::SandboxReadPaths,
-                SetupField::SandboxWritePaths,
-            ] {
-                push_list_field(
-                    &mut lines,
-                    &mut focused_line,
-                    section,
-                    draft,
-                    state,
-                    field,
-                    language,
-                    theme,
-                    errors,
-                    left.width,
-                );
-            }
         }
         OptionalSection::Shell => {
             push_choice_group(
@@ -1561,15 +1530,43 @@ fn render_optional_form(
             }
         }
         OptionalSection::Workspace => {
-            for field in [
+            push_long_form_field(
+                &mut lines,
+                &mut focused_line,
+                session,
+                section,
+                draft,
+                state,
                 SetupField::WorkspaceRoot,
-                SetupField::ReadPolicy,
-                SetupField::WritePolicy,
+                language,
+                theme,
+                errors,
+                left.width,
+            );
+            push_choice_group(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::PathDefaultAction,
+                optional_field_label(SetupField::PathDefaultAction, language),
+                &[
+                    ("allow", t(language, "Allow", "允许")),
+                    ("deny", t(language, "Deny", "拒绝")),
+                ],
+                theme,
+                errors,
+                language,
+            );
+            for field in [
+                SetupField::PathReadOnlyPaths,
+                SetupField::PathWritePaths,
+                SetupField::PathDenyPaths,
             ] {
-                push_long_form_field(
+                push_list_field(
                     &mut lines,
                     &mut focused_line,
-                    session,
                     section,
                     draft,
                     state,
@@ -2555,11 +2552,11 @@ pub(super) fn optional_list_state(
     field: SetupField,
 ) -> Result<EditableListState, ()> {
     let raw = match (draft, field) {
-        (OptionalSectionDraft::Sandbox(value), SetupField::RequiredRuntimePaths) => {
-            &value.required_runtime_paths
+        (OptionalSectionDraft::Workspace(value), SetupField::PathReadOnlyPaths) => {
+            &value.read_only_paths
         }
-        (OptionalSectionDraft::Sandbox(value), SetupField::SandboxReadPaths) => &value.read_paths,
-        (OptionalSectionDraft::Sandbox(value), SetupField::SandboxWritePaths) => &value.write_paths,
+        (OptionalSectionDraft::Workspace(value), SetupField::PathWritePaths) => &value.write_paths,
+        (OptionalSectionDraft::Workspace(value), SetupField::PathDenyPaths) => &value.deny_paths,
         _ => return Err(()),
     };
     serde_json::from_str::<Vec<String>>(raw)
@@ -2576,14 +2573,14 @@ pub(super) fn set_optional_list_state(
         return false;
     };
     match (draft, field) {
-        (OptionalSectionDraft::Sandbox(value), SetupField::RequiredRuntimePaths) => {
-            value.required_runtime_paths = serialized
+        (OptionalSectionDraft::Workspace(value), SetupField::PathReadOnlyPaths) => {
+            value.read_only_paths = serialized
         }
-        (OptionalSectionDraft::Sandbox(value), SetupField::SandboxReadPaths) => {
-            value.read_paths = serialized
-        }
-        (OptionalSectionDraft::Sandbox(value), SetupField::SandboxWritePaths) => {
+        (OptionalSectionDraft::Workspace(value), SetupField::PathWritePaths) => {
             value.write_paths = serialized
+        }
+        (OptionalSectionDraft::Workspace(value), SetupField::PathDenyPaths) => {
+            value.deny_paths = serialized
         }
         _ => return false,
     }
@@ -2608,14 +2605,25 @@ pub(super) fn optional_focus_items(
 ) -> Vec<OptionalFocusItem> {
     match section {
         OptionalSection::Identity => vec![OptionalFocusItem::Field(SetupField::DisplayName)],
-        OptionalSection::Workspace => [
-            SetupField::WorkspaceRoot,
-            SetupField::ReadPolicy,
-            SetupField::WritePolicy,
-        ]
-        .into_iter()
-        .map(OptionalFocusItem::Field)
-        .collect(),
+        OptionalSection::Workspace => {
+            let mut items = vec![OptionalFocusItem::Field(SetupField::WorkspaceRoot)];
+            items.extend(
+                ["allow", "deny"]
+                    .into_iter()
+                    .map(|value| OptionalFocusItem::Choice {
+                        field: SetupField::PathDefaultAction,
+                        value,
+                    }),
+            );
+            for field in [
+                SetupField::PathReadOnlyPaths,
+                SetupField::PathWritePaths,
+                SetupField::PathDenyPaths,
+            ] {
+                items.extend(list_focus_items(field, draft));
+            }
+            items
+        }
         OptionalSection::Confirmation => multi_select_options(SetupField::ConfirmationChannels)
             .iter()
             .copied()
@@ -2645,20 +2653,7 @@ pub(super) fn optional_focus_items(
             OptionalFocusItem::Field(SetupField::MaxFileSearchContextLines),
             OptionalFocusItem::Field(SetupField::ProcessResponseBytes),
         ],
-        OptionalSection::Sandbox => {
-            let mut items = vec![
-                OptionalFocusItem::Field(SetupField::SandboxEnabled),
-                OptionalFocusItem::Field(SetupField::BubblewrapPath),
-            ];
-            for field in [
-                SetupField::RequiredRuntimePaths,
-                SetupField::SandboxReadPaths,
-                SetupField::SandboxWritePaths,
-            ] {
-                items.extend(list_focus_items(field, draft));
-            }
-            items
-        }
+        OptionalSection::Sandbox => vec![OptionalFocusItem::Field(SetupField::Bubblewrap)],
         OptionalSection::Shell => {
             let mut items = ["default", "disabled", "path"]
                 .into_iter()
@@ -3069,11 +3064,11 @@ fn optional_center_inspector_body(
                     "The display name is separate from the Agent ID used for routing.",
                 ],
                 OptionalSection::Workspace => &[
-                    "Set the default working directory and the paths file tools may write, read only, or not access.",
+                    "Set the default working directory and concrete read-only, writable, and denied roots.",
                     "",
                     "Access priority:",
-                    "• deny > confirm > allow",
-                    "• access follows explicit read/write policies",
+                    "• denied roots override readable and writable roots",
+                    "• the default action handles paths outside every configured root",
                 ],
                 OptionalSection::Confirmation => &[
                     "Choose how confirmation requests are delivered and which language they use.",
@@ -3140,11 +3135,11 @@ fn optional_center_inspector_body(
                     "显示名称与用于路由的 Agent ID 相互独立。",
                 ],
                 OptionalSection::Workspace => &[
-                    "设置默认工作目录，以及文件工具允许写入、只读和禁止访问的路径范围。",
+                    "设置默认工作目录，以及具体的只读、可写和拒绝根目录。",
                     "",
                     "权限优先级：",
-                    "• deny > confirm > allow",
-                    "• 访问遵循显式 read/write 策略",
+                    "• 拒绝根目录优先于只读和可写根目录",
+                    "• 默认动作处理未落入任何已配置根目录的路径",
                 ],
                 OptionalSection::Confirmation => &[
                     "设置确认请求的投递通道和语言。",
@@ -3229,7 +3224,13 @@ fn optional_form_inspector_body(
                     "• saved default draft: write AgenticGPT agent",
                 ],
                 SetupField::WorkspaceRoot => &["Default working directory; access requires an explicit matching path policy."],
-                SetupField::ReadPolicy | SetupField::WritePolicy => &["Edit the complete JSON object with defaultAction, allow, confirm, deny.", "Path patterns: * stays in one component, ** crosses components; deny wins, then confirm, then allow.", "Policy and sandbox concrete mounts are independent."],
+                SetupField::PathDefaultAction => &[
+                    "Choose whether paths outside every configured root are allowed or denied.",
+                    "Denied roots still take precedence over this default.",
+                ],
+                SetupField::PathReadOnlyPaths => &["Concrete roots that may be read but not modified."],
+                SetupField::PathWritePaths => &["Concrete roots that may be read and modified."],
+                SetupField::PathDenyPaths => &["Concrete roots that remain inaccessible even under an allowed parent."],
                 SetupField::ConfirmationChannels => &[
                     "Choose confirmation fallback channels.",
                     "Selected order is the fallback order: the first available channel handles the request.",
@@ -3264,13 +3265,9 @@ fn optional_form_inspector_body(
                     "process.read uses this value when maxBytes is omitted; an explicit maxBytes overrides it for that read only (4096–1048576 bytes).",
                     "Counts the UTF-8 JSON response, including metadata and encoded output; default: 8192 bytes. Does not limit retained process output.",
                 ],
-                SetupField::SandboxEnabled => &[
-                    "Wrap process execution with bubblewrap isolation when enabled.",
-                    "Default: off. Path policy and confirmation checks still apply either way.",
-                ],
-                SetupField::BubblewrapPath => &[
-                    "Command or path used to launch bubblewrap.",
-                    "Default: bwrap. This wizard checks only that the value is non-empty.",
+                SetupField::Bubblewrap => &[
+                    "Wrap process execution with bubblewrap isolation using the configured path roots.",
+                    "Default: off. The executable and runtime mounts are managed internally.",
                 ],
                 SetupField::ShellInitFileMode => &[
                     "Choose which init file is sourced before the command.",
@@ -3279,14 +3276,8 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::ShellInitFilePath => &[
                     "Path to a trusted shell init file; shown only when mode is Path.",
-                    "Its contents are executed before the requested command, inside the configured sandbox.",
+                    "Its contents are executed before the requested command, inside bubblewrap when enabled.",
                     "The requested command's working directory is restored afterward.",
-                ],
-                SetupField::RequiredRuntimePaths => &[
-                    "Host paths mounted read-only into the sandbox so programs can run.",
-                    "Default: /usr, /bin, /lib, /lib64, /etc/ssl.",
-                    "",
-                    "Paths that do not exist on the host are skipped.",
                 ],
                 SetupField::Toolsets => &[
                     "Select the built-in tool namespaces enabled for this configuration.",
@@ -3426,7 +3417,13 @@ fn optional_form_inspector_body(
                     "• 保存默认草稿：写入 AgenticGPT agent",
                 ],
                 SetupField::WorkspaceRoot => &["默认工作目录；访问需显式匹配路径策略。"],
-                SetupField::ReadPolicy | SetupField::WritePolicy => &["编辑完整 JSON 对象，包含 defaultAction、allow、confirm、deny。", "路径模式中 * 不跨目录，** 跨目录；deny 优先，其次 confirm，再次 allow。", "路径策略与沙箱具体挂载路径独立。"],
+                SetupField::PathDefaultAction => &[
+                    "选择如何处理未落入任何已配置根目录的路径：允许或拒绝。",
+                    "拒绝根目录仍优先于此默认动作。",
+                ],
+                SetupField::PathReadOnlyPaths => &["可读取但不可修改的具体根目录。"],
+                SetupField::PathWritePaths => &["可读取和修改的具体根目录。"],
+                SetupField::PathDenyPaths => &["即使位于允许父目录下也不可访问的具体根目录。"],
                 SetupField::ConfirmationChannels => &[
                     "选择确认请求的降级通道。",
                     "选中顺序就是降级顺序：按顺序尝试，首个可用通道处理请求。",
@@ -3461,13 +3458,9 @@ fn optional_form_inspector_body(
                     "process.read 省略 maxBytes 时使用此值；显式 maxBytes 仅覆盖本次 read（4096–1048576 字节）。",
                     "按包含元数据和编码输出的 UTF-8 JSON 计量；默认 8192 字节，配置范围 4096–1048576；不限制输出保留量。",
                 ],
-                SetupField::SandboxEnabled => &[
-                    "开启后使用 bubblewrap 隔离进程执行。",
-                    "默认关闭；无论是否开启，路径策略和确认检查仍然生效。",
-                ],
-                SetupField::BubblewrapPath => &[
-                    "启动 bubblewrap 使用的命令名或路径。",
-                    "默认 bwrap；此向导只检查它是否非空，不检查可执行文件是否存在。",
+                SetupField::Bubblewrap => &[
+                    "使用已配置的路径根目录在 bubblewrap 中隔离进程执行。",
+                    "默认关闭；可执行文件和运行时挂载由内部管理。",
                 ],
                 SetupField::ShellInitFileMode => &[
                     "选择命令执行前要 source 的初始化文件。",
@@ -3476,14 +3469,8 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::ShellInitFilePath => &[
                     "受信任 shell 初始化文件的路径；仅在模式为 Path 时显示。",
-                    "文件内容会在请求的命令前、当前配置的沙箱内执行。",
+                    "启用 bubblewrap 时，文件内容会在隔离环境内、请求的命令前执行。",
                     "执行后会恢复请求指定的工作目录。",
-                ],
-                SetupField::RequiredRuntimePaths => &[
-                    "以只读方式挂载进沙箱、供程序运行所需的宿主机路径。",
-                    "默认 /usr、/bin、/lib、/lib64、/etc/ssl。",
-                    "",
-                    "宿主机上不存在的路径会跳过。",
                 ],
                 SetupField::Toolsets => &[
                     "选择此配置启用的内置工具命名空间。",
@@ -3647,7 +3634,7 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
         OptionalSection::Workspace => t(language, "Workspace", "工作区"),
         OptionalSection::Confirmation => t(language, "Confirmation", "确认"),
         OptionalSection::Limits => t(language, "Limits", "限制"),
-        OptionalSection::Sandbox => t(language, "Sandbox", "沙箱"),
+        OptionalSection::Sandbox => t(language, "Bubblewrap", "Bubblewrap"),
         OptionalSection::Shell => t(language, "Shell", "Shell"),
         OptionalSection::Toolsets => t(language, "Toolsets", "工具集"),
         OptionalSection::McpServers => t(language, "MCP servers", "MCP 服务"),
@@ -3662,8 +3649,10 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
     match field {
         SetupField::DisplayName => t(language, "Display name", "显示名称"),
         SetupField::WorkspaceRoot => t(language, "Workspace root", "工作区根目录"),
-        SetupField::WritePolicy => t(language, "Write policy JSON", "写入策略 JSON"),
-        SetupField::ReadPolicy => t(language, "Read policy JSON", "读取策略 JSON"),
+        SetupField::PathDefaultAction => t(language, "Unmatched paths", "未匹配路径"),
+        SetupField::PathReadOnlyPaths => t(language, "Read-only roots", "只读根目录"),
+        SetupField::PathWritePaths => t(language, "Writable roots", "可写根目录"),
+        SetupField::PathDenyPaths => t(language, "Denied roots", "拒绝根目录"),
         SetupField::ConfirmationChannels => t(language, "Fallback channels", "降级通道"),
         SetupField::ConfirmationLanguage => t(language, "Language", "语言"),
         SetupField::MaxConcurrentTasks => t(language, "Max concurrent tasks", "最大并发任务"),
@@ -3676,13 +3665,9 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
             "Default process response bytes",
             "默认进程响应字节预算",
         ),
-        SetupField::SandboxEnabled => t(language, "Sandbox enabled", "启用沙箱"),
+        SetupField::Bubblewrap => t(language, "Bubblewrap", "Bubblewrap"),
         SetupField::ShellInitFileMode => t(language, "Init file mode", "初始化文件模式"),
         SetupField::ShellInitFilePath => t(language, "Init file path", "初始化文件路径"),
-        SetupField::BubblewrapPath => t(language, "Bubblewrap path", "Bubblewrap 路径"),
-        SetupField::RequiredRuntimePaths => t(language, "Required runtime paths", "必需运行时路径"),
-        SetupField::SandboxReadPaths => t(language, "Sandbox read paths", "沙箱只读路径"),
-        SetupField::SandboxWritePaths => t(language, "Sandbox write paths", "沙箱可写路径"),
         SetupField::RepositoryRoot => t(language, "Repository root", "仓库根目录"),
         SetupField::RoomMaintenanceMode => t(language, "Maintenance mode", "维护模式"),
         SetupField::RoomMaintenanceAutoPush => t(language, "Auto-push", "自动推送"),
@@ -3737,7 +3722,7 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
 pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
     matches!(
         field,
-        SetupField::SandboxEnabled
+        SetupField::Bubblewrap
             | SetupField::TunnelAutoDownload
             | SetupField::HubReportingEnabled
             | SetupField::RoomMaintenanceAutoPush
@@ -3752,8 +3737,10 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
         },
         OptionalSectionDraft::Workspace(value) => match field {
             SetupField::WorkspaceRoot => value.workspace_root.clone(),
-            SetupField::WritePolicy => value.write_policy.clone(),
-            SetupField::ReadPolicy => value.read_policy.clone(),
+            SetupField::PathDefaultAction => value.default_action.clone(),
+            SetupField::PathReadOnlyPaths => value.read_only_paths.clone(),
+            SetupField::PathWritePaths => value.write_paths.clone(),
+            SetupField::PathDenyPaths => value.deny_paths.clone(),
             _ => String::new(),
         },
         OptionalSectionDraft::Confirmation(value) => match field {
@@ -3769,11 +3756,7 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             _ => String::new(),
         },
         OptionalSectionDraft::Sandbox(value) => match field {
-            SetupField::SandboxEnabled => value.enabled.to_string(),
-            SetupField::BubblewrapPath => value.bubblewrap_path.clone(),
-            SetupField::RequiredRuntimePaths => value.required_runtime_paths.clone(),
-            SetupField::SandboxReadPaths => value.read_paths.clone(),
-            SetupField::SandboxWritePaths => value.write_paths.clone(),
+            SetupField::Bubblewrap => value.enabled.to_string(),
             _ => String::new(),
         },
         OptionalSectionDraft::Shell(value) => match field {
@@ -3832,8 +3815,10 @@ pub(super) fn set_optional_field(
         }
         OptionalSectionDraft::Workspace(draft) => match field {
             SetupField::WorkspaceRoot => draft.workspace_root = value,
-            SetupField::WritePolicy => draft.write_policy = value,
-            SetupField::ReadPolicy => draft.read_policy = value,
+            SetupField::PathDefaultAction => draft.default_action = value,
+            SetupField::PathReadOnlyPaths => draft.read_only_paths = value,
+            SetupField::PathWritePaths => draft.write_paths = value,
+            SetupField::PathDenyPaths => draft.deny_paths = value,
             _ => {}
         },
         OptionalSectionDraft::Confirmation(draft) => match field {
@@ -3848,14 +3833,11 @@ pub(super) fn set_optional_field(
             SetupField::ProcessResponseBytes => draft.process_response_bytes = value,
             _ => {}
         },
-        OptionalSectionDraft::Sandbox(draft) => match field {
-            SetupField::BubblewrapPath => draft.bubblewrap_path = value,
-            SetupField::RequiredRuntimePaths => draft.required_runtime_paths = value,
-            SetupField::SandboxReadPaths => draft.read_paths = value,
-            SetupField::SandboxWritePaths => draft.write_paths = value,
-            SetupField::SandboxEnabled => draft.enabled = value == "true",
-            _ => {}
-        },
+        OptionalSectionDraft::Sandbox(draft) => {
+            if field == SetupField::Bubblewrap {
+                draft.enabled = value == "true";
+            }
+        }
         OptionalSectionDraft::Shell(draft) => match field {
             SetupField::ShellInitFileMode => draft.init_file_mode = value,
             SetupField::ShellInitFilePath => draft.init_file_path = value,
@@ -3898,7 +3880,7 @@ pub(super) fn set_optional_field(
 
 pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: SetupField) {
     match draft {
-        OptionalSectionDraft::Sandbox(draft) if field == SetupField::SandboxEnabled => {
+        OptionalSectionDraft::Sandbox(draft) if field == SetupField::Bubblewrap => {
             draft.enabled = !draft.enabled
         }
         OptionalSectionDraft::TunnelClient(draft) if field == SetupField::TunnelAutoDownload => {
@@ -4709,8 +4691,10 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "connection" => t(language, "Connection", "连接"),
         "display_name" => t(language, "Display name", "显示名称"),
         "workspace_root" => t(language, "Workspace root", "工作区根目录"),
-        "write_policy" => t(language, "Write policy JSON", "写入策略 JSON"),
-        "read_policy" => t(language, "Read policy JSON", "读取策略 JSON"),
+        "path_default_action" => t(language, "Unmatched paths", "未匹配路径"),
+        "path_read_only" => t(language, "Read-only roots", "只读根目录"),
+        "path_write" => t(language, "Writable roots", "可写根目录"),
+        "path_deny" => t(language, "Denied roots", "拒绝根目录"),
         "confirmation_channels" => t(language, "Fallback channels", "降级通道"),
         "confirmation_language" => t(language, "Language", "语言"),
         "max_concurrent_tasks" => t(language, "Max concurrent tasks", "最大并发任务"),
@@ -4723,11 +4707,9 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
             "Default process response bytes",
             "默认进程响应字节预算",
         ),
-        "sandbox_enabled" => t(language, "Sandbox enabled", "启用沙箱"),
+        "bubblewrap" => t(language, "Bubblewrap", "Bubblewrap"),
         "shell_init_file_mode" => t(language, "Init file mode", "初始化文件模式"),
         "shell_init_file_path" => t(language, "Init file path", "初始化文件路径"),
-        "bubblewrap_path" => t(language, "Bubblewrap path", "Bubblewrap 路径"),
-        "required_runtime_paths" => t(language, "Required runtime paths", "必需运行时路径"),
         "mcp_server" => t(language, "MCP server", "MCP 服务"),
         "room_timezone" => t(language, "Timezone", "时区"),
         "diary_boundary_hour" => t(language, "Diary boundary hour", "日记边界小时"),

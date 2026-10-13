@@ -164,8 +164,8 @@ use crate::config::mcp_servers::{self, McpServerAuthConfig, McpServerConfig};
 use crate::config::{
     self, default_room_config, ConfirmationProviderConfig, EventNotificationLevel, EventsConfig,
     HttpMcpConfig, HubReportingConfig, LimitsConfig, MaxActiveProcesses, PathPolicyConfig,
-    PolicyConfig, ReportingDetail, RoomConfig, RoomMaintenanceConfig, RoomMaintenanceMode,
-    SandboxConfig, ShellConfig, ShellInitFile, ToolNamespace, ToolsetConfig, TunnelClientConfig,
+    ReportingDetail, RoomConfig, RoomMaintenanceConfig, RoomMaintenanceMode, ShellConfig,
+    ShellInitFile, ToolNamespace, ToolsetConfig, TunnelClientConfig,
 };
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -446,12 +446,14 @@ pub(super) fn validate_field(
             OptionalSection::Identity,
             &session.optional_draft(OptionalSection::Identity),
         ),
-        SetupField::WorkspaceRoot | SetupField::WritePolicy | SetupField::ReadPolicy => {
-            validate_optional(
-                OptionalSection::Workspace,
-                &session.optional_draft(OptionalSection::Workspace),
-            )
-        }
+        SetupField::WorkspaceRoot
+        | SetupField::PathDefaultAction
+        | SetupField::PathReadOnlyPaths
+        | SetupField::PathWritePaths
+        | SetupField::PathDenyPaths => validate_optional(
+            OptionalSection::Workspace,
+            &session.optional_draft(OptionalSection::Workspace),
+        ),
         SetupField::ConfirmationChannels | SetupField::ConfirmationLanguage => validate_optional(
             OptionalSection::Confirmation,
             &session.optional_draft(OptionalSection::Confirmation),
@@ -463,11 +465,7 @@ pub(super) fn validate_field(
             OptionalSection::Limits,
             &session.optional_draft(OptionalSection::Limits),
         ),
-        SetupField::SandboxEnabled
-        | SetupField::BubblewrapPath
-        | SetupField::SandboxReadPaths
-        | SetupField::SandboxWritePaths
-        | SetupField::RequiredRuntimePaths => validate_optional(
+        SetupField::Bubblewrap => validate_optional(
             OptionalSection::Sandbox,
             &session.optional_draft(OptionalSection::Sandbox),
         ),
@@ -581,26 +579,22 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 "workspace_root",
                 &mut errors,
             );
+            if serde_json::from_value::<crate::config::PathDefaultAction>(
+                serde_json::Value::String(value.default_action.clone()),
+            )
+            .is_err()
+            {
+                errors.push(error(
+                    SetupField::PathDefaultAction,
+                    "config_init_path_policy_invalid",
+                ));
+            }
             for (text, field) in [
-                (&value.read_policy, SetupField::ReadPolicy),
-                (&value.write_policy, SetupField::WritePolicy),
+                (&value.read_only_paths, SetupField::PathReadOnlyPaths),
+                (&value.write_paths, SetupField::PathWritePaths),
+                (&value.deny_paths, SetupField::PathDenyPaths),
             ] {
-                match serde_json::from_str::<PolicyConfig>(text) {
-                    Ok(policy) => {
-                        for pattern in policy
-                            .allow
-                            .iter()
-                            .chain(&policy.confirm)
-                            .chain(&policy.deny)
-                        {
-                            if crate::policy::validate_path_pattern(pattern).is_err() {
-                                errors.push(error(field, "config_init_path_policy_invalid"));
-                                break;
-                            }
-                        }
-                    }
-                    Err(_) => errors.push(error(field, "config_init_path_policy_invalid")),
-                }
+                parse_path_list(text, field, "config_init_path_policy_invalid", &mut errors);
             }
         }
         (OptionalSection::Confirmation, OptionalSectionDraft::Confirmation(value)) => {
@@ -639,31 +633,7 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 )),
             }
         }
-        (OptionalSection::Sandbox, OptionalSectionDraft::Sandbox(value)) => {
-            required(
-                &value.bubblewrap_path,
-                SetupField::BubblewrapPath,
-                "bubblewrap_path",
-                &mut errors,
-            );
-            for (text, field) in [
-                (&value.read_paths, SetupField::SandboxReadPaths),
-                (&value.write_paths, SetupField::SandboxWritePaths),
-            ] {
-                parse_path_list(
-                    text,
-                    field,
-                    "config_init_runtime_paths_invalid",
-                    &mut errors,
-                );
-            }
-            if serde_json::from_str::<Vec<PathBuf>>(value.required_runtime_paths.trim()).is_err() {
-                errors.push(error(
-                    SetupField::RequiredRuntimePaths,
-                    "config_init_runtime_paths_invalid",
-                ));
-            }
-        }
+        (OptionalSection::Sandbox, OptionalSectionDraft::Sandbox(_)) => {}
         (OptionalSection::Shell, OptionalSectionDraft::Shell(value)) => {
             if !matches!(
                 value.init_file_mode.as_str(),
@@ -867,7 +837,6 @@ fn required(value: &str, field: SetupField, key: &'static str, errors: &mut Vali
                 "confirmation_language" => {
                     "config_init_required_value_missing: confirmation_language"
                 }
-                "bubblewrap_path" => "config_init_required_value_missing: bubblewrap_path",
                 "room_timezone" => "config_init_required_value_missing: room_timezone",
                 _ => "config_init_required_value_missing",
             },
@@ -1079,13 +1048,24 @@ fn apply_optional_draft(
             input.display_name = Some(value.display_name.trim().to_string());
         }
         (OptionalSection::Workspace, OptionalSectionDraft::Workspace(value)) => {
-            let parse = |text: &str, field: SetupField| {
-                serde_json::from_str::<PolicyConfig>(text.trim())
+            let parse_paths = |text: &str, field: SetupField| {
+                serde_json::from_str::<Vec<PathBuf>>(text.trim())
                     .map_err(|_| vec![error(field, "config_init_path_policy_invalid")])
             };
             let path_policy = PathPolicyConfig {
-                read: parse(&value.read_policy, SetupField::ReadPolicy)?,
-                write: parse(&value.write_policy, SetupField::WritePolicy)?,
+                default_action: serde_json::from_value(serde_json::Value::String(
+                    value.default_action.clone(),
+                ))
+                .map_err(|_| {
+                    vec![error(
+                        SetupField::PathDefaultAction,
+                        "config_init_path_policy_invalid",
+                    )]
+                })?,
+                read_only: parse_paths(&value.read_only_paths, SetupField::PathReadOnlyPaths)?,
+                write: parse_paths(&value.write_paths, SetupField::PathWritePaths)?,
+                deny: parse_paths(&value.deny_paths, SetupField::PathDenyPaths)?,
+                ..PathPolicyConfig::default()
             };
             input.workspace_root = Some(PathBuf::from(value.workspace_root.trim()));
             input.path_policy = Some(path_policy);
@@ -1158,30 +1138,7 @@ fn apply_optional_draft(
             });
         }
         (OptionalSection::Sandbox, OptionalSectionDraft::Sandbox(value)) => {
-            let required_runtime_paths = serde_json::from_str(&value.required_runtime_paths)
-                .map_err(|_| {
-                    vec![error(
-                        SetupField::RequiredRuntimePaths,
-                        "config_init_runtime_paths_invalid",
-                    )]
-                })?;
-            input.sandbox = Some(SandboxConfig {
-                enabled: value.enabled,
-                bubblewrap_path: value.bubblewrap_path.trim().to_string(),
-                required_runtime_paths,
-                read_paths: serde_json::from_str(&value.read_paths).map_err(|_| {
-                    vec![error(
-                        SetupField::SandboxReadPaths,
-                        "config_init_runtime_paths_invalid",
-                    )]
-                })?,
-                write_paths: serde_json::from_str(&value.write_paths).map_err(|_| {
-                    vec![error(
-                        SetupField::SandboxWritePaths,
-                        "config_init_runtime_paths_invalid",
-                    )]
-                })?,
-            });
+            input.bubblewrap = Some(value.enabled);
         }
         (OptionalSection::Toolsets, OptionalSectionDraft::Toolsets(value)) => {
             input.toolsets =
@@ -1351,7 +1308,7 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::Workspace => SetupField::WorkspaceRoot,
         OptionalSection::Confirmation => SetupField::ConfirmationChannels,
         OptionalSection::Limits => SetupField::MaxConcurrentTasks,
-        OptionalSection::Sandbox => SetupField::SandboxEnabled,
+        OptionalSection::Sandbox => SetupField::Bubblewrap,
         OptionalSection::Shell => SetupField::ShellInitFileMode,
         OptionalSection::Toolsets => SetupField::Toolsets,
         OptionalSection::McpServers => SetupField::McpServerId,

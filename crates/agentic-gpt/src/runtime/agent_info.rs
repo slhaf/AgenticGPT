@@ -53,11 +53,10 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         .map(|issue| Value::String(issue.to_string()))
         .collect::<Vec<_>>();
     let capabilities = state.runtime.capabilities();
-    let command_summary = policy_summary(&config.policy);
-    let read_summary = policy_summary(&config.path_policy.read);
-    let write_summary = policy_summary(&config.path_policy.write);
-    let (sandbox_read, sandbox_read_truncated) = path_values(config.sandbox.read_paths.iter());
-    let (sandbox_write, sandbox_write_truncated) = path_values(config.sandbox.write_paths.iter());
+    let command_summary = policy_summary(&config.policy.command);
+    let (read_only, read_truncated) = path_values(config.policy.path.read_only.iter());
+    let (write, write_truncated) = path_values(config.policy.path.write.iter());
+    let (deny, deny_truncated) = path_values(config.policy.path.deny.iter());
     let channels = config
         .confirmation_provider
         .channels
@@ -112,15 +111,16 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         },
         "workspace": {
             "root": exact_path(&config.workspace_root),
-            "sandbox": {
-                "enabled": config.sandbox.enabled,
-                "mode": if config.sandbox.enabled { "bubblewrap" } else { "disabled" },
-                "readPaths": sandbox_read,
-                "writePaths": sandbox_write,
-                "truncated": sandbox_read_truncated || sandbox_write_truncated,
+        },
+        "bubblewrap": config.bubblewrap,
+        "policy": {
+            "enabled": config.policy.enabled,
+            "command": command_summary,
+            "path": {
+                "defaultAction": config.policy.path.default_action,
+                "readOnly": read_only, "write": write, "deny": deny,
+                "truncated": read_truncated || write_truncated || deny_truncated,
             },
-            "pathPolicy": { "read": read_summary, "write": write_summary },
-
         },
         "execution": {
             "programMatching": "argv-pattern",
@@ -134,7 +134,6 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "fileSearch": {
                 "maxContextLines": config.limits.max_file_search_context_lines,
             },
-            "policy": command_summary,
         },
         "confirmation": {
             "channels": channels,
@@ -347,9 +346,7 @@ fn invalid_config_health(modified_at: Option<String>) -> ConfigHealth {
 fn live_subset(config: &Config) -> Value {
     json!({
         "policy": config.policy,
-        "pathPolicy": config.path_policy,
-        "sandboxReadPaths": config.sandbox.read_paths,
-        "sandboxWritePaths": config.sandbox.write_paths,
+        "bubblewrap": config.bubblewrap,
         "limits": config.limits,
         "mcpServers": config.mcp_servers,
         "toolsets": config.toolsets,
@@ -377,7 +374,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("agent-info-{}", uuid::Uuid::new_v4().simple()));
         config.workspace_root = root.clone();
-        config.path_policy.write.allow = vec![format!("{}/**", root.display())];
+        config.policy.path.write = vec![root.to_path_buf()];
         let private_state =
             crate::private_state::PrivateStatePaths::for_test(root.join(".private-state"));
         let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
@@ -412,7 +409,7 @@ mod tests {
         let value = collect(&state(CapabilityProfile::Room)).await;
         assert!(value.get("surface").is_none());
         assert_eq!(value["identity"]["profile"], "room");
-        assert!(value["workspace"]["pathPolicy"]["write"]["allow"][0].is_string());
+        assert!(value["policy"]["path"]["write"][0].is_string());
         assert_eq!(value["config"]["diskStatus"], "missing");
         assert_eq!(value["mcp"]["concurrency"]["globalLimit"], 8);
         assert_eq!(value["mcp"]["concurrency"]["perServerLimit"], 2);
@@ -432,27 +429,23 @@ mod tests {
         {
             let mut config = app.config.write().await;
             config.workspace_root = PathBuf::from(format!("{}/", root.display()));
-            config.path_policy.write.allow =
-                vec![format!("{}/**", root.display()), "/tmp/**".to_string()];
-            config.path_policy.read.allow.clear();
-            config.path_policy.read.deny.clear();
-            config.path_policy.write.deny.clear();
+            config.policy.path.write = vec![root.to_path_buf(), PathBuf::from("/tmp")];
+            config.policy.path.read_only.clear();
+            config.policy.path.deny.clear();
+            config.policy.path.deny.clear();
         }
 
         let value = collect(&app).await;
         assert_eq!(value["workspace"]["root"], root.to_string_lossy().as_ref());
         assert_eq!(
-            value["workspace"]["pathPolicy"]["write"]["allow"]
-                .as_array()
-                .unwrap()
-                .len(),
+            value["policy"]["path"]["write"].as_array().unwrap().len(),
             2
         );
-        assert!(value["workspace"]["pathPolicy"]["read"]["allow"]
+        assert!(value["policy"]["path"]["readOnly"]
             .as_array()
             .unwrap()
             .is_empty());
-        assert!(value["workspace"]["pathPolicy"]["write"]["deny"]
+        assert!(value["policy"]["path"]["deny"]
             .as_array()
             .unwrap()
             .is_empty());
@@ -519,10 +512,10 @@ mod tests {
 
         let mut effective = Config::default_config().unwrap();
         effective.workspace_root = live_workspace;
-        effective.path_policy.write.allow = vec![format!("{}/**", live_write_root.display())];
+        effective.policy.path.write = vec![live_write_root.to_path_buf()];
         let mut disk = effective.clone();
         disk.workspace_root = candidate_workspace;
-        disk.path_policy.write.allow = vec![format!("{}/**", candidate_write_root.display())];
+        disk.policy.path.write = vec![candidate_write_root.to_path_buf()];
         disk.browser.managed.enabled = false;
         let disk_path = root.join("config.json");
         fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();

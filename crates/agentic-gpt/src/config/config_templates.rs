@@ -8,10 +8,10 @@ use crate::cli_i18n::UiLanguage;
 use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{
     normalize_http_mcp_public_url, parse_http_mcp_allow_hosts, seed_command_policy,
-    seed_path_policy, seed_sandbox_paths, validate_hub_transport, validate_hub_url_shape, Config,
+    seed_path_policy, validate_hub_transport, validate_hub_url_shape, Config,
     ConfirmationProviderConfig, EventsConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig,
-    RoomConfig, SandboxConfig, ShellConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig,
-    TunnelConfig, WorkerProfile,
+    RoomConfig, ShellConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig, TunnelConfig,
+    WorkerProfile,
 };
 use crate::utils::agentic_home;
 
@@ -93,7 +93,7 @@ pub(crate) struct InitInput {
     pub(crate) confirmation_provider: Option<ConfirmationProviderConfig>,
     pub(crate) confirmation_language: Option<String>,
     pub(crate) limits: Option<LimitsConfig>,
-    pub(crate) sandbox: Option<SandboxConfig>,
+    pub(crate) bubblewrap: Option<bool>,
     pub(crate) shell: Option<ShellConfig>,
     pub(crate) room: Option<RoomConfig>,
     pub(crate) tunnel_client: Option<TunnelClientConfig>,
@@ -128,7 +128,7 @@ impl InitInput {
             confirmation_provider: None,
             confirmation_language: None,
             limits: None,
-            sandbox: None,
+            bubblewrap: None,
             shell: None,
             room: None,
             tunnel_client: None,
@@ -193,7 +193,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         confirmation_provider,
         confirmation_language,
         limits,
-        sandbox,
+        bubblewrap,
         shell,
         room,
         tunnel_client,
@@ -260,14 +260,11 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         config.workspace_root = workspace_root;
     }
     if !has_imported_base {
-        config.policy = seed_command_policy(profile);
-        config.path_policy = seed_path_policy(&config.workspace_root);
-        let (read, write) = seed_sandbox_paths(&config.workspace_root);
-        config.sandbox.read_paths = read;
-        config.sandbox.write_paths = write;
+        config.policy.command = seed_command_policy(profile);
+        config.policy.path = seed_path_policy(&config.workspace_root);
     }
     if let Some(path_policy) = path_policy {
-        config.path_policy = path_policy;
+        config.policy.path = path_policy;
     }
     if let Some(confirmation_provider) = confirmation_provider {
         config.confirmation_provider = confirmation_provider;
@@ -275,8 +272,8 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     if let Some(limits) = limits {
         config.limits = limits;
     }
-    if let Some(sandbox) = sandbox {
-        config.sandbox = sandbox;
+    if let Some(bubblewrap) = bubblewrap {
+        config.bubblewrap = bubblewrap;
     }
     if let Some(shell) = shell {
         config.shell = shell;

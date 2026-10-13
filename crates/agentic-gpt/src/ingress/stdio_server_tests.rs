@@ -1518,7 +1518,7 @@ async fn room_process_exec_preserves_literal_shell_syntax_across_newlines() -> a
     {
         let mut config = server.state.config.write().await;
         config.confirmation_provider.channels.clear();
-        config.policy.allow.extend(
+        config.policy.command.allow.extend(
             ["printf", "cat", "true"]
                 .into_iter()
                 .map(|program| format!("{program} **")),
@@ -1574,8 +1574,8 @@ async fn room_process_exec_preserves_deny_and_confirmation_boundaries() -> anyho
     {
         let mut config = server.state.config.write().await;
         config.confirmation_provider.channels.clear();
-        config.policy.allow.push("printf **".to_string());
-        config.policy.deny.extend(
+        config.policy.command.allow.push("printf **".to_string());
+        config.policy.command.deny.extend(
             [
                 ("printf", vec!["blocked".to_string()]),
                 ("export", Vec::new()),
@@ -1648,6 +1648,7 @@ async fn room_process_exec_preserves_deny_and_confirmation_boundaries() -> anyho
         .write()
         .await
         .policy
+        .command
         .deny
         .iter_mut()
         .find(|rule| rule.as_str() == "unset  **")
@@ -2002,7 +2003,7 @@ async fn managed_batch_uses_one_confirmation_for_all_elements() -> anyhow::Resul
         let mut config = server.state.config.write().await;
         config.confirmation_provider =
             crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
-        config.policy.confirm.push("true **".to_string());
+        config.policy.command.confirm.push("true **".to_string());
     }
     let (sender, mut receiver) = mpsc::unbounded_channel();
     *server.state.hub_sender.lock().await = Some(sender);
@@ -2160,6 +2161,7 @@ async fn local_skill_audit_uses_local_request_source() -> anyhow::Result<()> {
         .write()
         .await
         .policy
+        .command
         .allow
         .push(format!("'{}' **", script_program.replace('\'', "'\\''")));
     crate::skills::activate(
@@ -2259,7 +2261,7 @@ where
 }
 
 #[tokio::test]
-async fn file_edit_confirmation_overrides_denied_paths_and_preserves_required_confirmation(
+async fn file_edit_confirmation_overrides_denied_paths_and_preserves_explicit_confirmation(
 ) -> anyhow::Result<()> {
     let state = test_state(CapabilityProfile::Normal);
     let _cleanup = StdioTestRoots::for_state(&state).await;
@@ -2267,12 +2269,7 @@ async fn file_edit_confirmation_overrides_denied_paths_and_preserves_required_co
     let workspace = server.state.config.read().await.workspace_root.clone();
     let path = workspace.join("confirmation.txt");
     std::fs::write(&path, "before\n")?;
-    let pattern = crate::config::path_subtree_pattern(&workspace);
-    {
-        let mut config = server.state.config.write().await;
-        config.path_policy.read.deny = vec![pattern.clone()];
-        config.path_policy.write.deny = vec![pattern.clone()];
-    }
+    server.state.config.write().await.policy.path.deny = vec![workspace.clone()];
     let approved_patch =
         "*** Begin Patch\n*** Update File: confirmation.txt\n@@\n-before\n+approved\n*** End Patch";
     let (approved, count) =
@@ -2288,12 +2285,6 @@ async fn file_edit_confirmation_overrides_denied_paths_and_preserves_required_co
     assert!(rejected.get("error").is_some());
     assert_eq!(std::fs::read_to_string(&path)?, "approved\n");
 
-    {
-        let mut config = server.state.config.write().await;
-        config.path_policy.read.deny.clear();
-        config.path_policy.write.deny.clear();
-        config.path_policy.write.confirm = vec![pattern];
-    }
     let (timed_out, count) =
         file_edit_with_hub_confirmation(&server, rejected_patch, "timeout", || Ok(())).await?;
     assert_eq!(count, 1);
@@ -2315,8 +2306,6 @@ async fn file_edit_rejects_source_symlink_changed_while_confirmation_waits() -> 
     std::fs::write(&original, "original\n")?;
     std::fs::write(&replacement, "replacement\n")?;
     std::os::unix::fs::symlink(&original, &source)?;
-    server.state.config.write().await.path_policy.write.confirm =
-        vec![crate::config::path_subtree_pattern(&workspace)];
     let patch =
         "*** Begin Patch\n*** Update File: source.txt\n@@\n-original\n+changed\n*** End Patch";
     let (result, count) =
@@ -2337,7 +2326,8 @@ async fn file_edit_rejects_source_symlink_changed_while_confirmation_waits() -> 
 }
 
 #[tokio::test]
-async fn file_search_confirms_only_selected_hidden_and_ignored_candidates() -> anyhow::Result<()> {
+async fn file_search_explicit_confirmation_preserves_hidden_and_ignored_selection(
+) -> anyhow::Result<()> {
     let state = test_state(CapabilityProfile::Normal);
     let _cleanup = StdioTestRoots::for_state(&state).await;
     let server = AgentMcpServer::new(state);
@@ -2347,9 +2337,6 @@ async fn file_search_confirms_only_selected_hidden_and_ignored_candidates() -> a
     std::fs::write(workspace.join(".hidden.txt"), "needle hidden\n")?;
     std::fs::write(workspace.join("ignored.txt"), "needle ignored\n")?;
     std::fs::write(workspace.join(".gitignore"), "ignored.txt\n")?;
-    let subtree = crate::config::path_subtree_pattern(&workspace);
-    let root = subtree.strip_suffix("/**").expect("subtree suffix");
-    server.state.config.write().await.path_policy.read.confirm = vec![format!("{root}/*.txt")];
     let (rust_only, count) = file_operation_with_hub_confirmation(
         &server,
         "file.search",
@@ -2368,7 +2355,8 @@ async fn file_search_confirms_only_selected_hidden_and_ignored_candidates() -> a
     assert_eq!(matches[0]["path"], "visible.rs");
 
     let (expanded, count) = file_operation_with_hub_confirmation(&server, "file.search", json!({
-        "path": ".", "query": "needle", "include": ["*.txt"], "hidden": true, "respectGitignore": false
+        "path": ".", "query": "needle", "include": ["*.txt"], "hidden": true, "respectGitignore": false,
+        "acquireConfirmation": {"acquire": true}
     }), "allow_once", || Ok(())).await?;
     assert_eq!(count, 1);
     let matches = expanded["matches"]
@@ -2458,6 +2446,7 @@ async fn tunnel_skill_audit_uses_tunnel_request_source() -> anyhow::Result<()> {
         .write()
         .await
         .policy
+        .command
         .allow
         .push(format!("'{}' **", script_program.replace('\'', "'\\''")));
     crate::skills::activate(
@@ -3204,28 +3193,15 @@ async fn file_edit_add_creates_nested_parents_after_whole_patch_preflight() -> a
         .confirmation_provider
         .channels
         .clear();
-    server.state.config.write().await.path_policy.write.confirm =
-        vec![crate::config::path_subtree_pattern(&workspace)];
+    server.state.config.write().await.policy.path.deny = vec![workspace.join("confirmation")];
     let confirmation_rejected = server
         .dispatch(
             "file.edit",
             json!({"patch":"*** Begin Patch\n*** Add File: confirmation/nested/new.txt\n+new\n*** End Patch","acquireConfirmation": {"acquire": true}}),
         )
         .await?;
-    assert_eq!(
-        confirmation_rejected["error"]["code"],
-        "file_confirmation_unavailable"
-    );
+    assert_eq!(confirmation_rejected["error"]["code"], "path_denied");
     assert!(!workspace.join("confirmation").exists());
-    server
-        .state
-        .config
-        .write()
-        .await
-        .path_policy
-        .write
-        .confirm
-        .clear();
 
     let external_path = workspace.join("external/nested/target.txt");
     crate::file_ops::inject_external_change(&external_path, b"external\n");
@@ -3260,7 +3236,7 @@ async fn file_edit_add_reserves_audit_path_under_symlinked_workspace() -> anyhow
     std::os::unix::fs::symlink(&workspace, &alias)?;
     let mut config = server.state.config.read().await.clone();
     config.workspace_root = alias.clone();
-    config.path_policy = crate::config::seed_path_policy(&alias);
+    config.policy.path = crate::config::seed_path_policy(&alias);
     *server.state.config.write().await = config;
 
     let audit_path = workspace.join(".agentic-gpt-audit.jsonl");
@@ -3287,10 +3263,7 @@ async fn file_edit_add_keeps_path_policy_for_missing_parents_and_symlinks() -> a
     let alias = workspace.join("alias");
     std::fs::create_dir(&real)?;
     std::os::unix::fs::symlink(&real, &alias)?;
-    server.state.config.write().await.path_policy.write.deny =
-        vec![crate::config::path_subtree_pattern(
-            &alias.join("blocked/nested"),
-        )];
+    server.state.config.write().await.policy.path.deny = vec![alias.join("blocked/nested")];
 
     let denied = server
         .dispatch(
@@ -3447,12 +3420,11 @@ async fn file_edit_apply_patch_context_mismatch_and_confirmation_do_not_write() 
         .confirmation_provider
         .channels
         .clear();
-    server.state.config.write().await.path_policy.write.confirm =
-        vec![crate::config::path_subtree_pattern(&workspace)];
+    server.state.config.write().await.policy.path.deny = vec![workspace.join("good.txt")];
     let denied = server
             .dispatch("file.edit", json!({"patch":"*** Begin Patch\n*** Update File: good.txt\n@@\n-good\n+confirmed\n*** End Patch","acquireConfirmation": {"acquire": true}}))
             .await?;
-    assert_eq!(denied["error"]["code"], "file_confirmation_unavailable");
+    assert_eq!(denied["error"]["code"], "path_denied");
     assert_eq!(
         std::fs::read_to_string(workspace.join("good.txt"))?,
         "good\n"
@@ -3542,7 +3514,7 @@ fn test_state(profile: CapabilityProfile) -> AppState {
     let workspace_root = root.join("workspace");
     let mut config = Config::default_config().expect("default config");
     config.shell.init_file = ShellInitFile::Disabled;
-    config.policy.allow.extend(
+    config.policy.command.allow.extend(
         ["true", "false", "sleep"]
             .into_iter()
             .map(|program| format!("{program} **")),
@@ -3554,10 +3526,8 @@ fn test_state(profile: CapabilityProfile) -> AppState {
         ToolsetConfig::normal()
     };
     config.workspace_root = workspace_root.clone();
-    config.path_policy = crate::config::PathPolicyConfig::default();
-    let workspace_pattern = crate::config::path_subtree_pattern(&workspace_root);
-    config.path_policy.read.allow = vec![workspace_pattern.clone()];
-    config.path_policy.write.allow = vec![workspace_pattern];
+    config.policy.path = crate::config::PathPolicyConfig::default();
+    config.policy.path.write = vec![workspace_root.clone()];
     config.ensure_workspace().expect("workspace");
     let bootstrap_root = workspace_root.join("bootstrap");
     std::fs::create_dir_all(&bootstrap_root).expect("bootstrap directory");
@@ -3623,6 +3593,7 @@ async fn allow_test_printf(server: &AgentMcpServer) {
         .write()
         .await
         .policy
+        .command
         .allow
         .push("printf **".to_string());
 }

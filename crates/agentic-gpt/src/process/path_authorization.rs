@@ -2,12 +2,10 @@ use super::*;
 
 pub(crate) fn permissive_paths(config: &Config) -> Config {
     let mut config = config.clone();
-    for policy in [&mut config.path_policy.read, &mut config.path_policy.write] {
-        policy.default_action = PolicyDecision::Allow;
-        policy.allow = vec!["*".into()];
-        policy.confirm.clear();
-        policy.deny.clear();
-    }
+    config.policy.path = crate::config::PathPolicyConfig {
+        default_action: crate::config::PathDefaultAction::Allow,
+        ..Default::default()
+    };
     config
 }
 
@@ -150,13 +148,9 @@ pub(crate) fn granted_execution_config(
     acquisition: Option<&agentic_gpt_protocol::AcquireConfirmation>,
 ) -> std::result::Result<Config, String> {
     let (read, write) = execution_scopes(cwd, execution, acquisition)?;
-    let mut granted = permissive_paths(config);
-    granted.sandbox.read_paths.extend(read);
-    granted.sandbox.write_paths.extend(write);
-    granted
-        .sandbox
-        .read_paths
-        .retain(|p| !granted.sandbox.write_paths.iter().any(|w| p.starts_with(w)));
+    let mut granted = config.clone();
+    granted.policy.path.approved_read.extend(read);
+    granted.policy.path.approved_write.extend(write);
     Ok(granted)
 }
 

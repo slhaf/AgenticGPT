@@ -62,10 +62,16 @@ fn every_visible_command_has_help() {
         &["config", "deny", "--help"],
         &["config", "path", "--help"],
         &["config", "path", "list", "--help"],
+        &["config", "path", "default-action", "--help"],
+        &["config", "path", "readonly", "--help"],
+        &["config", "path", "readonly", "add", "--help"],
+        &["config", "path", "readonly", "remove", "--help"],
         &["config", "path", "write", "--help"],
-        &["config", "path", "write", "allow", "add", "--help"],
-        &["config", "path", "read", "--help"],
-        &["config", "path", "read", "deny", "--help"],
+        &["config", "path", "write", "add", "--help"],
+        &["config", "path", "write", "remove", "--help"],
+        &["config", "path", "deny", "--help"],
+        &["config", "path", "deny", "add", "--help"],
+        &["config", "path", "deny", "remove", "--help"],
         &["config", "mcp", "--help"],
         &["config", "mcp", "add", "--help"],
         &["config", "mcp", "remove", "--help"],
@@ -290,14 +296,26 @@ fn config_init_set_and_show_round_trip() {
 
     let command_pattern = "printf 'literal * argument' **";
     let removed_pattern = "echo **";
-    let path_pattern = format!("{}/**", root.join("read-scope").display());
+    let read_only_root = root.join("read-scope").to_string_lossy().into_owned();
+    let write_root = root.join("write-scope").to_string_lossy().into_owned();
+    let removed_write_root = root
+        .join("removed-write-scope")
+        .to_string_lossy()
+        .into_owned();
+    let deny_root = root.join("deny-scope").to_string_lossy().into_owned();
     for args in [
         vec!["allow", "add", command_pattern],
         vec!["allow", "add", removed_pattern],
         vec!["allow", "remove", removed_pattern],
-        vec!["set", "policy.defaultAction", "deny"],
-        vec!["path", "read", "allow", "add", path_pattern.as_str()],
-        vec!["path", "write", "default-action", "confirm"],
+        vec!["set", "policy.enabled", "false"],
+        vec!["set", "policy.command.defaultAction", "deny"],
+        vec!["set", "bubblewrap", "true"],
+        vec!["path", "default-action", "allow"],
+        vec!["path", "readonly", "add", read_only_root.as_str()],
+        vec!["path", "write", "add", write_root.as_str()],
+        vec!["path", "write", "add", removed_write_root.as_str()],
+        vec!["path", "write", "remove", removed_write_root.as_str()],
+        vec!["path", "deny", "add", deny_root.as_str()],
     ] {
         let result = Command::new(&binary)
             .args(["config", "--config"])
@@ -331,23 +349,40 @@ fn config_init_set_and_show_round_trip() {
     assert_eq!(value["limits"]["processResponseBytes"], 16384);
     assert_eq!(value["room"]["timezone"], "Asia/Tokyo");
 
-    assert_eq!(value["policy"]["defaultAction"], "deny");
-    assert!(value["policy"]["allow"]
+    assert_eq!(value["policy"]["enabled"], false);
+    assert_eq!(value["policy"]["command"]["defaultAction"], "deny");
+    assert!(value["policy"]["command"]["allow"]
         .as_array()
         .unwrap()
         .iter()
         .any(|pattern| pattern == command_pattern));
-    assert!(!value["policy"]["allow"]
+    assert!(!value["policy"]["command"]["allow"]
         .as_array()
         .unwrap()
         .iter()
         .any(|pattern| pattern == removed_pattern));
-    assert!(value["pathPolicy"]["read"]["allow"]
+    assert_eq!(value["policy"]["path"]["defaultAction"], "allow");
+    assert!(value["policy"]["path"]["readOnly"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|pattern| pattern == &path_pattern));
-    assert_eq!(value["pathPolicy"]["write"]["defaultAction"], "confirm");
+        .any(|path| path == &read_only_root));
+    assert!(value["policy"]["path"]["write"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path == &write_root));
+    assert!(!value["policy"]["path"]["write"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path == &removed_write_root));
+    assert!(value["policy"]["path"]["deny"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path == &deny_root));
+    assert_eq!(value["bubblewrap"], true);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -442,11 +477,11 @@ fn config_keys_json_lists_registry() {
     assert!(!entries
         .iter()
         .any(|entry| entry["key"] == "confirmationProvider"));
-    let sandbox = entries
+    let bubblewrap = entries
         .iter()
-        .find(|entry| entry["key"] == "sandbox.enabled")
+        .find(|entry| entry["key"] == "bubblewrap")
         .unwrap();
-    assert_eq!(sandbox["choices"], serde_json::json!(["true", "false"]));
+    assert_eq!(bubblewrap["choices"], serde_json::json!(["true", "false"]));
     let events = entries
         .iter()
         .filter(|entry| entry["section"] == "events")
@@ -621,8 +656,11 @@ fn config_set_rejects_invalid_event_policy_without_writing() {
         serde_json::to_vec(&serde_json::json!({
             "mode": "local",
             "profile": "normal",
-            "policy": {"defaultAction":"confirm","allow":[],"confirm":[],"deny":[]},
-            "pathPolicy": {"read":{"defaultAction":"deny","allow":[],"confirm":[],"deny":[]},"write":{"defaultAction":"deny","allow":[],"confirm":[],"deny":[]}},
+            "policy": {
+                "enabled": true,
+                "command": {"defaultAction":"confirm","allow":[],"confirm":[],"deny":[]},
+                "path": {"defaultAction":"deny","readOnly":[],"write":[],"deny":[]}
+            },
             "events": {
                 "internalOverrides": {
                     "process.unknown": "medium"

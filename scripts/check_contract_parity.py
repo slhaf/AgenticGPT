@@ -323,13 +323,12 @@ def init_agent(binary: Path, root: Path, mode: str, profile: str, agent_id: str,
     config["agentId"] = agent_id
     config["displayName"] = f"Contract parity {profile}"
     config["workspaceRoot"] = str(workspace)
-    workspace_pattern = str(workspace).replace("\\", "\\\\").replace("*", "\\*").rstrip("/") + "/**"
-    config["pathPolicy"] = {
-        access: {"defaultAction": "deny", "allow": [workspace_pattern], "confirm": [], "deny": []}
-        for access in ("read", "write")
+    config["policy"] = {
+        "enabled": True,
+        "command": {"defaultAction": "confirm", "allow": [], "confirm": [], "deny": []},
+        "path": {"defaultAction": "deny", "readOnly": [], "write": [str(workspace)], "deny": []},
     }
-    config["policy"] = {"defaultAction": "confirm", "allow": [], "confirm": [], "deny": []}
-    config.setdefault("sandbox", {}).update({"readPaths": [str(workspace)], "writePaths": [str(workspace)]})
+    config["bubblewrap"] = False
     config["confirmationProvider"] = {"channels": []}
     config["toolsets"] = {
         "enabled": ["agent", "file", "mcp", "process", "skills", "tmux", "room"]
@@ -1634,7 +1633,7 @@ def configure_process_fixture(
 ) -> None:
     try:
         data = json.loads(config_path.read_text())
-        data["policy"] = {
+        data["policy"]["command"] = {
             "defaultAction": "confirm",
             "allow": [
                 command_policy_pattern("/usr/bin/printf", [marker])
@@ -2901,7 +2900,7 @@ def run_hub_event_gate(
         program.write_text(f"#!/bin/sh\n/usr/bin/sleep {delay}\nexit {exit_code}\n")
         program.chmod(0o700)
         programs[name] = program
-        data.setdefault("policy", {}).setdefault("allow", []).append(
+        data.setdefault("policy", {}).setdefault("command", {}).setdefault("allow", []).append(
             command_policy_pattern(str(program), [])
         )
     data.setdefault("events", {}).setdefault("internalOverrides", {}).update(

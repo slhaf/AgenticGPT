@@ -1263,11 +1263,12 @@ mod tests {
                 .into_owned();
             config
                 .policy
+                .command
                 .allow
                 .push(format!("'{}' **", script_program.replace('\'', "'\\''")));
-            let root_pattern = crate::config::path_subtree_pattern(&root);
-            config.path_policy.read.allow = vec![root_pattern.clone()];
-            config.path_policy.write.allow = vec![root_pattern];
+            let root_pattern = root.to_path_buf();
+            config.policy.path.read_only = vec![root_pattern.clone()];
+            config.policy.path.write = vec![root_pattern];
         }
         activate(
             &state,

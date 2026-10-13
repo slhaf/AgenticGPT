@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use crate::cli_i18n::UiLanguage;
 use crate::config::{
-    seed_path_policy, sparse_config_json, Config, EventsConfig, HttpMcpConfig, ShellInitFile,
-    ToolNamespace, ToolsetConfig, DEFAULT_HTTP_MCP_ALLOW_HOSTS, DEFAULT_HTTP_MCP_HOST,
-    DEFAULT_HTTP_MCP_PORT, DEFAULT_SHELL_INIT_FILE, INTERNAL_EVENT_TYPES,
+    seed_path_policy, sparse_config_json, Config, EventsConfig, HttpMcpConfig, PathDefaultAction,
+    ShellInitFile, ToolNamespace, ToolsetConfig, DEFAULT_HTTP_MCP_ALLOW_HOSTS,
+    DEFAULT_HTTP_MCP_HOST, DEFAULT_HTTP_MCP_PORT, DEFAULT_SHELL_INIT_FILE, INTERNAL_EVENT_TYPES,
 };
 use crate::config_templates::{
     build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -23,8 +23,6 @@ const DEFAULT_HUB_TRANSPORT: &str = "websocket";
 const DEFAULT_AGENT_ID: &str = "laptop";
 const DEFAULT_WORKSPACE_ROOT: &str = "~/.agentic_gpt/workspace";
 const DEFAULT_TUNNEL_CACHE_DIR: &str = "~/.agentic_gpt/cache/tunnel-client";
-const DEFAULT_BUBBLEWRAP_PATH: &str = "bwrap";
-const DEFAULT_RUNTIME_PATHS: &str = r#"["/usr","/bin","/lib","/lib64","/etc/ssl"]"#;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SetupField {
     Mode,
@@ -47,21 +45,19 @@ pub(crate) enum SetupField {
     AgentSecret,
     DisplayName,
     WorkspaceRoot,
-    WritePolicy,
-    ReadPolicy,
+    PathDefaultAction,
+    PathReadOnlyPaths,
+    PathWritePaths,
+    PathDenyPaths,
     ConfirmationChannels,
     ConfirmationLanguage,
     MaxConcurrentTasks,
     MaxActiveProcesses,
     MaxFileSearchContextLines,
     ProcessResponseBytes,
-    SandboxEnabled,
+    Bubblewrap,
     ShellInitFileMode,
     ShellInitFilePath,
-    BubblewrapPath,
-    RequiredRuntimePaths,
-    SandboxReadPaths,
-    SandboxWritePaths,
     McpServerId,
     McpServerEnabled,
     McpServerTransport,
@@ -220,8 +216,10 @@ pub(crate) struct IdentityDraft {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkspaceDraft {
     pub(crate) workspace_root: String,
-    pub(crate) write_policy: String,
-    pub(crate) read_policy: String,
+    pub(crate) default_action: String,
+    pub(crate) read_only_paths: String,
+    pub(crate) write_paths: String,
+    pub(crate) deny_paths: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -241,10 +239,6 @@ pub(crate) struct LimitsDraft {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SandboxDraft {
     pub(crate) enabled: bool,
-    pub(crate) bubblewrap_path: String,
-    pub(crate) required_runtime_paths: String,
-    pub(crate) read_paths: String,
-    pub(crate) write_paths: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ShellDraft {
@@ -847,8 +841,10 @@ pub(crate) fn default_optional_draft_for_profile(
             let defaults = seed_path_policy(&workspace_root);
             OptionalSectionDraft::Workspace(WorkspaceDraft {
                 workspace_root: DEFAULT_WORKSPACE_ROOT.to_string(),
-                write_policy: serde_json::to_string(&defaults.write).unwrap(),
-                read_policy: serde_json::to_string(&defaults.read).unwrap(),
+                default_action: path_default_action_label(defaults.default_action).to_string(),
+                read_only_paths: serialize_paths(&defaults.read_only),
+                write_paths: serialize_paths(&defaults.write),
+                deny_paths: serialize_paths(&defaults.deny),
             })
         }
         OptionalSection::Confirmation => OptionalSectionDraft::Confirmation(ConfirmationDraft {
@@ -864,17 +860,7 @@ pub(crate) fn default_optional_draft_for_profile(
             max_file_search_context_lines: "5".to_string(),
             process_response_bytes: DEFAULT_PROCESS_RESPONSE_BYTES.to_string(),
         }),
-        OptionalSection::Sandbox => OptionalSectionDraft::Sandbox(SandboxDraft {
-            enabled: false,
-            bubblewrap_path: DEFAULT_BUBBLEWRAP_PATH.to_string(),
-            required_runtime_paths: DEFAULT_RUNTIME_PATHS.to_string(),
-            read_paths: serialize_paths(
-                &crate::config::seed_sandbox_paths(&PathBuf::from(DEFAULT_WORKSPACE_ROOT)).0,
-            ),
-            write_paths: serialize_paths(
-                &crate::config::seed_sandbox_paths(&PathBuf::from(DEFAULT_WORKSPACE_ROOT)).1,
-            ),
-        }),
+        OptionalSection::Sandbox => OptionalSectionDraft::Sandbox(SandboxDraft { enabled: false }),
         OptionalSection::Shell => OptionalSectionDraft::Shell(ShellDraft {
             init_file_mode: "default".to_string(),
             init_file_path: DEFAULT_SHELL_INIT_FILE.to_string(),
@@ -920,8 +906,11 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
         }),
         workspace: Some(WorkspaceDraft {
             workspace_root: config.workspace_root.to_string_lossy().into_owned(),
-            write_policy: serde_json::to_string(&config.path_policy.write).unwrap(),
-            read_policy: serde_json::to_string(&config.path_policy.read).unwrap(),
+            default_action: path_default_action_label(config.policy.path.default_action)
+                .to_string(),
+            read_only_paths: serialize_paths(&config.policy.path.read_only),
+            write_paths: serialize_paths(&config.policy.path.write),
+            deny_paths: serialize_paths(&config.policy.path.deny),
         }),
         confirmation: Some(ConfirmationDraft {
             channels: config.confirmation_provider.channels_json(),
@@ -934,11 +923,7 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
             process_response_bytes: config.limits.process_response_bytes.to_string(),
         }),
         sandbox: Some(SandboxDraft {
-            enabled: config.sandbox.enabled,
-            bubblewrap_path: config.sandbox.bubblewrap_path.clone(),
-            required_runtime_paths: serialize_paths(&config.sandbox.required_runtime_paths),
-            read_paths: serialize_paths(&config.sandbox.read_paths),
-            write_paths: serialize_paths(&config.sandbox.write_paths),
+            enabled: config.bubblewrap,
         }),
         shell: Some(match &config.shell.init_file {
             ShellInitFile::Default => ShellDraft {
@@ -1006,6 +991,13 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
             detail: tunnel.hub_reporting.detail.to_string(),
         }),
         events: Some(EventsDraft::from_config(&config.events)),
+    }
+}
+
+fn path_default_action_label(action: PathDefaultAction) -> &'static str {
+    match action {
+        PathDefaultAction::Allow => "allow",
+        PathDefaultAction::Deny => "deny",
     }
 }
 

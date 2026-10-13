@@ -1995,63 +1995,42 @@ components:
           type: boolean
     SafeConfigSummary:
       type: object
-      required:
-        - workspaceRoot
-        - sandbox
-        - pathPolicy
-        - policyRuleCounts
-        - policyRules
-        - confirmationProvider
+      required: [workspaceRoot, bubblewrap, policy, confirmationProvider]
       additionalProperties: false
       properties:
         workspaceRoot:
           type: string
-        sandbox:
+        bubblewrap:
+          type: boolean
+        policy:
           type: object
-          required:
-            - enabled
-            - mode
-            - readPaths
-            - writePaths
+          required: [enabled, command, path]
           additionalProperties: false
           properties:
             enabled:
               type: boolean
-            mode:
-              type: string
-            readPaths:
-              type: array
-              items:
-                type: string
-            writePaths:
-              type: array
-              items:
-                type: string
-        pathPolicy:
-          type: object
-          required: [read, write]
-          additionalProperties: false
-          properties:
-            read:
+            command:
               $ref: "#/components/schemas/SafePolicyRules"
-            write:
-              $ref: "#/components/schemas/SafePolicyRules"
-        policyRuleCounts:
-          type: object
-          required:
-            - allow
-            - confirm
-            - deny
-          additionalProperties: false
-          properties:
-            allow:
-              type: integer
-            confirm:
-              type: integer
-            deny:
-              type: integer
-        policyRules:
-          $ref: "#/components/schemas/SafePolicyRules"
+            path:
+              type: object
+              required: [defaultAction, readOnly, write, deny]
+              additionalProperties: false
+              properties:
+                defaultAction:
+                  type: string
+                  enum: [allow, deny]
+                readOnly:
+                  type: array
+                  items:
+                    type: string
+                write:
+                  type: array
+                  items:
+                    type: string
+                deny:
+                  type: array
+                  items:
+                    type: string
         confirmationProvider:
           type: string
     SafePolicyRules:

@@ -4635,13 +4635,13 @@ mod tests {
         let mut config = Config::default_config().unwrap();
         config.agent_id = "test-agent".to_string();
         config.workspace_root = workspace.clone();
-        config.path_policy = crate::config::seed_path_policy(&workspace);
+        config.policy.path = crate::config::seed_path_policy(&workspace);
         config.shell.init_file = crate::config::ShellInitFile::Disabled;
         config.limits.max_active_processes =
             crate::config::MaxActiveProcesses::Explicit(max_active_processes);
         config.confirmation_provider =
             crate::config::ConfirmationProviderConfig::from_legacy("none").unwrap();
-        config.policy.allow = [
+        config.policy.command.allow = [
             "false",
             "pwd",
             "printf",
@@ -4900,13 +4900,16 @@ mod tests {
             let (state, workspace) = test_state(1).await;
             {
                 let mut config = state.config.write().await;
-                config.policy = crate::config::PolicyConfig {
+                config.policy.command = crate::config::PolicyConfig {
                     default_action: decision,
                     ..Default::default()
                 };
-                config.path_policy = crate::config::PathPolicyConfig::default();
-                config.path_policy.read.default_action = decision;
-                config.path_policy.write.default_action = decision;
+                config.policy.path = crate::config::PathPolicyConfig::default();
+                config.policy.path.default_action = if decision == PolicyDecision::Deny {
+                    crate::config::PathDefaultAction::Deny
+                } else {
+                    crate::config::PathDefaultAction::Allow
+                };
                 config.confirmation_provider.channels =
                     vec![crate::config::ConfirmationChannel::Ntfy];
             }
@@ -4963,7 +4966,7 @@ mod tests {
             );
             assert!(state.pending_confirmations.lock().await.is_empty());
             assert_eq!(
-                state.config.read().await.path_policy.write.default_action,
+                state.config.read().await.policy.command.default_action,
                 decision
             );
             let _ = wait_output_capture(&state, &result.response.process_id).await;
@@ -4988,12 +4991,13 @@ mod tests {
         fs::create_dir(&writable).unwrap();
         {
             let mut config = state.config.write().await;
-            config.sandbox.enabled = true;
-            config.sandbox.read_paths = vec![workspace.clone()];
-            config.sandbox.write_paths.clear();
-            config.policy.allow.clear();
-            config.policy.deny = vec!["*".into()];
-            config.path_policy = crate::config::PathPolicyConfig::default();
+            config.bubblewrap = true;
+            config.policy.command.allow.clear();
+            config.policy.command.deny = vec!["*".into()];
+            config.policy.path = crate::config::PathPolicyConfig {
+                read_only: vec![workspace.clone()],
+                ..Default::default()
+            };
             config.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
         }
         let marker = writable.join("effect.txt");
@@ -5053,7 +5057,7 @@ mod tests {
         assert_eq!(result.response.exit_code, Some(0), "{output:?}");
         assert!(marker.exists());
         assert!(!forbidden.exists());
-        assert!(state.config.read().await.sandbox.write_paths.is_empty());
+        assert!(state.config.read().await.policy.path.write.is_empty());
     }
 
     #[tokio::test]
@@ -5918,6 +5922,7 @@ mod tests {
             .write()
             .await
             .policy
+            .command
             .deny
             .push("printf **".to_string());
         let finished = wait_terminal(&state, admitted).await;

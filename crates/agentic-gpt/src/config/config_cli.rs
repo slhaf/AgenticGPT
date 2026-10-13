@@ -13,7 +13,7 @@ use crate::{
     config::{
         self, acquire_config_mutation_lock,
         mcp_servers::{self, McpConfigCommand},
-        ordered_config_json, write_config_with_backup, Config, ToolNamespace,
+        ordered_config_json, write_config_with_backup, Config, PathDefaultAction, ToolNamespace,
     },
     config_setup::SetupSeed,
     config_templates::{self, InitInput, InitSummary, RuntimeMode, SecretValue},
@@ -287,34 +287,34 @@ pub(crate) enum RuleCommand {
 #[derive(Subcommand)]
 pub(crate) enum PathCommand {
     List,
-    Read {
-        #[command(subcommand)]
-        command: PathPolicyCommand,
+    /// Set how paths outside every configured root are handled.
+    DefaultAction {
+        #[arg(value_enum)]
+        action: PathDefaultAction,
     },
+    /// Manage read-only path roots.
+    Readonly {
+        #[command(subcommand)]
+        command: PathRootCommand,
+    },
+    /// Manage writable path roots.
     Write {
         #[command(subcommand)]
-        command: PathPolicyCommand,
+        command: PathRootCommand,
+    },
+    /// Manage denied path roots.
+    Deny {
+        #[command(subcommand)]
+        command: PathRootCommand,
     },
 }
 
 #[derive(Subcommand)]
-pub(crate) enum PathPolicyCommand {
-    DefaultAction {
-        #[arg(value_enum)]
-        action: PolicyDecision,
-    },
-    Allow {
-        #[command(subcommand)]
-        command: RuleCommand,
-    },
-    Confirm {
-        #[command(subcommand)]
-        command: RuleCommand,
-    },
-    Deny {
-        #[command(subcommand)]
-        command: RuleCommand,
-    },
+pub(crate) enum PathRootCommand {
+    /// Add a path root.
+    Add { path: PathBuf },
+    /// Remove a path root.
+    Remove { path: PathBuf },
 }
 
 pub(crate) async fn handle_config(

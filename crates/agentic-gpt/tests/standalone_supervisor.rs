@@ -138,7 +138,7 @@ fn run_smoke(
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
     set_fixture_path_policy(&mut config, &[&workspace]);
     config["shell"]["initFile"] = Value::Null;
-    config["policy"]["allow"] = json!(["/usr/bin/printf **"]);
+    config["policy"]["command"]["allow"] = json!(["/usr/bin/printf **"]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_local_integration",
         "apiKey": format!("file:{}", key_path.display()),
@@ -458,8 +458,9 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         "apiKey": "env:AGENTIC_TEST_TUNNEL_KEY",
         "hubReporting": { "enabled": false, "detail": "metadata" }
     });
-    config["policy"]["allow"] = json!(["/usr/bin/printf **", "/bin/sleep **", "/usr/bin/touch **"]);
-    config["policy"]["deny"] = json!(["/usr/bin/printf **"]);
+    config["policy"]["command"]["allow"] =
+        json!(["/usr/bin/printf **", "/bin/sleep **", "/usr/bin/touch **"]);
+    config["policy"]["command"]["deny"] = json!(["/usr/bin/printf **"]);
     config["limits"]["maxActiveProcesses"] = json!(1);
     config["mcpServers"] = json!({
         "primary": {
@@ -613,7 +614,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         json!("policy_denied")
     );
 
-    config["policy"]["deny"] = json!([]);
+    config["policy"]["command"]["deny"] = json!([]);
     config["mcpServers"]["primary"]["url"] = json!("https://new.example/mcp");
     config["mcpServers"]["local"] = json!({
         "enabled": false,
@@ -648,9 +649,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     }));
 
     let path_target = path_root.join("reload-path-denied");
-    let denied_root = format!("{}/**", path_root.to_string_lossy());
-    config["pathPolicy"]["read"]["deny"] = json!([denied_root]);
-    config["pathPolicy"]["write"]["deny"] = json!([denied_root]);
+    config["policy"]["path"]["deny"] = json!([path_root.to_string_lossy().into_owned()]);
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let path_denied = call_tool(
@@ -667,8 +666,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         path_denied["result"]["structuredContent"]["error"]["code"],
         json!("path_denied")
     );
-    config["pathPolicy"]["read"]["deny"] = json!([]);
-    config["pathPolicy"]["write"]["deny"] = json!([]);
+    config["policy"]["path"]["deny"] = json!([]);
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let path_allowed = call_tool(
@@ -687,7 +685,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     );
     assert!(path_target.exists());
 
-    config["policy"]["deny"] = json!(["/usr/bin/printf **"]);
+    config["policy"]["command"]["deny"] = json!(["/usr/bin/printf **"]);
     config["mcpServers"]["primary"]["transport"] = json!("sse");
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
@@ -713,7 +711,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
             && server["url"] == "https://new.example/mcp"
     }));
 
-    config["policy"]["deny"] = json!([]);
+    config["policy"]["command"]["deny"] = json!([]);
     config["limits"]["maxActiveProcesses"] = json!(1);
     config["mcpServers"]["primary"]["transport"] = json!("streamable-http");
     config["mcpServers"]["primary"]["enabled"] = json!(false);
@@ -1089,19 +1087,13 @@ fn set_fixture_path_policy(config: &mut Value, roots: &[&Path]) {
         .iter()
         .map(|root| root.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    let patterns = paths
-        .iter()
-        .map(|root| {
-            let literal = root.replace('\\', "\\\\").replace('*', "\\*");
-            format!("{}/**", literal.trim_end_matches('/'))
-        })
-        .collect::<Vec<_>>();
-    config["pathPolicy"] = json!({
-        "read": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []},
-        "write": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []}
+    config["policy"]["path"] = json!({
+        "defaultAction": "deny",
+        "readOnly": [],
+        "write": paths,
+        "deny": []
     });
-    config["sandbox"]["readPaths"] = json!(paths);
-    config["sandbox"]["writePaths"] = json!(paths);
+    config["bubblewrap"] = json!(false);
 }
 
 fn fixture_command(binary: &Path, root: &Path) -> Command {

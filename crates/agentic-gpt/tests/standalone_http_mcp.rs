@@ -211,7 +211,7 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     )?;
 
     let mut config = read_config(&config_path)?;
-    config["policy"]["deny"] = json!(["/usr/bin/printf **"]);
+    config["policy"]["command"]["deny"] = json!(["/usr/bin/printf **"]);
     write_config(&config_path, &config)?;
     thread::sleep(RELOAD_WAIT);
     let (_, denied) = http_call(
@@ -230,7 +230,7 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
         "HTTP policy reload did not deny process.exec",
     )?;
 
-    config["policy"]["deny"] = json!([]);
+    config["policy"]["command"]["deny"] = json!([]);
     config["httpMcp"]["bearerToken"] = json!(format!("env:{rotated_name}"));
     write_config(&config_path, &config)?;
     thread::sleep(RELOAD_WAIT);
@@ -1470,7 +1470,7 @@ fn spawn_worker_with_public_url(
     config["workspaceRoot"] = json!(workspace.to_string_lossy().into_owned());
     set_fixture_path_policy(&mut config, &[&workspace]);
     config["shell"]["initFile"] = Value::Null;
-    config["policy"]["allow"] = json!(["/usr/bin/printf **"]);
+    config["policy"]["command"]["allow"] = json!(["/usr/bin/printf **"]);
     config["toolsets"]["enabled"] = json!(["agent", "file", "mcp", "process", "skills", "tmux"]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_http_mcp_integration",
@@ -2523,19 +2523,13 @@ fn set_fixture_path_policy(config: &mut Value, roots: &[&Path]) {
         .iter()
         .map(|root| root.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    let patterns = paths
-        .iter()
-        .map(|root| {
-            let literal = root.replace('\\', "\\\\").replace('*', "\\*");
-            format!("{}/**", literal.trim_end_matches('/'))
-        })
-        .collect::<Vec<_>>();
-    config["pathPolicy"] = json!({
-        "read": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []},
-        "write": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []}
+    config["policy"]["path"] = json!({
+        "defaultAction": "deny",
+        "readOnly": [],
+        "write": paths,
+        "deny": []
     });
-    config["sandbox"]["readPaths"] = json!(paths);
-    config["sandbox"]["writePaths"] = json!(paths);
+    config["bubblewrap"] = json!(false);
 }
 
 fn fixture_command(binary: &Path, root: &Path) -> Command {

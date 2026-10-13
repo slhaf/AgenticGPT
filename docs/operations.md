@@ -30,24 +30,14 @@ loopback/私有主目录进程并在结束时清理；schema 验证与实时行�
 
 清理时先停止并等待拥有状态的进程退出，再删除临时根；失败和提前返回也应执行清理。
 
-## 私有状态布局迁移
+## 私有状态布局
 
 当前布局统一使用 `~/.agentic_gpt/state/` 保存 `events.sqlite3`、`process.sqlite3`、`active-skills.json` 和 `skill-installs/`；这些状态不绑定 Agent ID。runtime/socket 路径仍按 `agentId` 分隔，Hub 的连接身份、路由及传输账本所有者约束保持原有协议语义。
 
-升级旧布局时，先停止使用该 `HOME` 的所有 Agent（包括 supervisor、worker 和本地服务），保留旧目录，再从仓库运行：
-
-```bash
-python3 scripts/migrate-agentic.py
-python3 scripts/migrate-agentic.py --write
-```
-
-统一脚本自动读取当前用户的 `~/.agentic_gpt/config.json`，仅接受 `--write`。不带参数时预览配置变更，并在临时目录复制、转换和验证旧状态；不替换配置或发布状态。预览会创建私有锁文件并清理临时副本。`--write` 在两项验证全部通过后迁移配置及状态。迁移 Process 数据库要求 Python 链接的 SQLite 版本至少为 3.35。配置策略转换见[确认与策略格式迁移](#确认与策略格式迁移)。
-
-脚本仅选择配置中当前 `agentId` 对应的旧 `~/.agentic_gpt/state/agent/<旧目录键>/`，复制支持的事件、Process 和 Skill 状态并转换数据库布局，保留原目录供回退检查。它不会扫描或合并其他 Agent 目录，也不导入 `<workspaceRoot>/state/`；旧 `jobs.sqlite3` 及未知文件保留在原处，不导入新 Process 数据库。
-
-新版根中已有任一受支持的状态对象或数据库 sidecar 时，脚本报告状态迁移跳过，不会覆盖或拼接新旧状态，配置迁移仍独立执行。没有当前身份的旧目录时也会报告跳过。启动过程本身不执行迁移；需要保留旧状态时，应在第一次启动新版 Agent 前执行脚本。
-
-脚本检查运行锁和当前身份的本地 socket；这些检查不能替代运维人员停止其他身份实例。迁移后再启动 Agent，并通过事件、Process 和 Skill 接口核对结果。迁移成功输出只证明脚本处理完成，不证明远程连接、tunnel 或外部副作用恢复。源目录选择、转换明细和回滚限制见[迁移指南](development/agent-state-migration.zh-CN.md)。
+启动过程不会扫描、合并或自动改写旧版私有状态目录。当前仓库不提供把旧配置或旧状态转换为
+现行格式的通用迁移脚本；需要保留旧部署数据时，应先停止使用该 `HOME` 的全部 Agent，完整
+备份配置、数据库及 sidecar，并按该旧版本对应的版本化发布说明处理。不要把历史迁移步骤当作
+当前命令接口，也不要让新实例直接覆盖尚未核验的旧目录。
 
 ## 本地/Standalone 冒烟检查（主要路径）
 
@@ -180,13 +170,13 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 ## 配置重载与重启诊断
 
 实时更新/重启边界适用于 Standalone、Local 和 Hub 连接模式下的 Agent worker，
-并非 Standalone 独有。Agent worker 运行时，对 `policy`、`limits`、`mcpServers`、
+并非 Standalone 独有。Agent worker 运行时，对 `policy`、`bubblewrap`、`limits`、`mcpServers`、
 `toolsets.enabled` 和 `events` 的有效变更会以原子方式应用于后续准入、调用和工具发现。
 
 `events` 配置变更影响后续 process/skill-install 准入；已准入的 process 和安装任务保留准入时的配置快照。
-若 `workspaceRoot` 未变更，`pathPolicy` 也会重载。候选配置若变更
-`workspaceRoot`，则旧 `workspaceRoot` 和 `pathPolicy` 会作为一个原子配置对继续
-生效，直到重启；不得将部分生效的候选配置视为活动配置。
+`policy.command`、`policy.path` 和 `bubblewrap` 的有效变更只用于之后接纳的请求；已接纳
+Process 保留准入时的执行配置快照。`workspaceRoot` 变更仍须重启，不会阻止统一 policy 独立
+热加载；不得把磁盘文件已修改视为运行中操作已经切换配置。
 
 对于 Standalone HTTP MCP 监听器，应通过受控变更验证协调器处理
 `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` 以及 bearer token
@@ -372,45 +362,10 @@ agentic-gpt local call mcp.batch \
 - Standalone 上报功能为可选项，且仅用于上报；它绝不是隐藏的共享命令依赖。
 - 无效的实时配置会保留最后一个有效子集；启动身份变更需要重启。
 
-## 确认与策略格式迁移
+## 策略配置兼容性
 
-本次不兼容升级移除 needConfirm/confirmMethod、program/argsPrefix 规则对象及 writeRoots/readOnlyRoots/denyRoots。
-运行时不自动转换旧格式；命令及路径策略采用显式 defaultAction 和字符串模式数组，固定 deny > confirm > allow 优先级。
-请求调用方改用 acquireConfirmation，具体范围和默认值见[配置说明](configuration.zh-CN.md#单次主动确认)。下游 MCP 审批合同保持原有语义。
-
-仓库提供手动脚本 [migrate-agentic.py](../scripts/migrate-agentic.py)，自动读取当前用户的 `~/.agentic_gpt/config.json`。先停止不遵守配置锁的编辑器及其他写者：
-
-```bash
-# 预览配置变更并验证旧状态，隐藏命令参数及其他配置凭据。
-python3 scripts/migrate-agentic.py
-# 核对预览中的假设和冲突后，备份并迁移配置及状态。
-python3 scripts/migrate-agentic.py --write
-```
-
-同一脚本同时迁移配置和私有状态，仅接受 `--write`，无需指定输入、输出、HOME 或工作区。旧路径中的 `~` 使用当前用户 HOME；
-已有 workspaceRoot 沿用原值，未设置时按 Agentic 默认目录 `~/.agentic_gpt/workspace` 补齐并报告。
-脚本不调用 Agent runtime。使用环境变量或相对根路径的配置必须先明确其具体绝对路径。
-未知／混合规则形状、重复 JSON 字段及符号链接配置文件会失败。
-缺失的旧稀疏策略只在此手动脚本内按历史初始化预设恢复，所有补齐均出现在报告中；新运行时加载不恢复这些历史预设。
-
-默认预览中，旧命令规则只显示规则索引、程序名称和参数数量，新命令模式显示 `[redacted]`；冲突引用规则索引及内置规则名称，不输出命令参数。参数可能包含凭据；写入后可在本地审阅权限为 `0600` 的配置文件，不将其内容贴入日志。
-
-脚本将旧 argv 前缀转换为转义后的字面参数模式，并追加 `**`；按旧 profile 将原内置 confirm/deny 写成显式规则。
-旧配置 allow／confirm 曾可覆盖内置规则，迁移后固定优先级可能重新要求确认或拒绝；报告列出这些冲突，须人工决定是否调整显式规则。
-未匹配命令采用新默认 confirm。workspace 自动可写改为显式 read/write allow，路径根规范化为包含根本身的子树模式，原根字段删除。
-符号链接目标会在迁移机器上规范化；跨机器部署前须复核路径。对已有新格式再次迁移不会重复追加内置预设。
-
-sandbox.readPaths/writePaths 从旧具体读取／写入根生成，不从全局通配规则推导；显式已有挂载列表会保留并规范化。
-路径策略与 OS 挂载是独立边界：拒绝模式不代表宿主目录从 sandbox namespace 消失，须复核挂载范围及实际执行用户权限。
-迁移不会依据全局策略通配符新增宿主根挂载，也不为 tmux、MCP 或 Browser 增加通用沙箱。
-
-实际写入会对规范化目标路径加同一把 `<目标>.config.lock` Linux `flock` 配置锁，与 Agent／配置 CLI 写者协调；持锁贯穿写前字节校验、备份、临时写入、原子替换和目录 fsync，关闭文件描述符时释放。锁文件使用 `0600`，拒绝符号链接或非普通文件；完成后保留锁文件；预览也持有配置锁、迁移锁及 Agent run 锁，临时状态副本在结束时清理。`--write` 在持锁后再次核对输入字节；不遵守该锁的写者仍需先停止。
-
-配置需要变更时，先创建权限为 0600 的 `.backup.<UTC时间>.<随机标识>.json` 备份，再在目标目录写临时文件并原子替换；
-失败会清理临时文件，已创建备份保留用于恢复。
-其他配置字段原样保留在输出，备份及输出可能包含凭据，应按私有配置保管。
-迁移后使用显式 `--config` 验证配置，在隔离 HOME 中做冒烟检查，再恢复部署；不要把真实 HOME 用作测试目录。
-
-### 合并迁移的失败处理
-
-配置转换和旧状态复制、转换、校验全部完成后才开始写入。状态目标已存在或旧目录不存在时，状态项报告跳过，不阻止配置迁移。普通写入异常、可处理的中断或 SIGTERM 会撤回本次发布的状态；若配置已替换但后续同步失败，也会尝试恢复原配置，备份保留。断电、强制终止或回滚本身失败时仍需检查配置和状态完整性，不能将下次状态跳过当作上次完整成功的证明。
+当前配置只接受统一的 `policy.enabled`、`policy.command`、`policy.path` 与顶层
+`bubblewrap`。旧 `pathPolicy`、`sandbox`、扁平命令 `policy`、`needConfirm`、
+`confirmMethod` 及更早的规则对象不会被自动转换。升级前保留原配置，根据
+[配置说明](configuration.zh-CN.md#命令与路径策略)显式重建具体路径根与命令规则，再通过隔离的
+`HOME` 验证。请求调用方使用 `acquireConfirmation`；下游 MCP 审批合同保持原有语义。

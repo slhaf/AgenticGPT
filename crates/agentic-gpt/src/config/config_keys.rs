@@ -34,6 +34,7 @@ pub(crate) enum ConfigValueKind {
     WorkerProfile,
     RoomMaintenanceMode,
     PolicyAction,
+    PathDefaultAction,
 }
 
 impl ConfigValueKind {
@@ -58,6 +59,7 @@ impl ConfigValueKind {
             Self::WorkerProfile => "worker-profile",
             Self::RoomMaintenanceMode => "room-maintenance-mode",
             Self::PolicyAction => "policy-action",
+            Self::PathDefaultAction => "path-default-action",
             Self::EventNotificationLevel => "event-notification-level",
         }
     }
@@ -66,6 +68,7 @@ impl ConfigValueKind {
         match self {
             Self::Boolean => Some(&["true", "false"]),
             Self::PolicyAction => Some(&["allow", "confirm", "deny"]),
+            Self::PathDefaultAction => Some(&["allow", "deny"]),
             Self::ConfirmationChannels => Some(&["freedesktop", "ntfy"]),
             Self::HubTransport => Some(&["websocket", "sse"]),
             Self::ReportingDetail => Some(&["metadata", "full"]),
@@ -374,49 +377,24 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "en",
         set_confirmation_language
     ),
-    config_key!("policy.defaultAction", Policy, PolicyAction, false, "Default policy action.", "未匹配模式时的默认动作。", "deny", set_policy_default_action),
-    config_key!("policy.allow", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_policy_allow),
-    config_key!("policy.confirm", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_policy_confirm),
-    config_key!("policy.deny", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_policy_deny),
-    config_key!("pathPolicy.read.defaultAction", Policy, PolicyAction, false, "Default policy action.", "未匹配模式时的默认动作。", "deny", set_path_policy_read_default_action),
-    config_key!("pathPolicy.read.allow", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_read_allow),
-    config_key!("pathPolicy.read.confirm", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_read_confirm),
-    config_key!("pathPolicy.read.deny", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_read_deny),
-    config_key!("pathPolicy.write.defaultAction", Policy, PolicyAction, false, "Default policy action.", "未匹配模式时的默认动作。", "deny", set_path_policy_write_default_action),
-    config_key!("pathPolicy.write.allow", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_write_allow),
-    config_key!("pathPolicy.write.confirm", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_write_confirm),
-    config_key!("pathPolicy.write.deny", Policy, JsonStringArray, false, "Policy pattern strings.", "策略模式字符串数组。", r#"[]"#, set_path_policy_write_deny),
+    config_key!("policy.enabled", Policy, Boolean, false, "Enable command and path policy enforcement.", "启用命令与路径策略执行。", "true", set_policy_enabled),
+    config_key!("policy.command.defaultAction", Policy, PolicyAction, false, "Default command policy action.", "命令未匹配规则时的默认动作。", "confirm", set_policy_command_default_action),
+    config_key!("policy.command.allow", Policy, JsonStringArray, false, "Allowed command patterns.", "允许的命令模式数组。", r#"[]"#, set_policy_command_allow),
+    config_key!("policy.command.confirm", Policy, JsonStringArray, false, "Command patterns that require confirmation.", "需要确认的命令模式数组。", r#"[]"#, set_policy_command_confirm),
+    config_key!("policy.command.deny", Policy, JsonStringArray, false, "Denied command patterns.", "拒绝的命令模式数组。", r#"[]"#, set_policy_command_deny),
+    config_key!("policy.path.defaultAction", Policy, PathDefaultAction, false, "Default path policy action.", "路径未匹配根目录时的默认动作。", "deny", set_policy_path_default_action),
+    config_key!("policy.path.readOnly", Policy, JsonPathArray, false, "Concrete read-only path roots.", "具体的只读路径根目录。", r#"["/usr"]"#, set_policy_path_read_only),
+    config_key!("policy.path.write", Policy, JsonPathArray, false, "Concrete writable path roots.", "具体的可写路径根目录。", r#"["~/.agentic_gpt/workspace"]"#, set_policy_path_write),
+    config_key!("policy.path.deny", Policy, JsonPathArray, false, "Concrete denied path roots.", "具体的拒绝访问路径根目录。", r#"[]"#, set_policy_path_deny),
     config_key!(
-        "sandbox.enabled",
+        "bubblewrap",
         Sandbox,
         Boolean,
         false,
-        "Enable bubblewrap sandbox execution.",
-        "启用 bubblewrap 沙箱执行。",
-        "true",
-        set_sandbox_enabled
-    ),
-    config_key!(
-        "sandbox.bubblewrapPath",
-        Sandbox,
-        Path,
-        false,
-        "Path or command name used to invoke bubblewrap.",
-        "调用 bubblewrap 使用的路径或命令名。",
-        "bwrap",
-        set_bubblewrap_path
-    ),
-    config_key!("sandbox.readPaths", Sandbox, JsonPathArray, false, "Concrete read-only sandbox mounts.", "沙箱只读挂载的具体路径。", r#"["/etc/os-release"]"#, set_sandbox_read_paths),
-    config_key!("sandbox.writePaths", Sandbox, JsonPathArray, false, "Concrete writable sandbox mounts.", "沙箱可写挂载的具体路径。", r#"["/tmp"]"#, set_sandbox_write_paths),
-    config_key!(
-        "sandbox.requiredRuntimePaths",
-        Sandbox,
-        JsonPathArray,
-        false,
-        "JSON array of runtime paths exposed to the sandbox.",
-        "以 JSON 数组表示的沙箱运行时路径。",
-        r#"["/usr","/opt/runtime"]"#,
-        set_required_runtime_paths
+        "Use bubblewrap to enforce the configured path roots for process execution.",
+        "使用 bubblewrap 为进程执行强制应用配置的路径根目录。",
+        "false",
+        set_bubblewrap
     ),
     config_key!(
         "shell.initFile",
@@ -1157,115 +1135,63 @@ fn set_shell_init_file(config: &mut Config, value: &str) -> Result<()> {
 fn unset_shell_init_file(config: &mut Config) {
     config.shell.init_file = ShellInitFile::Default;
 }
-fn set_policy_default_action(config: &mut Config, value: &str) -> Result<()> {
-    config.policy.default_action =
+fn set_policy_enabled(config: &mut Config, value: &str) -> Result<()> {
+    config.policy.enabled = value.parse::<bool>()?;
+    Ok(())
+}
+fn set_policy_command_default_action(config: &mut Config, value: &str) -> Result<()> {
+    config.policy.command.default_action =
         serde_json::from_value(serde_json::Value::String(value.to_string()))?;
     Ok(())
 }
-fn set_policy_allow(config: &mut Config, value: &str) -> Result<()> {
+fn set_policy_command_allow(config: &mut Config, value: &str) -> Result<()> {
     let patterns: Vec<String> = serde_json::from_str(value)?;
     for pattern in &patterns {
         crate::policy::validate_command_pattern(pattern)?;
     }
-    config.policy.allow = patterns;
+    config.policy.command.allow = patterns;
     Ok(())
 }
-fn set_policy_confirm(config: &mut Config, value: &str) -> Result<()> {
+fn set_policy_command_confirm(config: &mut Config, value: &str) -> Result<()> {
     let patterns: Vec<String> = serde_json::from_str(value)?;
     for pattern in &patterns {
         crate::policy::validate_command_pattern(pattern)?;
     }
-    config.policy.confirm = patterns;
+    config.policy.command.confirm = patterns;
     Ok(())
 }
-fn set_policy_deny(config: &mut Config, value: &str) -> Result<()> {
+fn set_policy_command_deny(config: &mut Config, value: &str) -> Result<()> {
     let patterns: Vec<String> = serde_json::from_str(value)?;
     for pattern in &patterns {
         crate::policy::validate_command_pattern(pattern)?;
     }
-    config.policy.deny = patterns;
+    config.policy.command.deny = patterns;
     Ok(())
 }
-fn set_path_policy_read_default_action(config: &mut Config, value: &str) -> Result<()> {
-    config.path_policy.read.default_action =
+fn set_policy_path_default_action(config: &mut Config, value: &str) -> Result<()> {
+    config.policy.path.default_action =
         serde_json::from_value(serde_json::Value::String(value.to_string()))?;
     Ok(())
 }
-fn set_path_policy_read_allow(config: &mut Config, value: &str) -> Result<()> {
-    let patterns: Vec<String> = serde_json::from_str(value)?;
-    for pattern in &patterns {
-        crate::policy::validate_path_pattern(pattern)?;
-    }
-    config.path_policy.read.allow = patterns;
+fn set_policy_path_read_only(config: &mut Config, value: &str) -> Result<()> {
+    config.policy.path.read_only = parse_path_roots(value)?;
     Ok(())
 }
-fn set_path_policy_read_confirm(config: &mut Config, value: &str) -> Result<()> {
-    let patterns: Vec<String> = serde_json::from_str(value)?;
-    for pattern in &patterns {
-        crate::policy::validate_path_pattern(pattern)?;
-    }
-    config.path_policy.read.confirm = patterns;
+fn set_policy_path_write(config: &mut Config, value: &str) -> Result<()> {
+    config.policy.path.write = parse_path_roots(value)?;
     Ok(())
 }
-fn set_path_policy_read_deny(config: &mut Config, value: &str) -> Result<()> {
-    let patterns: Vec<String> = serde_json::from_str(value)?;
-    for pattern in &patterns {
-        crate::policy::validate_path_pattern(pattern)?;
-    }
-    config.path_policy.read.deny = patterns;
+fn set_policy_path_deny(config: &mut Config, value: &str) -> Result<()> {
+    config.policy.path.deny = parse_path_roots(value)?;
     Ok(())
 }
-fn set_path_policy_write_default_action(config: &mut Config, value: &str) -> Result<()> {
-    config.path_policy.write.default_action =
-        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
-    Ok(())
+fn parse_path_roots(value: &str) -> Result<Vec<PathBuf>> {
+    let roots = serde_json::from_str::<Vec<PathBuf>>(value)?;
+    crate::exec::normalize_roots(roots.iter().map(PathBuf::as_path))?;
+    Ok(roots)
 }
-fn set_path_policy_write_allow(config: &mut Config, value: &str) -> Result<()> {
-    let patterns: Vec<String> = serde_json::from_str(value)?;
-    for pattern in &patterns {
-        crate::policy::validate_path_pattern(pattern)?;
-    }
-    config.path_policy.write.allow = patterns;
-    Ok(())
-}
-fn set_path_policy_write_confirm(config: &mut Config, value: &str) -> Result<()> {
-    let patterns: Vec<String> = serde_json::from_str(value)?;
-    for pattern in &patterns {
-        crate::policy::validate_path_pattern(pattern)?;
-    }
-    config.path_policy.write.confirm = patterns;
-    Ok(())
-}
-fn set_path_policy_write_deny(config: &mut Config, value: &str) -> Result<()> {
-    let patterns: Vec<String> = serde_json::from_str(value)?;
-    for pattern in &patterns {
-        crate::policy::validate_path_pattern(pattern)?;
-    }
-    config.path_policy.write.deny = patterns;
-    Ok(())
-}
-
-fn set_sandbox_enabled(config: &mut Config, value: &str) -> Result<()> {
-    config.sandbox.enabled = value.parse::<bool>()?;
-    Ok(())
-}
-
-fn set_bubblewrap_path(config: &mut Config, value: &str) -> Result<()> {
-    config.sandbox.bubblewrap_path = value.to_string();
-    Ok(())
-}
-
-fn set_sandbox_read_paths(config: &mut Config, value: &str) -> Result<()> {
-    config.sandbox.read_paths = serde_json::from_str(value)?;
-    Ok(())
-}
-fn set_sandbox_write_paths(config: &mut Config, value: &str) -> Result<()> {
-    config.sandbox.write_paths = serde_json::from_str(value)?;
-    Ok(())
-}
-
-fn set_required_runtime_paths(config: &mut Config, value: &str) -> Result<()> {
-    config.sandbox.required_runtime_paths = serde_json::from_str(value)?;
+fn set_bubblewrap(config: &mut Config, value: &str) -> Result<()> {
+    config.bubblewrap = value.parse::<bool>()?;
     Ok(())
 }
 

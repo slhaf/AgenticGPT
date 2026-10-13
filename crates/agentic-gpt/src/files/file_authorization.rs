@@ -86,23 +86,11 @@ pub(super) async fn authorize_file_targets(
             ));
         }
     }
-    let mut effective = config.clone();
-    if authorization.approved {
-        if acquisition.is_some_and(|a| a.effective_acquire(false)) {
-            effective = exec::permissive_paths(config);
-        } else {
-            // Policy confirmation approves Confirm paths, not unrelated Deny paths.
-            for policy in [
-                &mut effective.path_policy.read,
-                &mut effective.path_policy.write,
-            ] {
-                policy.allow.append(&mut policy.confirm);
-                if policy.default_action == PolicyDecision::Confirm {
-                    policy.default_action = PolicyDecision::Allow;
-                }
-            }
-        }
-    }
+    let effective = if authorization.approved {
+        exec::permissive_paths(config)
+    } else {
+        config.clone()
+    };
     Ok((effective, authorization))
 }
 
@@ -137,7 +125,7 @@ pub(super) async fn authorize_read_requests(
     let proactive = acquisition.is_some_and(|a| a.effective_acquire(false));
     let mut targets = Vec::new();
     let mut roots = Vec::new();
-    for (index, request) in requests.iter().enumerate() {
+    for request in requests {
         let resolved = match resolve_path(&unrestricted, &request.path, Access::Read) {
             Ok(p) => p,
             Err(_) => continue,
@@ -149,57 +137,6 @@ pub(super) async fn authorize_read_requests(
             continue;
         }
         targets.push((resolved.path.clone(), Access::Read));
-        if let Some(search) = searches
-            .and_then(|searches| searches.get(index))
-            .filter(|_| !proactive && action == PolicyDecision::Allow)
-        {
-            let include = compile_globs(&search.include)?;
-            let exclude = compile_globs(&search.exclude)?;
-            let filter_config = config.clone();
-            let walker = WalkBuilder::new(&resolved.path)
-                .hidden(!search.hidden)
-                .git_ignore(search.respect_gitignore)
-                .git_global(search.respect_gitignore)
-                .git_exclude(search.respect_gitignore)
-                .follow_links(false)
-                .filter_entry(move |entry| {
-                    let Ok(path) = entry.path().canonicalize() else {
-                        return false;
-                    };
-                    !is_reserved_path(&filter_config, &path)
-                        && crate::policy::path_policy_decision(&filter_config, &path, false).ok()
-                            != Some(PolicyDecision::Deny)
-                })
-                .build();
-            for entry in walker.flatten().take(MAX_SEARCH_FILES + 1) {
-                if entry.file_type().is_some_and(|t| t.is_file()) {
-                    let Ok(path) = entry.path().canonicalize() else {
-                        continue;
-                    };
-                    let relative = if resolved.path.is_file() {
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    } else {
-                        path.strip_prefix(&resolved.path)
-                            .unwrap_or(&path)
-                            .to_string_lossy()
-                            .replace(std::path::MAIN_SEPARATOR, "/")
-                    };
-                    if include.as_ref().is_some_and(|set| !set.is_match(&relative))
-                        || exclude.as_ref().is_some_and(|set| set.is_match(&relative))
-                    {
-                        continue;
-                    }
-                    if crate::policy::path_policy_decision(config, &path, false)
-                        .map_err(|r| FileError::new("path_policy_error", &r))?
-                        == PolicyDecision::Confirm
-                    {
-                        targets.push((path, Access::Read));
-                    }
-                }
-            }
-        }
     }
     let effective = if targets.is_empty() {
         config.clone()

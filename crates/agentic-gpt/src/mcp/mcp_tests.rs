@@ -225,11 +225,9 @@ async fn managed_test_state(max_active_processes: usize) -> (AppState, PathBuf) 
     let mut config = Config::default_config().unwrap();
     config.agent_id = "test-agent".to_owned();
     config.workspace_root = workspace;
-    config.policy.allow = vec!["*".to_string()];
-    config.path_policy.read.allow =
-        vec![crate::config::path_subtree_pattern(&config.workspace_root)];
-    config.path_policy.write.allow =
-        vec![crate::config::path_subtree_pattern(&config.workspace_root)];
+    config.policy.command.allow = vec!["*".to_string()];
+    config.policy.path.read_only = vec![config.workspace_root.to_path_buf()];
+    config.policy.path.write = vec![config.workspace_root.to_path_buf()];
     config.limits.max_active_processes =
         crate::config::MaxActiveProcesses::Explicit(max_active_processes);
     config.mcp_servers.insert(

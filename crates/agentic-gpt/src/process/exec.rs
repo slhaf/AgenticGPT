@@ -394,8 +394,8 @@ pub(crate) fn build_command(
         ),
         ExecutionSpec::Argv { program, args } => (program.as_str(), args.clone()),
     };
-    if config.sandbox.enabled {
-        let mut command = Command::new(&config.sandbox.bubblewrap_path);
+    if config.policy.enabled && config.bubblewrap {
+        let mut command = Command::new("bwrap");
         command
             .arg("--die-with-parent")
             .arg("--unshare-all")
@@ -403,27 +403,73 @@ pub(crate) fn build_command(
             .arg("/dev")
             .arg("--chdir")
             .arg(working_directory);
-        let mut created_dirs = HashSet::new();
-        let mut mounts = std::collections::BTreeMap::new();
-        // Preserve runtime aliases such as /lib64: executable loaders refer to
-        // these namespace paths even when their host source is a symlink.
-        for path in &config.sandbox.required_runtime_paths {
-            let path = expand_pathbuf(path)?;
-            if !path.is_absolute() {
-                anyhow::bail!("sandbox_runtime_path_must_be_absolute");
-            }
+        let policy = &config.policy.path;
+        let normalize = |roots: &[PathBuf]| normalize_roots(roots.iter().map(PathBuf::as_path));
+        let write = normalize(&policy.write)?;
+        let approved_read = normalize(&policy.approved_read)?;
+        let approved_write = normalize(&policy.approved_write)?;
+        let mut mounts = std::collections::BTreeMap::<PathBuf, &str>::new();
+        if policy.default_action == crate::config::PathDefaultAction::Allow {
+            mounts.insert(PathBuf::from("/"), "--bind");
+        }
+        // Runtime namespace aliases must retain their loader-visible paths.
+        for path in ["/usr", "/bin", "/lib", "/lib64", "/etc/ssl"] {
+            let path = PathBuf::from(path);
             if path.exists() {
                 mounts.insert(path, "--ro-bind");
             }
         }
-        for path in normalize_roots(config.sandbox.read_paths.iter().map(PathBuf::as_path))? {
-            if path.exists() {
+        for path in normalize(&policy.read_only)? {
+            if path.exists() && !write.iter().any(|w| path.starts_with(w)) {
                 mounts.insert(path, "--ro-bind");
             }
         }
-        for path in normalize_roots(config.sandbox.write_paths.iter().map(PathBuf::as_path))? {
+        for path in write {
             if path.exists() {
                 mounts.insert(path, "--bind");
+            }
+        }
+        let denied = normalize(&policy.deny)?;
+        for path in &denied {
+            if denied
+                .iter()
+                .any(|parent| parent != path && path.starts_with(parent))
+            {
+                continue;
+            }
+            if approved_write.iter().any(|grant| path.starts_with(grant)) {
+                continue;
+            }
+            let exposed = mounts.keys().any(|root| path.starts_with(root));
+            mounts.retain(|root, _| !root.starts_with(path));
+            if exposed {
+                // Creating a missing mask target beneath a host bind would
+                // mutate the host. An unrepresentable deny must fail isolation.
+                if !path.exists() {
+                    anyhow::bail!("bubblewrap_deny_path_not_found: {}", path.display());
+                }
+                let readable = approved_read.iter().any(|grant| path.starts_with(grant));
+                mounts.insert(path.clone(), if readable { "--ro-bind" } else { "mask" });
+            }
+        }
+        for path in &approved_read {
+            if path.exists() {
+                let writable = crate::policy::path_policy_decision(config, path, true)
+                    .map_err(anyhow::Error::msg)?
+                    == PolicyDecision::Allow;
+                let inherited_write = mounts
+                    .iter()
+                    .filter(|(root, _)| path.starts_with(root))
+                    .max_by_key(|(root, _)| root.components().count())
+                    .is_some_and(|(_, mode)| *mode == "--bind");
+                if !(writable && inherited_write) {
+                    mounts.insert(path.clone(), "--ro-bind");
+                }
+            }
+        }
+        for path in &approved_write {
+            if path.exists() {
+                mounts.insert(path.clone(), "--bind");
             }
         }
         let mut mounts = mounts.into_iter().collect::<Vec<_>>();
@@ -433,9 +479,59 @@ pub(crate) fn build_command(
                 .cmp(&b.components().count())
                 .then_with(|| a.cmp(b))
         });
+        let mut created_dirs = HashSet::new();
+        let mut traversable_masks = Vec::new();
         for (path, mode) in mounts {
-            add_bwrap_bind(&mut command, &mut created_dirs, mode, &path);
+            add_bwrap_parent_dirs(&mut command, &mut created_dirs, &path);
+            if mode == "mask" {
+                if path.is_dir() {
+                    let has_granted_child = approved_read
+                        .iter()
+                        .chain(&approved_write)
+                        .any(|grant| grant != &path && grant.starts_with(&path));
+                    command
+                        .arg("--perms")
+                        .arg(if has_granted_child { "755" } else { "000" })
+                        .arg("--tmpfs")
+                        .arg(&path);
+                    if has_granted_child {
+                        traversable_masks.push(path.clone());
+                    }
+                } else {
+                    use std::os::fd::{AsRawFd, FromRawFd};
+                    use std::os::unix::process::CommandExt;
+                    let source = std::fs::File::open("/dev/null")?;
+                    // Keep mask data descriptors away from stdio and the shell
+                    // startup channel (fd 3), and alive until the child execs.
+                    let fd = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+                    if fd == -1 {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
+                    let source = unsafe { std::fs::File::from_raw_fd(fd) };
+                    command
+                        .arg("--perms")
+                        .arg("000")
+                        .arg("--ro-bind-data")
+                        .arg(fd.to_string())
+                        .arg(&path);
+                    unsafe {
+                        command.as_std_mut().pre_exec(move || {
+                            if libc::fcntl(source.as_raw_fd(), libc::F_SETFD, 0) == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            Ok(())
+                        });
+                    }
+                }
+            } else {
+                add_bwrap_bind(&mut command, &mut created_dirs, mode, &path);
+            }
             created_dirs.insert(path);
+        }
+        for path in traversable_masks {
+            // Only the synthetic parent is sealed; granted child bind mounts
+            // retain their own permissions.
+            command.arg("--remount-ro").arg(path);
         }
         command.arg("--").arg(program).args(args);
         if matches!(execution, ExecutionSpec::Shell { .. }) {
@@ -695,7 +791,7 @@ mod tests {
         .unwrap();
 
         let mut config = Config::default_config().unwrap();
-        config.sandbox.enabled = false;
+        config.bubblewrap = false;
         config.shell.init_file = ShellInitFile::Path(init_name);
         let mut command = build_command(
             &config,
@@ -774,7 +870,7 @@ mod tests {
         .unwrap();
 
         let mut config = Config::default_config().unwrap();
-        config.sandbox.enabled = false;
+        config.bubblewrap = false;
         config.shell.init_file = ShellInitFile::Path(init_file.to_string_lossy().to_string());
         let mut command = build_command(
             &config,

@@ -2,28 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::process::ProcessInfo;
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PolicyCounts {
-    pub allow: usize,
-    pub confirm: usize,
-    pub deny: usize,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SafeSandboxSummary {
-    pub enabled: bool,
-    pub mode: String,
-    pub read_paths: Vec<String>,
-    pub write_paths: Vec<String>,
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SafePathPolicySummary {
-    pub read: SafePolicyRules,
-    pub write: SafePolicyRules,
+    pub default_action: String,
+    pub read_only: Vec<String>,
+    pub write: Vec<String>,
+    pub deny: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -33,6 +19,14 @@ pub struct SafePolicyRules {
     pub allow: Vec<String>,
     pub confirm: Vec<String>,
     pub deny: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafePolicySummary {
+    pub enabled: bool,
+    pub command: SafePolicyRules,
+    pub path: SafePathPolicySummary,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -52,10 +46,8 @@ pub struct SafeTunnelSummary {
 #[serde(rename_all = "camelCase")]
 pub struct SafeConfigSummary {
     pub workspace_root: String,
-    pub sandbox: SafeSandboxSummary,
-    pub path_policy: SafePathPolicySummary,
-    pub policy_rule_counts: PolicyCounts,
-    pub policy_rules: SafePolicyRules,
+    pub bubblewrap: bool,
+    pub policy: SafePolicySummary,
     pub confirmation_provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel: Option<SafeTunnelSummary>,

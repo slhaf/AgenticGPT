@@ -48,7 +48,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     set_fixture_path_policy(&mut config, &[&workspace]);
     config["shell"]["initFile"] = Value::Null;
     config["tunnel"] = Value::Null;
-    config["policy"]["deny"] = json!(["/usr/bin/printf **"]);
+    config["policy"]["command"]["deny"] = json!(["/usr/bin/printf **"]);
     config["mcpServers"] = json!({
         "primary": {
             "enabled": true,
@@ -478,19 +478,13 @@ fn set_fixture_path_policy(config: &mut Value, roots: &[&Path]) {
         .iter()
         .map(|root| root.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    let patterns = paths
-        .iter()
-        .map(|root| {
-            let literal = root.replace('\\', "\\\\").replace('*', "\\*");
-            format!("{}/**", literal.trim_end_matches('/'))
-        })
-        .collect::<Vec<_>>();
-    config["pathPolicy"] = json!({
-        "read": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []},
-        "write": {"defaultAction": "deny", "allow": patterns, "confirm": [], "deny": []}
+    config["policy"]["path"] = json!({
+        "defaultAction": "deny",
+        "readOnly": [],
+        "write": paths,
+        "deny": []
     });
-    config["sandbox"]["readPaths"] = json!(paths);
-    config["sandbox"]["writePaths"] = json!(paths);
+    config["bubblewrap"] = json!(false);
 }
 
 fn fixture_command(binary: &Path, root: &Path) -> Command {

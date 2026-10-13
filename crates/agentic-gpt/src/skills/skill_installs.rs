@@ -1883,9 +1883,9 @@ mod tests {
             std::env::temp_dir().join(format!("agentic-install-{}", Uuid::new_v4().simple()));
         let mut config = Config::default_config().unwrap();
         config.workspace_root = root.clone();
-        config.policy.allow = vec!["*".to_string()];
-        config.path_policy.read.allow = vec![crate::config::path_subtree_pattern(&root)];
-        config.path_policy.write.allow = vec![crate::config::path_subtree_pattern(&root)];
+        config.policy.command.allow = vec!["*".to_string()];
+        config.policy.path.read_only = vec![root.to_path_buf()];
+        config.policy.path.write = vec![root.to_path_buf()];
         config.confirmation_provider =
             crate::config::ConfirmationProviderConfig::from_legacy("none").unwrap();
         let private_state =

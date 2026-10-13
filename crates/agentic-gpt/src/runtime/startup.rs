@@ -54,7 +54,7 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
         initial.agent_id,
         initial.hub.url,
         initial.workspace_root.display(),
-        if initial.sandbox.enabled {
+        if initial.policy.enabled && initial.bubblewrap {
             "enabled"
         } else {
             "disabled"
@@ -91,12 +91,12 @@ pub(crate) async fn run_stdio_worker(
     log_info(format!(
         "standalone worker config loaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteAllow={}; pathReadAllow={}; pathDeny={}",
         config.limits.max_active_processes.resolve().diagnostic(),
-        config.policy.allow.len(),
-        config.policy.confirm.len(),
-        config.policy.deny.len(),
-        config.path_policy.write.allow.len(),
-        config.path_policy.read.allow.len(),
-        config.path_policy.write.deny.len() + config.path_policy.read.deny.len(),
+        config.policy.command.allow.len(),
+        config.policy.command.confirm.len(),
+        config.policy.command.deny.len(),
+        config.policy.path.write.len(),
+        config.policy.path.read_only.len(),
+        config.policy.path.deny.len(),
     ));
     let reporting_enabled = config
         .tunnel
@@ -333,12 +333,12 @@ async fn watch_live_config(
         log_info(format!(
             "live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteAllow={}; pathReadAllow={}; pathDeny={}; mcpServers={}; httpMcpEnabled={}",
             resolved.diagnostic(),
-            live.policy.allow.len(),
-            live.policy.confirm.len(),
-            live.policy.deny.len(),
-            live.path_policy.write.allow.len(),
-            live.path_policy.read.allow.len(),
-            live.path_policy.write.deny.len() + live.path_policy.read.deny.len(),
+            live.policy.command.allow.len(),
+            live.policy.command.confirm.len(),
+            live.policy.command.deny.len(),
+            live.policy.path.write.len(),
+            live.policy.path.read_only.len(),
+            live.policy.path.deny.len(),
             live.mcp_servers.len(),
             live.http_mcp.enabled,
         ));
@@ -381,9 +381,7 @@ pub(crate) fn apply_live_config_subset(
 ) -> config::ResolvedMaxActiveProcesses {
     let resolved = candidate.limits.max_active_processes.resolve();
     live.policy = candidate.policy;
-    live.path_policy = candidate.path_policy;
-    live.sandbox.read_paths = candidate.sandbox.read_paths;
-    live.sandbox.write_paths = candidate.sandbox.write_paths;
+    live.bubblewrap = candidate.bubblewrap;
     live.limits = candidate.limits;
     live.shell = candidate.shell;
     live.mcp_servers = candidate.mcp_servers;

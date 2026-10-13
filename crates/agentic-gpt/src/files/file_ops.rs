@@ -2728,10 +2728,7 @@ mod tests {
     fn config(root: &Path) -> Config {
         let mut config = Config::default_config().unwrap();
         config.workspace_root = root.to_path_buf();
-        config.path_policy = crate::config::PathPolicyConfig::default();
-        let scope = crate::config::path_subtree_pattern(root);
-        config.path_policy.read.allow.push(scope.clone());
-        config.path_policy.write.allow.push(scope);
+        config.policy.path.write.push(root.to_path_buf());
         config
     }
 
@@ -2801,21 +2798,8 @@ mod tests {
         fs::write(read_only.join("a.txt"), "a").unwrap();
         fs::write(denied.join("a.txt"), "a").unwrap();
         let mut config = config(&workspace);
-        config
-            .path_policy
-            .read
-            .allow
-            .push(crate::config::path_subtree_pattern(&read_only));
-        config
-            .path_policy
-            .read
-            .deny
-            .push(crate::config::path_subtree_pattern(&denied));
-        config
-            .path_policy
-            .write
-            .deny
-            .push(crate::config::path_subtree_pattern(&denied));
+        config.policy.path.read_only.push(read_only.to_path_buf());
+        config.policy.path.deny.push(denied.to_path_buf());
         let read_resolved = resolve_path(
             &config,
             &read_only.join("a.txt").to_string_lossy(),

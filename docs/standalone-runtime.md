@@ -281,7 +281,7 @@ Tunnel、HTTP 和本地 Unix 入口不会暴露 Hub 汇总或通知工具。它�
 ### Standalone 文件工具
 
 `file.search` 和文本模式的 `file.read` 都是有界 UTF-8 操作。路径可相对于 `workspaceRoot` 指定，也可使用经
-`pathPolicy` 授权的绝对路径；工具会在策略检查前解析符号链接，且不会调用 shell 或外部搜索进程。文本读取默认返回内容，可通过
+`policy.path` 授权的绝对路径；工具会在策略检查前解析符号链接，且不会调用 shell 或外部搜索进程。文本读取默认返回内容，可通过
 `metadata: true` 附带 metadata，支持包含首尾行的行范围，并会在 256 KiB 响应上限之前停在最后一个完整行。若读取被截断，只返回
 `nextStartLine`；超过上限的单行会被拒绝。在 Git 仓库中，搜索默认遵循 Git ignore 规则；返回的匹配/上下文内容最多为 256 KiB，
 扫描的文件数和字节数也有限制。
@@ -400,8 +400,7 @@ Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `boot
 
 当前的多文件变更边界见 file 合同矩阵：一份完整的 apply-patch 请求会先暂存和验证，然后才进行可选确认及提交。
 
-Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`limits`、`mcpServers`、`toolsets.enabled`、`events`，以及在
-`workspaceRoot` 未变时的 `pathPolicy` 变更；这些配置会经过完整验证，再原子应用于新的准入、调用和工具发现。
+Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`bubblewrap`、`limits`、`mcpServers`、`toolsets.enabled` 和 `events`；这些配置会经过完整验证，再原子应用于新的准入、调用和工具发现。
 
 MCP server id 只能使用
 `A-Z`、`a-z`、`0-9`、`.`、`_` 或 `-`，最长 64 字节；`streamable-http` 要求绝对 HTTP(S) URL，可选结构化 Bearer auth；
@@ -414,8 +413,8 @@ MCP server id 只能使用
 这些字段变更后必须重启。共享 watcher 会记录 `config changes require restart; fields=...`；Standalone supervisor 还会发出
 `restart_required`，Hub 模式则没有 supervisor 事件。
 
-若 `workspaceRoot` 发生变化，原 workspace root 和 `pathPolicy` 会作为一个原子组合保持生效，
-直到重启；只有 root 未改变时，才可单独 reload path policy。实时启用 `room` namespace 时，会依据当前实时 Room 配置执行 bootstrap；磁盘上需重启才生效的
+若 `workspaceRoot` 发生变化，默认工作目录仍保持原值直到重启；统一的 `policy` 与 `bubblewrap`
+仍可独立热加载，并只影响之后接纳的请求。实时启用 `room` namespace 时，会依据当前实时 Room 配置执行 bootstrap；磁盘上需重启才生效的
 `room.*` 变更不会在重启前改变运行时 root。`agent.info.mcp` 仅报告生效的配置 revision、已配置/已启用计数和 client 生命周期，不会暴露 endpoint。
 
 Standalone worker 也会监视并协调 `httpMcp` 子集。启用或禁用 endpoint、变更 bearer-token reference 或其解析后的内容，以及变更 `host`、`port`、

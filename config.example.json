@@ -78,132 +78,78 @@
       "url": "node /home/your-user/mcp/server.mjs"
     }
   },
-  "pathPolicy": {
-    "read": {
-      "defaultAction": "deny",
-      "allow": [
-        "~/.cache/**",
-        "~/.local/share/**",
-        "/etc/os-release/**",
-        "/proc/meminfo/**",
-        "/proc/cpuinfo/**",
-        "/proc/loadavg/**",
-        "/proc/uptime/**",
-        "/sys/class/power_supply/**",
-        "/sys/class/thermal/**",
-        "/home/your-user/.agentic_gpt/workspace/**",
-        "~/Documents/**",
-        "~/Downloads/**",
-        "~/Projects/**",
-        "/tmp/**"
+  "policy": {
+    "enabled": true,
+    "command": {
+      "defaultAction": "confirm",
+      "allow": [],
+      "confirm": [
+        "sudo **",
+        "rm **",
+        "mv **",
+        "chmod **",
+        "chown **",
+        "mount **",
+        "systemctl **",
+        "service **",
+        "docker **",
+        "scp **",
+        "curl **",
+        "wget **",
+        "bash **",
+        "sh **",
+        "zsh **",
+        "fish **",
+        "perl **",
+        "ruby **",
+        "python -c **",
+        "node -e **"
       ],
-      "confirm": [],
       "deny": [
-        "~/.ssh/**",
-        "~/.gnupg/**",
-        "~/.local/share/keyrings/**",
-        "~/.password-store/**",
-        "~/.mozilla/**",
-        "~/.config/google-chrome/**",
-        "~/.config/chromium/**",
-        "~/.npmrc/**",
-        "~/.pypirc/**",
-        "~/.cargo/credentials/**",
-        "~/.docker/config.json/**",
-        "~/.kube/**",
-        "~/.aws/**",
-        "~/.config/gcloud/**",
-        "~/.config/gh/**"
+        "su **",
+        "mkfs **",
+        "dd **",
+        "ssh **"
       ]
     },
-    "write": {
+    "path": {
       "defaultAction": "deny",
-      "allow": [
-        "/home/your-user/.agentic_gpt/workspace/**",
-        "~/Documents/**",
-        "~/Downloads/**",
-        "~/Projects/**",
-        "/tmp/**"
+      "readOnly": [
+        "~/.cache",
+        "~/.local/share",
+        "/etc/os-release",
+        "/proc/meminfo",
+        "/proc/cpuinfo",
+        "/proc/loadavg",
+        "/proc/uptime",
+        "/sys/class/power_supply",
+        "/sys/class/thermal"
       ],
-      "confirm": [],
+      "write": [
+        "/home/your-user/.agentic_gpt/workspace",
+        "~/Documents",
+        "~/Downloads",
+        "~/Projects",
+        "/tmp"
+      ],
       "deny": [
-        "~/.ssh/**",
-        "~/.gnupg/**",
-        "~/.local/share/keyrings/**",
-        "~/.password-store/**",
-        "~/.mozilla/**",
-        "~/.config/google-chrome/**",
-        "~/.config/chromium/**",
-        "~/.npmrc/**",
-        "~/.pypirc/**",
-        "~/.cargo/credentials/**",
-        "~/.docker/config.json/**",
-        "~/.kube/**",
-        "~/.aws/**",
-        "~/.config/gcloud/**",
-        "~/.config/gh/**"
+        "~/.ssh",
+        "~/.gnupg",
+        "~/.local/share/keyrings",
+        "~/.password-store",
+        "~/.mozilla",
+        "~/.config/google-chrome",
+        "~/.config/chromium",
+        "~/.npmrc",
+        "~/.pypirc",
+        "~/.cargo/credentials",
+        "~/.docker/config.json",
+        "~/.kube",
+        "~/.aws",
+        "~/.config/gcloud",
+        "~/.config/gh"
       ]
     }
   },
-  "policy": {
-    "defaultAction": "confirm",
-    "allow": [],
-    "confirm": [
-      "sudo **",
-      "rm **",
-      "mv **",
-      "chmod **",
-      "chown **",
-      "mount **",
-      "systemctl **",
-      "service **",
-      "docker **",
-      "scp **",
-      "curl **",
-      "wget **",
-      "bash **",
-      "sh **",
-      "zsh **",
-      "fish **",
-      "perl **",
-      "ruby **",
-      "python -c **",
-      "node -e **"
-    ],
-    "deny": [
-      "su **",
-      "mkfs **",
-      "dd **",
-      "ssh **"
-    ]
-  },
-  "sandbox": {
-    "enabled": false,
-    "bubblewrapPath": "bwrap",
-    "requiredRuntimePaths": [
-      "/usr",
-      "/bin",
-      "/lib",
-      "/lib64",
-      "/etc/ssl"
-    ],
-    "readPaths": [
-      "~/.cache",
-      "~/.local/share",
-      "/etc/os-release",
-      "/proc/meminfo",
-      "/proc/cpuinfo",
-      "/proc/loadavg",
-      "/proc/uptime",
-      "/sys/class/power_supply",
-      "/sys/class/thermal"
-    ],
-    "writePaths": [
-      "/home/your-user/.agentic_gpt/workspace",
-      "~/Documents",
-      "~/Downloads",
-      "~/Projects",
-      "/tmp"
-    ]
-  }
+  "bubblewrap": false
 }

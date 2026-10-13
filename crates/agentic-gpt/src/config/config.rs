@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use agentic_gpt_protocol::{
-    EventSeverity, PolicyCounts, SafeConfigSummary, SafePathPolicySummary, SafePolicyRules,
-    SafeSandboxSummary, SafeTunnelSummary, DEFAULT_PROCESS_RESPONSE_BYTES,
-    MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES,
+    EventSeverity, SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafePolicySummary,
+    SafeTunnelSummary, DEFAULT_PROCESS_RESPONSE_BYTES, MAX_PROCESS_RESPONSE_BYTES,
+    MIN_PROCESS_RESPONSE_BYTES,
 };
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, Utc};
@@ -531,7 +531,8 @@ pub(crate) struct Config {
     pub(crate) confirmation_provider: ConfirmationProviderConfig,
     #[serde(default = "default_confirmation_language")]
     pub(crate) confirmation_language: String,
-    pub(crate) sandbox: SandboxConfig,
+    #[serde(default)]
+    pub(crate) bubblewrap: bool,
     #[serde(default, skip_serializing_if = "ShellConfig::is_default")]
     pub(crate) shell: ShellConfig,
     #[serde(default, skip_serializing_if = "BrowserConfig::is_empty")]
@@ -542,8 +543,7 @@ pub(crate) struct Config {
     pub(crate) events: EventsConfig,
     pub(crate) http_mcp: HttpMcpConfig,
     #[serde(default)]
-    pub(crate) path_policy: PathPolicyConfig,
-    pub(crate) policy: PolicyConfig,
+    pub(crate) policy: SecurityPolicyConfig,
     pub(crate) limits: LimitsConfig,
     #[serde(default)]
     pub(crate) skills: RoomSkillsConfig,
@@ -692,29 +692,53 @@ impl<'de> Deserialize<'de> for ConfirmationProviderConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SandboxConfig {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SecurityPolicyConfig {
     pub(crate) enabled: bool,
-    pub(crate) bubblewrap_path: String,
-    pub(crate) required_runtime_paths: Vec<PathBuf>,
-    #[serde(default)]
-    pub(crate) read_paths: Vec<PathBuf>,
-    #[serde(default)]
-    pub(crate) write_paths: Vec<PathBuf>,
+    pub(crate) command: PolicyConfig,
+    pub(crate) path: PathPolicyConfig,
+}
+
+impl Default for SecurityPolicyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            command: PolicyConfig::default(),
+            path: PathPolicyConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PathDefaultAction {
+    Allow,
+    #[default]
+    Deny,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PathPolicyConfig {
-    pub(crate) read: PolicyConfig,
-    pub(crate) write: PolicyConfig,
+    pub(crate) default_action: PathDefaultAction,
+    pub(crate) read_only: Vec<PathBuf>,
+    pub(crate) write: Vec<PathBuf>,
+    pub(crate) deny: Vec<PathBuf>,
+    #[serde(skip)]
+    pub(crate) approved_read: Vec<PathBuf>,
+    #[serde(skip)]
+    pub(crate) approved_write: Vec<PathBuf>,
 }
 
 impl Default for PathPolicyConfig {
     fn default() -> Self {
         Self {
-            read: PolicyConfig::with_default(PolicyDecision::Deny),
-            write: PolicyConfig::with_default(PolicyDecision::Deny),
+            default_action: PathDefaultAction::Deny,
+            read_only: Vec::new(),
+            write: Vec::new(),
+            deny: Vec::new(),
+            approved_read: Vec::new(),
+            approved_write: Vec::new(),
         }
     }
 }
@@ -1105,22 +1129,9 @@ impl Config {
             mcp_servers: BTreeMap::new(),
             events: EventsConfig::default(),
             http_mcp: HttpMcpConfig::default(),
-            sandbox: SandboxConfig {
-                enabled: false,
-                bubblewrap_path: "bwrap".to_string(),
-                read_paths: Vec::new(),
-                write_paths: Vec::new(),
-                required_runtime_paths: vec![
-                    PathBuf::from("/usr"),
-                    PathBuf::from("/bin"),
-                    PathBuf::from("/lib"),
-                    PathBuf::from("/lib64"),
-                    PathBuf::from("/etc/ssl"),
-                ],
-            },
+            bubblewrap: false,
             shell: ShellConfig::default(),
-            path_policy: PathPolicyConfig::default(),
-            policy: PolicyConfig::default(),
+            policy: SecurityPolicyConfig::default(),
             limits: LimitsConfig {
                 max_concurrent_tasks: 2,
                 max_active_processes: MaxActiveProcesses::Auto,
@@ -1194,7 +1205,6 @@ impl Config {
                 .expect("toolsets was checked"),
         )
         .map_err(|_| anyhow!("config_toolsets_invalid"))?;
-        validate_policy_format(object)?;
         let defaults = Self::default_config()?;
         let mut defaults = defaults;
         defaults.mode = mode;
@@ -1245,7 +1255,6 @@ impl Config {
             .as_object()
             .cloned()
             .ok_or_else(|| anyhow!("config_import_json_object_required"))?;
-        validate_policy_format(&object)?;
         let mut warnings = Vec::new();
 
         let import_defaults = Self::default_config()?;
@@ -1419,13 +1428,12 @@ impl Config {
             "backupLimit",
             "confirmationProvider",
             "confirmationLanguage",
-            "sandbox",
+            "bubblewrap",
             "shell",
             "mcpServers",
             "events",
             "browser",
             "httpMcp",
-            "pathPolicy",
             "policy",
             "limits",
             "skills",
@@ -1448,9 +1456,6 @@ impl Config {
                 }
             }
             if let Err(error) = materialize_import_value(&Value::Object(candidate)) {
-                if matches!(key, "policy" | "pathPolicy") {
-                    return Err(anyhow!("config_policy_manual_migration_required: {error}"));
-                }
                 if key == "events" {
                     return Err(anyhow!("config_import_events_invalid: {error}"));
                 }
@@ -1475,37 +1480,39 @@ impl Config {
     pub(crate) fn safe_summary(&self) -> SafeConfigSummary {
         SafeConfigSummary {
             workspace_root: workspace_root_summary(&self.workspace_root),
-            sandbox: SafeSandboxSummary {
-                enabled: self.sandbox.enabled,
-                mode: if self.sandbox.enabled {
-                    "bubblewrap"
-                } else {
-                    "disabled"
-                }
-                .to_string(),
-                read_paths: self
-                    .sandbox
-                    .read_paths
-                    .iter()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .collect(),
-                write_paths: self
-                    .sandbox
-                    .write_paths
-                    .iter()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .collect(),
+            bubblewrap: self.bubblewrap,
+            policy: SafePolicySummary {
+                enabled: self.policy.enabled,
+                command: safe_policy(&self.policy.command),
+                path: SafePathPolicySummary {
+                    default_action: match self.policy.path.default_action {
+                        PathDefaultAction::Allow => "allow",
+                        PathDefaultAction::Deny => "deny",
+                    }
+                    .to_string(),
+                    read_only: self
+                        .policy
+                        .path
+                        .read_only
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    write: self
+                        .policy
+                        .path
+                        .write
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    deny: self
+                        .policy
+                        .path
+                        .deny
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                },
             },
-            path_policy: SafePathPolicySummary {
-                read: safe_policy(&self.path_policy.read),
-                write: safe_policy(&self.path_policy.write),
-            },
-            policy_rule_counts: PolicyCounts {
-                allow: self.policy.allow.len(),
-                confirm: self.policy.confirm.len(),
-                deny: self.policy.deny.len(),
-            },
-            policy_rules: safe_policy(&self.policy),
             confirmation_provider: self.confirmation_provider.fallback_label(),
             tunnel: self.tunnel.as_ref().map(|tunnel| SafeTunnelSummary {
                 configured: true,
@@ -1527,23 +1534,23 @@ impl Config {
     pub(crate) fn validate_policies(&self) -> Result<()> {
         for pattern in self
             .policy
+            .command
             .allow
             .iter()
-            .chain(&self.policy.confirm)
-            .chain(&self.policy.deny)
+            .chain(&self.policy.command.confirm)
+            .chain(&self.policy.command.deny)
         {
             crate::policy::validate_command_pattern(pattern)?;
         }
-        for policy in [&self.path_policy.read, &self.path_policy.write] {
-            for pattern in policy
-                .allow
+        crate::exec::normalize_roots(
+            self.policy
+                .path
+                .read_only
                 .iter()
-                .chain(&policy.confirm)
-                .chain(&policy.deny)
-            {
-                crate::policy::validate_path_pattern(pattern)?;
-            }
-        }
+                .chain(&self.policy.path.write)
+                .chain(&self.policy.path.deny)
+                .map(PathBuf::as_path),
+        )?;
         Ok(())
     }
 
@@ -1639,18 +1646,6 @@ pub(crate) fn restart_required_fields(effective: &Config, disk: &Config) -> Vec<
                 != serde_json::json!(disk.confirmation_language),
         ),
         (
-            "sandbox",
-            serde_json::json!((
-                effective.sandbox.enabled,
-                &effective.sandbox.bubblewrap_path,
-                &effective.sandbox.required_runtime_paths
-            )) != serde_json::json!((
-                disk.sandbox.enabled,
-                &disk.sandbox.bubblewrap_path,
-                &disk.sandbox.required_runtime_paths
-            )),
-        ),
-        (
             "browser",
             serde_json::json!(effective.browser) != serde_json::json!(disk.browser),
         ),
@@ -1744,12 +1739,7 @@ fn prune_sparse_value(value: &mut Value, defaults: &Value, root: bool) {
     };
     let keys = value.keys().cloned().collect::<Vec<_>>();
     for key in keys {
-        if root
-            && matches!(
-                key.as_str(),
-                "mode" | "profile" | "toolsets" | "policy" | "pathPolicy"
-            )
-        {
+        if root && matches!(key.as_str(), "mode" | "profile" | "toolsets" | "policy") {
             continue;
         }
         let Some(current) = value.get(&key) else {
@@ -1904,47 +1894,6 @@ fn safe_policy(policy: &PolicyConfig) -> SafePolicyRules {
         confirm: policy.confirm.clone(),
         deny: policy.deny.clone(),
     }
-}
-
-fn validate_policy_format(object: &serde_json::Map<String, Value>) -> Result<()> {
-    if !object.contains_key("policy") || !object.contains_key("pathPolicy") {
-        return Err(anyhow!("config_requires_policy_migration: add explicit policy and pathPolicy sections; migrate manually or config init"));
-    }
-    if object
-        .get("pathPolicy")
-        .and_then(Value::as_object)
-        .is_some_and(|policy| {
-            ["writeRoots", "readOnlyRoots", "denyRoots"]
-                .iter()
-                .any(|key| policy.contains_key(*key))
-        })
-        || object
-            .get("policy")
-            .and_then(Value::as_object)
-            .is_some_and(|policy| {
-                ["allow", "confirm", "deny"].iter().any(|key| {
-                    policy
-                        .get(*key)
-                        .and_then(Value::as_array)
-                        .is_some_and(|patterns| patterns.iter().any(Value::is_object))
-                })
-            })
-    {
-        return Err(anyhow!("config_policy_manual_migration_required: replace command rule objects with pattern strings and path roots with explicit read/write policies; config import does not migrate policies"));
-    }
-    for (key, kind) in [("policy", "command"), ("pathPolicy", "path")] {
-        if let Some(value) = object.get(key) {
-            let valid = if kind == "command" {
-                serde_json::from_value::<PolicyConfig>(value.clone()).is_ok()
-            } else {
-                serde_json::from_value::<PathPolicyConfig>(value.clone()).is_ok()
-            };
-            if !valid {
-                return Err(anyhow!("config_policy_manual_migration_required: {key} requires complete explicit defaultAction/allow/confirm/deny groups"));
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn default_room_config() -> RoomConfig {
@@ -2253,38 +2202,14 @@ pub(crate) fn confirmation_language_is_zh(config: &Config) -> bool {
     normalize_confirmation_language(&config.confirmation_language) == "zh-CN"
 }
 
-pub(crate) fn path_subtree_pattern(path: &Path) -> String {
-    let literal = path
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('*', "\\*");
-    format!("{}/**", literal.trim_end_matches('/'))
-}
-
 pub(crate) fn seed_path_policy(workspace_root: &Path) -> PathPolicyConfig {
-    let (read, write, deny) = init_path_roots(workspace_root);
-    let patterns = |roots: Vec<PathBuf>| {
-        roots
-            .into_iter()
-            .map(|root| path_subtree_pattern(&root))
-            .collect::<Vec<_>>()
-    };
-    let deny = patterns(deny);
-    let mut read_policy = PolicyConfig::with_default(PolicyDecision::Deny);
-    read_policy.allow = patterns(read.into_iter().chain(write.clone()).collect());
-    read_policy.deny = deny.clone();
-    let mut write_policy = PolicyConfig::with_default(PolicyDecision::Deny);
-    write_policy.allow = patterns(write);
-    write_policy.deny = deny;
+    let (read_only, write, deny) = init_path_roots(workspace_root);
     PathPolicyConfig {
-        read: read_policy,
-        write: write_policy,
+        read_only,
+        write,
+        deny,
+        ..Default::default()
     }
-}
-
-pub(crate) fn seed_sandbox_paths(workspace_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let (read, write, _) = init_path_roots(workspace_root);
-    (read, write)
 }
 
 fn init_path_roots(workspace_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
@@ -2759,20 +2684,20 @@ mod tests {
         let mut config = Config::default_config().unwrap();
         config.mode = RuntimeMode::Local;
         config.workspace_root = temp_config_path().with_extension("workspace");
-        config.path_policy = seed_path_policy(&config.workspace_root);
+        config.policy.path = seed_path_policy(&config.workspace_root);
 
         let value = sparse_config_value(&config, false).unwrap();
         assert_eq!(
             value["workspaceRoot"],
             serde_json::to_value(&config.workspace_root).unwrap()
         );
-        assert!(value.get("pathPolicy").is_some());
+        assert!(value["policy"].get("path").is_some());
 
         let path = temp_config_path();
         fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.workspace_root, config.workspace_root);
-        assert_eq!(loaded.path_policy, config.path_policy);
+        assert_eq!(loaded.policy.path, config.policy.path);
         let _ = fs::remove_file(path);
     }
 
@@ -2821,7 +2746,7 @@ mod tests {
         let workspace = root.with_extension("workspace");
         let expected = PathPolicyConfig::default();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "mode": "local",
             "profile": "normal",
             "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
@@ -2834,7 +2759,7 @@ mod tests {
         assert_eq!(loaded.mode, RuntimeMode::Local);
         assert_eq!(loaded.profile, WorkerProfile::Normal);
         assert_eq!(loaded.workspace_root, workspace);
-        assert_eq!(loaded.path_policy, expected);
+        assert_eq!(loaded.policy.path, expected);
         assert_eq!(loaded.extra["futureField"], json!({"enabled": true}));
         let _ = fs::remove_file(root);
     }
@@ -2843,7 +2768,7 @@ mod tests {
     fn sparse_load_preserves_inactive_mode_and_profile_sections() {
         let root = temp_config_path();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "mode": "local",
             "profile": "normal",
             "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
@@ -2906,7 +2831,7 @@ mod tests {
     fn strict_load_rejects_legacy_confirmation_provider_shape() {
         let root = temp_config_path();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "mode": "local",
             "profile": "normal",
             "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
@@ -2939,7 +2864,7 @@ mod tests {
     fn strict_load_rejects_legacy_top_level_hub_fields_even_with_selectors() {
         let root = temp_config_path();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "mode": "hub",
             "profile": "normal",
             "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
@@ -2959,7 +2884,6 @@ mod tests {
     fn explicit_import_maps_legacy_hub_and_preserves_recognized_and_unknown_fields() {
         let root = temp_config_path();
         let value = json!({
-            "pathPolicy": PathPolicyConfig::default(),
             "displayName": "imported-agent",
             "hubUrl": "https://legacy.example.com",
             "hubTransport": "sse",
@@ -2980,12 +2904,9 @@ mod tests {
                     "url": "node ./server.mjs"
                 }
             },
-            "policy": {
-                "defaultAction": "confirm",
-                "allow": ["git status"],
-                "confirm": [],
-                "deny": []
-            },
+            "policy": {"command": {
+                "defaultAction": "confirm", "allow": ["git status"], "confirm": [], "deny": []
+            }},
             "room": {
                 "timezone": "UTC",
                 "diaryDayBoundaryHour": 3,
@@ -3015,7 +2936,7 @@ mod tests {
         );
         assert_eq!(imported.config.limits.max_concurrent_tasks, 7);
         assert_eq!(imported.config.mcp_servers.len(), 1);
-        assert_eq!(imported.config.policy.allow[0], "git status");
+        assert_eq!(imported.config.policy.command.allow[0], "git status");
         assert_eq!(imported.config.room.timezone, "UTC");
         assert_eq!(
             imported.config.extra["futureField"],
@@ -3029,13 +2950,13 @@ mod tests {
         let root = temp_config_path();
         let cases = [
             (
-                json!({"policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+                json!({"policy": SecurityPolicyConfig::default(),
             "mode": "local", "profile": "normal"}),
                 ShellInitFile::Default,
             ),
             (
                 json!({
-                        "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+                        "policy": SecurityPolicyConfig::default(),
                 "mode": "local",
                         "profile": "normal",
                         "shell": {"initFile": null}
@@ -3044,7 +2965,7 @@ mod tests {
             ),
             (
                 json!({
-                        "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+                        "policy": SecurityPolicyConfig::default(),
                 "mode": "local",
                         "profile": "normal",
                         "shell": {"initFile": DEFAULT_SHELL_INIT_FILE}
@@ -3071,7 +2992,7 @@ mod tests {
     fn explicit_import_uses_room_toolset_preset_when_toolsets_are_omitted() {
         let root = temp_config_path();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "mode": "standalone",
             "profile": "room"
         });
@@ -3086,7 +3007,7 @@ mod tests {
     fn explicit_import_uses_normal_toolset_preset_when_toolsets_are_omitted() {
         let root = temp_config_path();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "mode": "standalone",
             "profile": "normal"
         });
@@ -3101,7 +3022,7 @@ mod tests {
     fn explicit_import_preserves_toolsets_that_omit_a_room_profile_namespace() {
         let root = temp_config_path();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "mode": "standalone",
             "profile": "room",
             "toolsets": {"enabled": ["room"]}
@@ -3117,7 +3038,7 @@ mod tests {
     fn explicit_import_rejects_invalid_toolsets() {
         let root = temp_config_path();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "mode": "standalone",
             "profile": "room",
             "toolsets": {"enabled": ["not-a-tool"]}
@@ -3133,7 +3054,7 @@ mod tests {
     fn explicit_import_reports_unimportable_recognized_fields_and_keeps_other_values() {
         let root = temp_config_path();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "displayName": "still-imported",
             "limits": {"maxActiveSessions": 4},
             "shell": {"initFile": false},
@@ -3161,7 +3082,7 @@ mod tests {
     fn explicit_import_clears_plaintext_tunnel_secret_and_reports_it() {
         let root = temp_config_path();
         let value = json!({
-            "policy": PolicyConfig::default(), "pathPolicy": PathPolicyConfig::default(),
+            "policy": SecurityPolicyConfig::default(),
             "mode": "standalone",
             "profile": "normal",
             "tunnel": {

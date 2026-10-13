@@ -204,11 +204,12 @@ impl ReviewItem {
             Some(SetupField::HubTransport) => &["websocket", "sse"],
             Some(SetupField::ShellInitFileMode) => &["default", "disabled", "path"],
             Some(SetupField::ConfirmationLanguage) => &["zh-CN", "en"],
+            Some(SetupField::PathDefaultAction) => &["allow", "deny"],
             Some(SetupField::RoomMaintenanceMode) => &["local", "workflow"],
             Some(
                 SetupField::ProvisionTunnelSecret
                 | SetupField::HttpMcpEnabled
-                | SetupField::SandboxEnabled
+                | SetupField::Bubblewrap
                 | SetupField::TunnelAutoDownload
                 | SetupField::HubReportingEnabled
                 | SetupField::RoomMaintenanceAutoPush,
@@ -594,8 +595,10 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
         )],
         OptionalSectionDraft::Workspace(WorkspaceDraft {
             workspace_root,
-            read_policy,
-            write_policy,
+            default_action,
+            read_only_paths,
+            write_paths,
+            deny_paths,
         }) => vec![
             ReviewItem::field(
                 SetupField::WorkspaceRoot,
@@ -604,16 +607,28 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::Text,
             ),
             ReviewItem::field(
-                SetupField::ReadPolicy,
-                "read_policy",
-                read_policy,
-                ReviewEditorKind::Text,
+                SetupField::PathDefaultAction,
+                "path_default_action",
+                default_action,
+                ReviewEditorKind::Choice,
             ),
             ReviewItem::field(
-                SetupField::WritePolicy,
-                "write_policy",
-                write_policy,
-                ReviewEditorKind::Text,
+                SetupField::PathReadOnlyPaths,
+                "path_read_only",
+                read_only_paths,
+                ReviewEditorKind::List,
+            ),
+            ReviewItem::field(
+                SetupField::PathWritePaths,
+                "path_write",
+                write_paths,
+                ReviewEditorKind::List,
+            ),
+            ReviewItem::field(
+                SetupField::PathDenyPaths,
+                "path_deny",
+                deny_paths,
+                ReviewEditorKind::List,
             ),
         ],
         OptionalSectionDraft::Confirmation(ConfirmationDraft { channels, language }) => vec![
@@ -661,44 +676,12 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::Text,
             ),
         ],
-        OptionalSectionDraft::Sandbox(SandboxDraft {
-            enabled,
-            bubblewrap_path,
-            required_runtime_paths,
-            read_paths,
-            write_paths,
-        }) => vec![
-            ReviewItem::field(
-                SetupField::SandboxEnabled,
-                "sandbox_enabled",
-                enabled.to_string(),
-                ReviewEditorKind::Choice,
-            ),
-            ReviewItem::field(
-                SetupField::BubblewrapPath,
-                "bubblewrap_path",
-                bubblewrap_path,
-                ReviewEditorKind::Text,
-            ),
-            ReviewItem::field(
-                SetupField::RequiredRuntimePaths,
-                "required_runtime_paths",
-                required_runtime_paths,
-                ReviewEditorKind::List,
-            ),
-            ReviewItem::field(
-                SetupField::SandboxReadPaths,
-                "sandbox_read_paths",
-                read_paths,
-                ReviewEditorKind::List,
-            ),
-            ReviewItem::field(
-                SetupField::SandboxWritePaths,
-                "sandbox_write_paths",
-                write_paths,
-                ReviewEditorKind::List,
-            ),
-        ],
+        OptionalSectionDraft::Sandbox(SandboxDraft { enabled }) => vec![ReviewItem::field(
+            SetupField::Bubblewrap,
+            "bubblewrap",
+            enabled.to_string(),
+            ReviewEditorKind::Choice,
+        )],
         OptionalSectionDraft::Shell(value) => {
             let mode = value.init_file_mode;
             let mut items = vec![ReviewItem::field(
