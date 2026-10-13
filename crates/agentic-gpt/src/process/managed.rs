@@ -5060,6 +5060,222 @@ mod tests {
         assert!(state.config.read().await.policy.path.write.is_empty());
     }
 
+    // Real execution protects the relationship between policy, confirmation and
+    // namespace permissions. Indirect paths ensure preflight cannot substitute
+    // for the filesystem boundary exercised here.
+    #[tokio::test]
+    async fn bubblewrap_masks_denied_content_and_composes_single_run_grants() {
+        if std::process::Command::new("bwrap")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("bubblewrap unavailable; skipping mount integration");
+            return;
+        }
+        for scope in [
+            "none", "read", "write", "command", "missing", "alias", "root",
+        ] {
+            let (state, workspace) = test_state(1).await;
+            let public = workspace.join("public");
+            let private = workspace.join("private");
+            let granted_child = private.join("approved");
+            let denied_file = workspace.join("token");
+            fs::create_dir_all(&public).unwrap();
+            fs::create_dir_all(&granted_child).unwrap();
+            fs::write(private.join("secret"), "private fixture").unwrap();
+            fs::write(&denied_file, "file fixture").unwrap();
+            {
+                let mut config = state.config.write().await;
+                config.bubblewrap = true;
+                config.policy.command.allow = vec!["*".into()];
+                config.policy.path = crate::config::PathPolicyConfig {
+                    write: vec![workspace.clone(), public.clone(), private.clone()],
+                    deny: vec![private.clone(), denied_file.clone()],
+                    ..Default::default()
+                };
+                config.confirmation_provider.channels =
+                    vec![crate::config::ConfirmationChannel::Ntfy];
+                if scope == "command" {
+                    config.policy.command.allow.clear();
+                    config.policy.command.confirm = vec!["*".into()];
+                }
+            }
+            if scope == "missing" {
+                state
+                    .config
+                    .write()
+                    .await
+                    .policy
+                    .path
+                    .deny
+                    .push(workspace.join("missing"));
+            }
+            if scope == "alias" {
+                let canonical = PathBuf::from("/usr/bin/printf").canonicalize().unwrap();
+                if PathBuf::from("/bin/printf").canonicalize().ok().as_ref() != Some(&canonical) {
+                    continue;
+                }
+                state.config.write().await.policy.path.deny.push(canonical);
+            }
+            if scope == "root" {
+                let mut config = state.config.write().await;
+                config.policy.path.default_action = crate::config::PathDefaultAction::Allow;
+                config.policy.path.deny = vec![PathBuf::from("/")];
+            }
+            let denied_read = "if cat \"$private/secret\" >/dev/null 2>&1; then exit 31; fi";
+            let checks = match scope {
+                "read" => "test \"$(cat \"$private/secret\")\" = 'private fixture'; if touch \"$private/not-approved\" 2>/dev/null; then exit 32; fi",
+                "write" => "if cat \"$private/secret\" >/dev/null 2>&1; then exit 31; fi; printf granted > \"$private/approved/result\"; if touch \"$private/not-approved\" 2>/dev/null; then exit 32; fi",
+                "alias" => r#"p=/bin/printf; if [[ -r "$p" ]]; then exit 34; fi; if cat "$private/secret" >/dev/null 2>&1; then exit 31; fi"#,
+                _ => denied_read,
+            };
+            let command = format!(
+                "private='{}'; token='{}'; {}; if cat \"$token\" >/dev/null 2>&1; then exit 33; fi; printf public > effect",
+                private.display(), denied_file.display(), checks
+            );
+            let mut request = exec_request(&command, &public);
+            request.wait_seconds = Some(3);
+            if scope == "read" || scope == "write" || scope == "root" {
+                request.acquire_confirmation = Some(serde_json::from_value(serde_json::json!({
+                    "acquire": true,
+                    "read": if scope == "read" { vec![private.clone()] } else if scope == "root" { vec![PathBuf::from("/usr")] } else { Vec::new() },
+                    "write": if scope == "write" { vec![granted_child.clone()] } else if scope == "root" { vec![public.clone()] } else { Vec::new() },
+                })).unwrap());
+            }
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            *state.hub_sender.lock().await = Some(sender);
+            let responder_state = state.clone();
+            let responder = tokio::spawn(async move {
+                if let Some(agentic_gpt_protocol::AgentMessage::ConfirmationRequest {
+                    request_id,
+                    ..
+                }) = receiver.recv().await
+                {
+                    if let Some(sender) = responder_state
+                        .pending_confirmations
+                        .lock()
+                        .await
+                        .remove(&request_id)
+                    {
+                        let _ = sender.send("allow_once".into());
+                    }
+                }
+            });
+            let result = start_and_wait_process(
+                state.clone(),
+                request,
+                ProcessOptions::for_source("test"),
+                8192,
+            )
+            .await
+            .unwrap();
+            if !result.response.state.is_terminal() {
+                let _ = cancel_process(&state, &result.response.process_id).await;
+            }
+            responder.abort();
+            let _ = responder.await;
+            let output = wait_output_capture(&state, &result.response.process_id).await;
+            if scope == "missing" {
+                assert_eq!(result.response.state, ProcessState::Failed, "{output:?}");
+                assert!(result
+                    .response
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .message
+                    .contains("bubblewrap_deny_path_not_found"));
+                assert!(!workspace.join("missing").exists());
+                assert!(!public.join("effect").exists());
+                continue;
+            }
+            assert_eq!(
+                result.response.state,
+                ProcessState::Completed,
+                "{scope}: {output:?}"
+            );
+            assert_eq!(fs::read_to_string(public.join("effect")).unwrap(), "public");
+            assert_eq!(
+                fs::read_to_string(private.join("secret")).unwrap(),
+                "private fixture"
+            );
+            assert_eq!(fs::read_to_string(&denied_file).unwrap(), "file fixture");
+            assert!(!private.join("not-approved").exists());
+            assert_eq!(granted_child.join("result").exists(), scope == "write");
+            let config = state.config.read().await;
+            assert!(config.policy.path.approved_read.is_empty());
+            assert!(config.policy.path.approved_write.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_keeps_explicit_confirmation_and_skips_isolation() {
+        let (state, workspace) = test_state(1).await;
+        {
+            let mut config = state.config.write().await;
+            config.policy.enabled = false;
+            config.bubblewrap = true;
+            config.policy.command.deny = vec!["*".into()];
+            config.policy.path.deny = vec![workspace.clone()];
+            config.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
+        }
+        let first = exec_request("printf without-confirmation > first", &workspace);
+        let result = start_and_wait_process(
+            state.clone(),
+            first,
+            ProcessOptions::for_source("test"),
+            8192,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.response.state, ProcessState::Completed);
+        assert_eq!(
+            fs::read_to_string(workspace.join("first")).unwrap(),
+            "without-confirmation"
+        );
+        let mut request = exec_request("printf must-not-run > second", &workspace);
+        request.acquire_confirmation =
+            Some(serde_json::from_value(serde_json::json!({"acquire":true})).unwrap());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        *state.hub_sender.lock().await = Some(sender);
+        let responder_state = state.clone();
+        let responder = tokio::spawn(async move {
+            if let Some(agentic_gpt_protocol::AgentMessage::ConfirmationRequest {
+                request_id,
+                ..
+            }) = receiver.recv().await
+            {
+                assert!(!workspace.join("second").exists());
+                if let Some(sender) = responder_state
+                    .pending_confirmations
+                    .lock()
+                    .await
+                    .remove(&request_id)
+                {
+                    let _ = sender.send("deny".into());
+                }
+            }
+        });
+        let result = start_and_wait_process(
+            state.clone(),
+            request,
+            ProcessOptions::for_source("test"),
+            8192,
+        )
+        .await
+        .unwrap();
+        responder.abort();
+        let _ = responder.await;
+        assert_eq!(result.response.state, ProcessState::Rejected);
+        assert!(!state
+            .config
+            .read()
+            .await
+            .workspace_root
+            .join("second")
+            .exists());
+    }
+
     #[tokio::test]
     async fn exec_waits_for_terminal_state_after_early_output() {
         let (state, workspace) = test_state(1).await;

@@ -412,11 +412,22 @@ pub(crate) fn build_command(
         if policy.default_action == crate::config::PathDefaultAction::Allow {
             mounts.insert(PathBuf::from("/"), "--bind");
         }
-        // Runtime namespace aliases must retain their loader-visible paths.
+        // Preserve loader-visible aliases as symlinks to the same namespace
+        // object, so a deny mask cannot be bypassed through an independent bind.
+        let mut runtime_aliases = Vec::new();
         for path in ["/usr", "/bin", "/lib", "/lib64", "/etc/ssl"] {
             let path = PathBuf::from(path);
             if path.exists() {
-                mounts.insert(path, "--ro-bind");
+                let resolved = path.canonicalize()?;
+                if resolved != path {
+                    runtime_aliases.push((resolved.clone(), path));
+                }
+                if !mounts
+                    .iter()
+                    .any(|(root, mode)| resolved.starts_with(root) && *mode == "--ro-bind")
+                {
+                    mounts.insert(resolved, "--ro-bind");
+                }
             }
         }
         for path in normalize(&policy.read_only)? {
@@ -472,6 +483,9 @@ pub(crate) fn build_command(
                 mounts.insert(path.clone(), "--bind");
             }
         }
+        let root_is_bound = mounts
+            .get(Path::new("/"))
+            .is_some_and(|mode| *mode != "mask");
         let mut mounts = mounts.into_iter().collect::<Vec<_>>();
         mounts.sort_by(|(a, _), (b, _)| {
             a.components()
@@ -527,6 +541,12 @@ pub(crate) fn build_command(
                 add_bwrap_bind(&mut command, &mut created_dirs, mode, &path);
             }
             created_dirs.insert(path);
+        }
+        if !root_is_bound {
+            for (source, alias) in runtime_aliases {
+                add_bwrap_parent_dirs(&mut command, &mut created_dirs, &alias);
+                command.arg("--symlink").arg(source).arg(alias);
+            }
         }
         for path in traversable_masks {
             // Only the synthetic parent is sealed; granted child bind mounts
