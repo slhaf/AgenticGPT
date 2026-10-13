@@ -28,6 +28,8 @@ agentic-gpt config show
 错误且不会写入文件。脚本、CI、重定向输出或其他自动化场景请使用
 `config init --non-interactive`。默认模式是 `standalone`，默认配置档是 `normal`。
 
+### 模式与工具集
+
 模式与配置档是两个独立选择：
 
 - `--mode standalone|hub|local` 选择运行时连接方式与配置形状。
@@ -48,11 +50,16 @@ agentic-gpt config toolset disable <namespace>
 `ls` 会列出全部 namespace、当前启用/禁用状态及其所含工具的简短说明。`enable` 和
 `disable` 成功后会明确输出被修改的 namespace 与结果状态。
 
-同一个 `toolsets.enabled` 数组也可以直接编辑 JSON。有效的 toolset 修改会在 worker 运行时
-热加载，并对后续工具发现与调用生效；无需重启。无效候选会保留上一次有效的 live selection。
-该选择同时约束 Hub 下发及本地 MCP/Unix/HTTP 的普通工具调用。Room 命令先检查实时
-`room` namespace；禁用时，共享操作层返回 `room_toolset_required`。已有运行时能力和
-Hub Room Profile 限制继续生效；基础 Event API、CLI 管理入口等例外见[操作准入边界](interfaces.md#agent-接入与操作边界wp2)。
+同一个 `toolsets.enabled` 数组也可以直接编辑 JSON：
+
+- 有效修改会在 worker 运行时热加载，并对后续工具发现与调用生效，无需重启。
+- 无效候选会保留上一次有效的 live selection。
+- 该选择同时约束 Hub 下发及本地 MCP/Unix/HTTP 的普通工具调用。
+- Room 命令先检查实时 `room` namespace；禁用时，共享操作层返回
+  `room_toolset_required`。
+
+已有运行时能力和 Hub Room Profile 限制继续生效；基础 Event API、CLI 管理入口等例外见
+[操作准入边界](interfaces.md#agent-接入与操作边界wp2)。
 
 例如，显式固定 normal 选择时写成：
 
@@ -66,6 +73,8 @@ Hub Room Profile 限制继续生效；基础 Event API、CLI 管理入口等例�
 ```
 
 如果之后切换 profile，这个显式选择仍然具有权威性。
+
+### 非交互式初始化
 
 脚本需要确定性结果时，请使用以下实际 CLI 语法，并提供不应保留占位符的值：
 
@@ -87,31 +96,49 @@ agentic-gpt config init \
 使用 `file:` 或 `env:` 引用可以避免把 tunnel secret 放进命令行；明文 tunnel API key
 会被拒绝。
 
-全屏流程为 Basic → Connection（Local 除外）→ Optional settings → Review → Completion。
-交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。身份/显示名称、
-工作区/路径策略、确认方式/语言、限制、沙箱、Toolsets、Events 与下游 MCP server 集合均可在
-Optional settings 中配置。Toolsets 从配置档 preset 开始；一旦显式编辑，其 namespace
-selection 具有权威性。Room 设置仅当当前有效的 toolset selection 启用 `room` namespace 时
-才会提供。profile 通过默认 preset 影响该 selection；显式 `toolsets.enabled` 会覆盖 preset，
-因此显示条件是有效 namespace selection，而不是 `profile` 字段本身。只有 Standalone 模式会出现
-tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会显示这些 tunnel 部分。不选可选部分时会保留模板默认值。
+### 交互式流程
 
-界面使用键盘导航：Tab/Shift+Tab 与方向键移动焦点，Enter 编辑或触发当前操作，Esc 返回
-（根 Basic 页面是 no-op），Ctrl+C 取消初始化。编辑态按 Esc 只结束编辑，不会取消初始化。
+全屏流程为 Basic → Connection（Local 除外）→ Optional settings → Review → Completion。
+
+- 交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。
+- Optional settings 可配置身份/显示名称、工作区/路径策略、确认方式/语言、限制、沙箱、
+  Toolsets、Events 与下游 MCP server 集合。
+- Toolsets 从配置档 preset 开始；一旦显式编辑，其 namespace selection 具有权威性。
+  Room 设置仅当当前有效的 selection 启用 `room` namespace 时才会提供。profile 通过默认
+  preset 影响该 selection；显式 `toolsets.enabled` 会覆盖 preset，因此显示条件是有效
+  namespace selection，而不是 `profile` 字段本身。
+- 只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会
+  显示这些 tunnel 部分。
+- 不选可选部分时会保留模板默认值。
+
+键盘操作如下：
+
+- Tab/Shift+Tab 与方向键移动焦点。
+- Enter 编辑或触发当前操作。
+- Esc 返回；根 Basic 页面中是 no-op。编辑态按 Esc 只结束编辑，不会取消初始化。
+- Ctrl+C 取消初始化。
+
 Review 会隐藏密钥，可跳回 Basic、Connection 或可选 section 编辑；最终确认前不会写入配置、
 备份或密钥文件。本功能只承诺键盘全屏流程；鼠标、inline、dashboard 与 Windows 行为不在
-本功能契约内。Events 设置可选择 `low`、`medium`、`high` 或 `off`，并在 Review 中复核保存；
-这只是配置界面，不提供运行时事件收件箱界面。
+本功能契约内。
+
+Events 设置可选择 `low`、`medium`、`high` 或 `off`，并在 Review 中复核保存；这只是配置
+界面，不提供运行时事件收件箱界面。
 
 `config init --language auto|zh-CN|en` 选择 CLI 界面语言。使用 `auto` 时依次检查
 `LC_ALL`、`LC_MESSAGES`、`LANG`，都没有匹配时使用英文界面。显式的 `zh-CN` 或 `en`
 优先于环境变量。这个界面选择与持久化的 `confirmationLanguage` 不同；后者控制 runtime
 发出的确认提示语言，可在可选配置 section 或通过 `config set` 设置。
 
-全屏初始化的 Optional settings 包含下游 MCP server 集合编辑器；`Shell` section 可选择 Shell
-初始化文件为 Default、Disabled 或 Path，并仅在 Path 时编辑路径；三种选择都会写入并可在 Review
-复核。`config init --non-interactive` 没有用于填写 `mcpServers` 集合的 CLI flags。自动化初始化后可使用 `config mcp` 配置 server；
-命令模式使用 `config allow`、`config confirm`、`config deny`；路径模式使用 `config path read/write` 的 allow/confirm/deny 子命令。
+Optional settings 还提供以下编辑入口：
+
+- 下游 MCP server 集合编辑器。
+- `Shell` section：选择初始化文件为 Default、Disabled 或 Path，并仅在 Path 时编辑路径；三种
+  选择都会写入并可在 Review 复核。
+
+`config init --non-interactive` 没有用于填写 `mcpServers` 集合的 CLI flags。自动化初始化后可
+使用 `config mcp` 配置 server；命令模式使用 `config allow`、`config confirm`、`config deny`；
+路径模式使用 `config path read/write` 的 allow/confirm/deny 子命令。
 
 ## 各 runtime 必需项
 
@@ -249,6 +276,8 @@ http://<host>:<port>/mcp
 - `GET|POST /oauth/authorize` 与 `POST /oauth/token` 实现唯一 `agentic:mcp`
   scope 的 authorization-code flow。
 
+### OAuth 公开地址与回调
+
 `publicUrl` 必须是非空 HTTPS origin，不能包含 userinfo、除空路径或 `/` 之外的
 path、query 或 fragment；末尾 `/` 会被规范化。它只是公布的外部 origin，不是
 路由或 proxy 覆盖：`host` 与 `port` 仍是本地 bind 坐标，origin 可以保持
@@ -256,13 +285,21 @@ loopback/private。`publicUrl` 不是 secret，在 `config show`、Review、诊�
 中始终显示且不隐藏；`bearerToken` 仍是 secret 引用，解析后的值不会暴露。
 
 connector 只接受以下精确 ChatGPT callback family：
-`https://chatgpt.com/connector/oauth/<suffix>` 或精确的
-`https://chatgpt.com/connector_platform_oauth_redirect`。只接受 `agentic:mcp`；
-不提供 refresh token、`offline_access`、dynamic client registration、generic
-registration 或任意 redirect。authorization code 与 access token 是 opaque、
-listener-local 的内存记录，有过期、单次 code 消费和 listener 替换/token 内容
-轮换时撤销机制。Standalone authorization 页面以及 tool/profile surface 使用
-Standalone 语义，不是 Hub 的 `Hub API key`、profile 或 routing contract。
+
+- `https://chatgpt.com/connector/oauth/<suffix>`；
+- `https://chatgpt.com/connector_platform_oauth_redirect`。
+
+OAuth contract 还有以下边界：
+
+- 只接受 `agentic:mcp`。
+- 不提供 refresh token、`offline_access`、dynamic client registration、generic
+  registration 或任意 redirect。
+- authorization code 与 access token 是 opaque、listener-local 的内存记录，有过期、
+  单次 code 消费和 listener 替换/token 内容轮换时撤销机制。
+- Standalone authorization 页面以及 tool/profile surface 使用 Standalone 语义，不是 Hub 的
+  `Hub API key`、profile 或 routing contract。
+
+### 请求防护与 session 生命周期
 
 OAuth 路由与 `/mcp` 共用 listener Host 防护。缺失或 malformed Host 会被拒绝，
 不允许的 authority 返回 forbidden；不带 port 的 allowlist 项匹配任意 port，
@@ -272,10 +309,12 @@ server-to-server 请求仍然有效，不添加 permissive CORS。未配置 `pub
 直接 bearer 失败仍使用普通 Bearer challenge；配置后，MCP challenge 指向
 path-specific protected-resource metadata URL。
 
-rmcp transport 使用有状态的 Streamable HTTP/SSE：客户端必须先初始化 session；
-listener rebind 或关闭会终止 session，客户端必须重新 initialize。直接 bearer
-内容轮换会原地更新认证并保留既有 session，同时原子撤销 OAuth 记录。无效候选
-保留上一次有效 listener 及其 state。
+rmcp transport 使用有状态的 Streamable HTTP/SSE：
+
+- 客户端必须先初始化 session。
+- listener rebind 或关闭会终止 session，客户端必须重新 initialize。
+- 直接 bearer 内容轮换会原地更新认证并保留既有 session，同时原子撤销 OAuth 记录。
+- 无效候选保留上一次有效 listener 及其 state。
 
 `allowHosts` 是 HTTP MCP transport 使用的 DNS-rebinding 防护：
 
@@ -288,6 +327,8 @@ listener rebind 或关闭会终止 session，客户端必须重新 initialize。
 非 loopback listener 应显式填写 authority allowlist，或有意使用上述两个全量放行值。
 `host` 必须是可 bind 的非空值，且不能含空白或控制字符；`port` 必须在 `1..=65535`
 范围内。
+
+### Bearer secret
 
 `bearerToken` 永远是 secret 引用，不能填写 literal credential。只有 endpoint disabled
 时才允许为空；启用后必须使用以下一种形式：
@@ -375,10 +416,13 @@ Browser 是否启用不由 runtime 配置决定，`toolsets.enabled` 仍具有�
 }
 ```
 
-显式 source 在进程启动时选择并具有权威性：无效 descriptor 会关闭 Browser capability，
-不会回退到 Desktop discovery，但 Agentic 仍会继续启动。修改它需要重启进程。
-`docsRoot` 与 `trustedCodePaths` 由内部派生，不是配置字段。本设置不管理 installer、
-downloader 或 runtime cache。
+显式 source 在进程启动时选择并具有权威性：
+
+- 无效 descriptor 会关闭 Browser capability，不会回退到 Desktop discovery，但 Agentic 仍会
+  继续启动。
+- 修改它需要重启进程。
+- `docsRoot` 与 `trustedCodePaths` 由内部派生，不是配置字段。
+- 本设置不管理 installer、downloader 或 runtime cache。
 
 可直接作为路径组件的 `agentId` 会原样映射为私有状态目录名；历史上较宽松的 Hub identity 仍然兼容，但会使用稳定 hash 目录 key，而不会直接成为文件系统路径组件。
 
@@ -461,7 +505,14 @@ Hub credential 与 Standalone tunnel API key 是两套独立凭据，不要复�
 - `freedesktop`：本地桌面通知按钮。
 - `ntfy`：Hub-backed 远程 relay。
 
-`freedesktop` 能力检测先向 session D-Bus 查询当前通知服务的 owner，不自动启动桌面通知服务；有 owner 时才向该连接查询 `GetCapabilities`。每次 D-Bus 方法调用最多等待 2 秒。服务缺失或能力查询失败时，该通道视为不可用，可继续尝试后续配置通道；此检测超时与等待用户点击确认的超时不同。
+`freedesktop` 能力检测按以下方式进行：
+
+- 先向 session D-Bus 查询当前通知服务的 owner，不自动启动桌面通知服务。
+- 有 owner 时才向该连接查询 `GetCapabilities`。
+- 每次 D-Bus 方法调用最多等待 2 秒。
+- 服务缺失或能力查询失败时，该通道视为不可用，可继续尝试后续配置通道。
+
+此检测超时与等待用户点击确认的超时不同。
 
 Standalone 未配置 Hub reporting 时，建议只使用 `freedesktop`。所有配置通道均不可用时，需要确认的操作会 fail closed。本地拒绝或超时不会继续回退到其他通道。
 
@@ -515,7 +566,14 @@ agentic-gpt config path write deny add '/path/to/private/**'
 
 Process、文件及 tmux 请求使用可选 `acquireConfirmation` 对象：`acquire` 控制主动确认，`method` 仅接受 `ntfy` 或 `freedesktop`，省略沿用配置。
 省略对象或 `acquire` 时通常为 false；`tmux.pasteText` 为 true。策略自身要求的确认仍然生效。
-`acquire=true` 会先请求确认；获准后可覆盖本次操作的命令／路径拒绝，不修改持久策略。明确拒绝会中止操作。主动确认超时、过期或提供方不可用时，回退配置策略：Allow 可继续，Confirm 或 Deny 不执行；未获准的临时路径范围不会生效。tmux.pasteText 的主动确认要求严格成功，不做此回退。
+
+`acquire=true` 的结果如下：
+
+- 获准后可覆盖本次操作的命令／路径拒绝，不修改持久策略。
+- 明确拒绝会中止操作。
+- 主动确认超时、过期或提供方不可用时，回退配置策略：Allow 可继续，Confirm 或 Deny
+  不执行；未获准的临时路径范围不会生效。
+- `tmux.pasteText` 的主动确认要求严格成功，不做此回退。
 
 仅 `process.exec` 和 `process.batch` 接受非空 `read`／`write` 路径数组，且必须显式同时设置 `acquire=true`。
 这些路径是本次命令／批次的临时权限与沙箱挂载范围，结束后失效；文件和 tmux 仅接受 acquire/method，不接受 read/write 字段（包括空数组）。
@@ -525,12 +583,19 @@ ntfy 操作预览最多 1000 字符；无法完整展示的操作按渠道不可
 
 ### Bash 命令与 Shell 初始化文件
 
-Process 命令由普通 Bash 以 `--noprofile --norc` 非登录、非交互方式执行原始脚本；启用 `pipefail`，
-初始化完成后重置该选项，并保持 `set +e`，不会自动启用 `set -e`。每次调用相互独立，不提供 PTY、
-stdin 或持久 Shell session。命令策略只分析提交的脚本，不分析初始化文件：只识别 tree-sitter-bash
-可解析的字面量命令调用及 LF 换行、`&&`、`||`、`;`、`|` 组合，包括命令末尾和注释后的换行。
-字面词片段之间的反斜杠加 LF 按 Bash 续行语义拼接后匹配策略；双引号里的 `$:`、`$/` 等不会
-引入展开的内容仍是字面值，引号内的反斜杠加 CRLF 也不会被误当作命令续行。
+Process 命令执行环境如下：
+
+- 普通 Bash 以 `--noprofile --norc` 非登录、非交互方式执行原始脚本。
+- 启用 `pipefail`，初始化完成后重置该选项，并保持 `set +e`，不会自动启用 `set -e`。
+- 每次调用相互独立，不提供 PTY、stdin 或持久 Shell session。
+
+命令策略只分析提交的脚本，不分析初始化文件：
+
+- 识别 tree-sitter-bash 可解析的字面量命令调用及 LF 换行、`&&`、`||`、`;`、`|` 组合，
+  包括命令末尾和注释后的换行。
+- 字面词片段之间的反斜杠加 LF 按 Bash 续行语义拼接后匹配策略。
+- 双引号里的 `$:`、`$/` 等不会引入展开的内容仍是字面值；引号内的反斜杠加 CRLF 也不会
+  被误当作命令续行。
 
 未主动取得覆盖授权时，命中 deny 会在执行任何前缀前拒绝整段脚本。
 可识别的字面命令按 argv 模式判定；语法不完整、动态展开、重定向或不支持的结构通常要求整段确认，
@@ -543,12 +608,17 @@ stdin 或持久 Shell session。命令策略只分析提交的脚本，不分析
 - `null`：Disabled，不加载初始化文件。
 - 字符串路径：显式 Path；相对路径以请求 cwd（未提供时为默认 cwd）解析，不按 `PATH` 查找。
 
-Default 文件在 sandbox 可见 namespace 中打开；仅当打开失败为 `ENOENT`（包括 dangling symlink）时跳过。
-显式路径的 `ENOENT` 会失败；两种模式的其他打开、读取或 source 错误均以 `shell_init_file_failed`
-阻断命令。不会自动创建文件、加载用户 `~/.bashrc`，也不会隐式加载 `BASH_ENV`/`ENV`。允许 symlink；
-不做专门的 lstat/readlink 验证。Source 使用现有 sandbox 可见性与挂载，不会扩大 namespace。
-Source 后工作目录恢复为请求 cwd；初始化脚本对 PATH、函数、alias
-（正常 Bash 中 alias 扩展需显式启用）与导出变量的修改按普通 Bash 规则生效。
+初始化文件加载遵循以下规则：
+
+- Default 文件在 sandbox 可见 namespace 中打开；仅当打开失败为 `ENOENT`（包括 dangling
+  symlink）时跳过。
+- 显式路径的 `ENOENT` 会失败；两种模式的其他打开、读取或 source 错误均以
+  `shell_init_file_failed` 阻断命令。
+- 不会自动创建文件、加载用户 `~/.bashrc`，也不会隐式加载 `BASH_ENV`/`ENV`。
+- 允许 symlink，不做专门的 lstat/readlink 验证。
+- Source 使用现有 sandbox 可见性与挂载，不会扩大 namespace。
+- Source 后工作目录恢复为请求 cwd；初始化脚本对 PATH、函数、alias（正常 Bash 中 alias
+  扩展需显式启用）与导出变量的修改按普通 Bash 规则生效。
 
 初始化文件是本地可信代码，不受命令白名单审计；其 PATH、函数、alias、hook 等影响，以及后续进程
 或逃离同一进程组的子进程不由命令策略绑定到原始字面量检查对象。相对路径若由模型选择的 cwd
@@ -568,15 +638,26 @@ Source 后工作目录恢复为请求 cwd；初始化脚本对 PATH、函数、a
 }
 ```
 
-`maxConcurrentTasks` 限制单次 `process.batch` 中同时实际运行的子 Process Job 数量。所有子 Job 仍会整批 admission；超过并发槽的子 Job 保持 `queued`，因此该限制不会阻止 batch 在有界 `waitSeconds` 后返回。配置小于 1 时，有效下限为 1。
+`maxConcurrentTasks` 限制单次 `process.batch` 中同时实际运行的子 Process Job 数量。所有子 Job
+仍会整批 admission；超过并发槽的子 Job 保持 `queued`，因此该限制不会阻止 batch 在有界
+`waitSeconds` 后返回。配置小于 1 时，有效下限为 1。
 
-`processResponseBytes` 是 `process.exec`、`process.batch`、`skills.run`、`mcp.callTool`、`mcp.batch` 以及 `process.read` 默认使用的序列化 UTF-8 JSON 响应预算。默认 8192 字节，范围为 4096..1048576；`process.read` 可在此范围内用 `maxBytes` 显式覆盖。`mcp.batch` 的整个 `McpBatchToolResponse` 共用一份预算，不按子项重复分配。预算包括响应 JSON 转义和 Base64，但不包括传输与 event 封套，并与 512 KiB 的 MCP 结果保留上限分离。TUI 使用相同的默认预算。
+`processResponseBytes` 是 `process.exec`、`process.batch`、`skills.run`、`mcp.callTool`、
+`mcp.batch` 以及 `process.read` 默认使用的序列化 UTF-8 JSON 响应预算：
 
-`maxFileSearchContextLines` 是 `file.search` 对每个匹配返回的前后文行数 live 上限，默认 5，接受 0–100 的整数。请求可以超过该值；运行时会裁剪到 effective 值，并返回 `requestedContextLines`、`effectiveContextLines`、`contextLinesClipped` 与一个有界 warning。负数或非整数请求仍会被拒绝。
+- 默认 8192 字节，范围为 4096..1048576；`process.read` 可在此范围内用 `maxBytes` 显式覆盖。
+- `mcp.batch` 的整个 `McpBatchToolResponse` 共用一份预算，不按子项重复分配。
+- 预算包括响应 JSON 转义和 Base64，不包括传输与 event 封套。
+- 该预算与 512 KiB 的 MCP 结果保留上限分离。TUI 使用相同的默认预算。
 
+`maxFileSearchContextLines` 是 `file.search` 对每个匹配返回的前后文行数 live 上限，默认 5，
+接受 0–100 的整数。请求可以超过该值；运行时会裁剪到 effective 值，并返回
+`requestedContextLines`、`effectiveContextLines`、`contextLinesClipped` 与一个有界 warning。
+负数或非整数请求仍会被拒绝。
 
-`maxActiveProcesses` 接受非负整数或 `"auto"`。Auto 基于 `availableParallelism` 计算 `ceil(availableParallelism * 1.5)`；无法获取并行度时使用 6，并将结果限制在 6–24。Process、Skill 与 MCP Job 共用该容量，排队中的 batch 子 Job 也计入该容量。
-
+`maxActiveProcesses` 接受非负整数或 `"auto"`。Auto 基于 `availableParallelism` 计算
+`ceil(availableParallelism * 1.5)`；无法获取并行度时使用 6，并将结果限制在 6–24。
+Process、Skill 与 MCP Job 共用该容量，排队中的 batch 子 Job 也计入该容量。
 
 v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 
@@ -603,7 +684,14 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 }
 ```
 
-Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`streamable-http` 需要绝对 HTTP(S) URL，并可配置 `auth: {"type":"bearer","token":"..."}`；运行时会发送 `Authorization: Bearer <token>`。`stdio` 不接受 Bearer auth，且需要非空命令。TUI 会掩码 Bearer token，并在最终 JSON 预览中脱敏。在审查信任与确认策略之前，示例应保持 disabled。
+下游 server 配置遵循以下规则：
+
+- Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。
+- `streamable-http` 需要绝对 HTTP(S) URL，并可配置
+  `auth: {"type":"bearer","token":"..."}`；运行时会发送 `Authorization: Bearer <token>`。
+- `stdio` 不接受 Bearer auth，且需要非空命令。
+- TUI 会掩码 Bearer token，并在最终 JSON 预览中脱敏。
+- 在审查信任与确认策略之前，示例应保持 disabled。
 
 ## Skills、Room 与 sandbox
 
@@ -640,10 +728,13 @@ replica。旧 JSONL append/update/remove 与 passage/date-selection 调用不会
 agentic-gpt config keys [--section <SECTION>] [--json]
 ```
 
-文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`shell`、`limits`、`skills`、`room`、
-`tunnel`、`http-mcp`、`policy` 和 `events` 分组；`--section` 只显示其中一个分组。`--json` 返回机器可读的类型、
-是否可为 null、示例、双语说明和别名元数据。`config set` 只接受 registry 中的键；结构化
-policy 字符串数组可通过 registry 或专用命令修改，MCP 集合使用专用命令。
+文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`shell`、`limits`、
+`skills`、`room`、`tunnel`、`http-mcp`、`policy` 和 `events` 分组：
+
+- `--section` 只显示其中一个分组。
+- `--json` 返回机器可读的类型、是否可为 null、示例、双语说明和别名元数据。
+- `config set` 只接受 registry 中的键。
+- 结构化 policy 字符串数组可通过 registry 或专用命令修改；MCP 集合使用专用命令。
 
 注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号。`room.repositoryRoot` 可为 null，
 使用字面量 JSON 值 `null` 可以清除它并恢复 workspace 默认目录。
@@ -694,11 +785,15 @@ Tunnel secret 必须写成 `file:PATH` 或 `env:NAME` 引用；`file:` 路径可
 ## 显式 import 迁移
 
 普通 `Config::load()` 严格要求 v2，不会推断缺失的 selector，也不会静默接受旧的 Hub 形状。
-请使用 `agentic-gpt config import --config PATH [SOURCE]` 迁移旧版或外部 JSON（`--config`
-可省略，此时使用默认配置路径）；省略 SOURCE 时会导入所选 `--config` 路径。该流程进入普通
-交互式 Config Init TUI，保留没有编辑器的已识别字段（包括
-MCP server、policy、path policy、limits、非活动 hub/tunnel/room 数据以及安全的未知扁平字段），
-明确报告无法导入的字段，并通过标准备份/密钥事务写入。
+
+请使用 `agentic-gpt config import --config PATH [SOURCE]` 迁移旧版或外部 JSON：
+
+- `--config` 可省略，此时使用默认配置路径。
+- 省略 SOURCE 时会导入所选 `--config` 路径。
+- 该流程进入普通交互式 Config Init TUI。
+- 没有编辑器的已识别字段会保留，包括 MCP server、policy、path policy、limits、非活动
+  hub/tunnel/room 数据以及安全的未知扁平字段。
+- 无法导入的字段会明确报告，最终通过标准备份/密钥事务写入。
 
 ## 热加载与重启边界
 
@@ -727,14 +822,17 @@ live subset。无效候选会保留上一份有效状态；候选修改需要重
 才会处理 `httpMcp` listener 字段。Local 没有 TCP listener，Hub 也不会因此把这个配置
 section 变成 Hub ingress。
 
-HTTP MCP 凭据无法解析时会 fail closed：endpoint 停止接受请求并停止监听，直到引用再次
-可用。语法或语义无效的候选会被 watcher 拒绝并保留 last-good live 配置。监听地址冲突
-也不会影响 tunnel 或 Unix execution；修复 endpoint 配置后 watcher 会重试。上述过程
-不会输出引用或 token。
+HTTP MCP watcher 的失败行为如下：
+
+- 凭据无法解析时会 fail closed：endpoint 停止接受请求并停止监听，直到引用再次可用。
+- 语法或语义无效的候选会被拒绝，并保留 last-good live 配置。
+- 监听地址冲突不会影响 tunnel 或 Unix execution；修复 endpoint 配置后 watcher 会重试。
+- 上述过程不会输出引用或 token。
 
 共享 watcher 在需要重启的字段变化时记录 `config changes require restart; fields=...`，其中包括
 `browser`。诊断只列出发生变化的字段名，不会输出 secret 值。Standalone supervisor 另外输出
 `restart_required`；Hub 没有 supervisor 事件。不要把“文件已修改”误认为现有子进程树已经切换。
+
 `agent.info` 的 `config.liveSubsetMatchesDisk` 比较运行时 live subset 与有效磁盘配置投影；该比较包含完整的 `shell` 配置，Default、Disabled 与显式 init 文件路径三态按配置序列化表示区分。改变 Shell 初始化文件配置后，在 worker 热加载应用前该值预期为 `false`，应用后为 `true`。这只是配置快照诊断：不检查 init 文件内容，也不表示运行中进程已切换配置或提供强一致生效屏障。
 
 ## 验证与检查

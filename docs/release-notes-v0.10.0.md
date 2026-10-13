@@ -34,7 +34,13 @@
 | `limits.maxActiveJobs` | `limits.maxActiveProcesses` |
 | HTTP `/v1/jobs` 及 Job 查询、取消路径 | 当前 `/v1/process`、`/{processId}/read` 和取消路径 |
 
-中间版本的 `process.status/output/result` 也已合并到 `process.read`。旧的参数数组必须按 Bash 引用规则构造脚本，不能直接拼接；`waitSeconds` 到期只结束本次等待，不取消执行。Hub 后续调用须复用返回的 `agentId/processId`。完整字段、响应预算、取消证据和历史边界见[Process 切换说明](process-cutover.md)。
+中间版本的 `process.status/output/result` 也已合并到 `process.read`。调用方需要注意：
+
+- 旧参数数组必须按 Bash 引用规则构造脚本，不能直接拼接。
+- `waitSeconds` 到期只结束本次等待，不取消执行。
+- Hub 后续调用须复用返回的 `agentId/processId`。
+
+完整字段、响应预算、取消证据和历史边界见[Process 切换说明](process-cutover.md)。
 
 ### 确认、命令和路径策略
 
@@ -44,15 +50,33 @@
 - Process 可在 `acquireConfirmation.read/write` 声明本次具体访问范围，非空时必须 `acquire=true`。获准后范围仅对本次进程生效；`file.*` 和 tmux 不接受这两个范围字段，文件请求本身确定许可范围。
 - 下游 MCP 的原有审批行为保持不变。
 
-命令 `policy` 的 `allow/confirm/deny` 改为字符串模式数组；路径 `pathPolicy` 改为独立的 `read` 和 `write` 策略。三类策略都显式包含 `defaultAction`，优先级固定为 `deny > confirm > allow`，无匹配时使用默认动作。初始化命令默认 Confirm，读写路径默认 Deny。
+配置格式与默认行为：
 
-命令模式按 argv 匹配：token 内 `*` 匹配字符，尾部独立 `**` 匹配剩余参数。路径 `*` 不跨目录，`**` 表示递归范围，`/dir/**` 包含目录本身。两种策略中的单独 `*` 都匹配全部目标；将其放在 allow 中会广泛放行，仍受同组更高优先级的规则约束。主动确认不取消工具准入、文件完整性校验或其他资源限制，路径策略也不等同于 OS 沙箱挂载。
+| 策略 | 格式 | 初始化默认动作 |
+| --- | --- | --- |
+| 命令 `policy` | `allow/confirm/deny` 字符串模式数组 | Confirm |
+| 路径 `pathPolicy.read` | 独立的读取策略 | Deny |
+| 路径 `pathPolicy.write` | 独立的写入策略 | Deny |
+
+三类策略都显式包含 `defaultAction`，优先级固定为 `deny > confirm > allow`，无匹配时使用默认动作。
+
+通配符的匹配方式：
+
+- **命令**按 argv 匹配：token 内 `*` 匹配字符，尾部独立 `**` 匹配剩余参数。
+- **路径**的 `*` 不跨目录，`**` 表示递归范围，`/dir/**` 包含目录本身。
+- 两种策略中的单独 `*` 都匹配全部目标；将其放在 allow 中会广泛放行，仍受同组更高优先级的规则约束。
+
+主动确认不取消工具准入、文件完整性校验或其他资源限制，路径策略也不等同于 OS 沙箱挂载。
 
 旧 `program/argsPrefix` 规则对象、`writeRoots/readOnlyRoots/denyRoots` 需要显式迁移。原配置可覆盖内置规则的行为改为统一优先级，迁移报告会列出可识别的冲突。完整配置示例、批准范围及 sandbox 边界见[确认与策略格式迁移](operations.md#确认与策略格式迁移)。
 
 ### Config v2、Toolsets 与 Room
 
-运行时要求显式的 `mode/profile/toolsets` 和新策略格式，旧顶层 `hubUrl/hubTransport/agentSecret` 改为嵌套 `hub`。`profile` 提供默认 Toolset preset；显式 `toolsets.enabled` 决定实时发现和普通工具调用准入，包含 Hub 下发的调用。
+Config v2 的要求：
+
+- 显式提供 `mode/profile/toolsets` 和新策略格式。
+- 旧顶层 `hubUrl/hubTransport/agentSecret` 改为嵌套 `hub`。
+- `profile` 提供默认 Toolset preset；显式 `toolsets.enabled` 决定实时发现和普通工具调用准入，包含 Hub 下发的调用。
 
 Room v2 的接口、Notebook/Diary 投影和维护合同与 0.9.1 不同，调用方需更新请求及响应处理。需要保持 Room 时还应确认 `room.repositoryRoot`、对应仓库及 Room Toolset。参见[工具合同矩阵](tool-contract-matrix.md)及[接口参考](interfaces.md)。
 
@@ -68,13 +92,29 @@ Room v2 的接口、Notebook/Diary 投影和维护合同与 0.9.1 不同，调�
    python3 scripts/migrate-agentic.py --write
    ```
 
-3. 如果配置仍含 `limits.maxActiveJobs`，将该键改为 `maxActiveProcesses`，保留所需值；同时检查 `limits.maxConcurrentTasks`。脚本不迁移此键，直接 `config import` 可能报告无法导入旧 limits 并使用默认值。
-4. 对于缺少 Config v2 选择字段或仍含旧顶层 Hub 字段的配置，在终端运行 `agentic-gpt config import`。它打开标准初始化 TUI；复核实际运行模式、profile、Toolsets、嵌套 Hub 和其他配置后保存。旧文件未指定运行模式时，导入默认使用 Standalone；Hub/Local 用户须在界面选回所需模式。策略迁移应先完成，`config import` 不转换旧策略。
+3. 如果配置仍含 `limits.maxActiveJobs`，将该键改为 `maxActiveProcesses`，保留所需值；同时检查 `limits.maxConcurrentTasks`。
+
+   脚本不迁移此键，直接 `config import` 可能报告无法导入旧 limits 并使用默认值。
+4. 对于缺少 Config v2 选择字段或仍含旧顶层 Hub 字段的配置，在终端运行 `agentic-gpt config import`。
+
+   它打开标准初始化 TUI；复核实际运行模式、profile、Toolsets、嵌套 Hub 和其他配置后保存。
+
+   旧文件未指定运行模式时，导入默认使用 Standalone；Hub/Local 用户须在界面选回所需模式。策略迁移应先完成，`config import` 不转换旧策略。
 5. 用 `agentic-gpt config show` 检查有效配置，更新客户端及 Hub 的 OpenAPI 导入，再启动新部署，核对 Process、事件和 Skill 记录。部署冒烟应使用隔离 HOME，不能把真实用户配置当作测试夹具。
 
-**统一脚本覆盖的是策略配置和受支持的私有状态布局，不是全部 0.9.1 配置或客户端的自动升级器。** 新状态已存在或没有当前身份的旧目录时，状态项会跳过，配置策略仍可迁移。预览不替换配置或发布新状态，但会创建私有锁文件。
+**统一脚本覆盖的是策略配置和受支持的私有状态布局，不是全部 0.9.1 配置或客户端的自动升级器。**
 
-旧 `jobs.sqlite3` 不导入 Process 历史，也不删除或重命名。受支持的旧事件、Process、Skill 状态先在副本校验，再发布到新布局，旧源目录保留。配置变更有私有备份；普通失败及可处理的中断会尝试恢复配置和撤回本次发布状态。断电、强制终止或回滚失败仍需检查完整性。详情见[私有状态迁移指南](development/agent-state-migration.zh-CN.md)。
+- 新状态已存在或没有当前身份的旧目录时，状态项会跳过，配置策略仍可迁移。
+- 预览不替换配置或发布新状态，但会创建私有锁文件。
+
+数据保留和失败恢复：
+
+- 旧 `jobs.sqlite3` 不导入 Process 历史，也不删除或重命名。
+- 受支持的旧事件、Process、Skill 状态先在副本校验，再发布到新布局，旧源目录保留。
+- 配置变更有私有备份；普通失败及可处理的中断会尝试恢复配置和撤回本次发布状态。
+- 断电、强制终止或回滚失败仍需检查完整性。
+
+详情见[私有状态迁移指南](development/agent-state-migration.zh-CN.md)。
 
 ## 版本及发布范围
 

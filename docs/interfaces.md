@@ -12,15 +12,39 @@ Agent 通过一个范围狭窄的内部准入边界处理请求，不引入新�
 
 普通外部工具调用在 Hub wire、本地 MCP/Unix 和 Agent HTTP MCP 上均按操作所属命名空间检查实时 `toolsets.enabled`，关闭工具集后，后续请求会在进入执行者前被拒绝。Hub HTTP 和 Apps MCP 经 Hub wire 下发，同样受此门控约束。工具发现过滤不能替代调用时准入。`skills.run` 只检查 `skills` 工具集；内部使用受管理进程不要求同时启用 `process`，但后续显式调用 `process.read/cancel` 仍受 `process` 开关控制。
 
-`event.list/get/mark` 是基础收件箱 API，不受普通 Toolset 开关控制。CLI 的四项本地 tmux 管理操作继续使用管理准入规则；`privateevent.inject` 仅允许 Unix 本地入口，`event.panel/settle` 仅允许 Hub，通知投递继续检查通知能力。其余普通操作先检查工具集，再检查既有能力条件：Skills 仍要求运行时 Skills 能力，Hub 的 Room 语义读取及维护仍要求 Room Profile，Bootstrap 不追加该 Profile 条件。如果开关与能力同时不满足，普通操作先返回工具集拒绝；共享操作层普通工具集的错误码为 `toolset_required`，Room 为 `room_toolset_required`，本地 MCP 的调用时可用性过滤仍保留自己的协议错误封套。
+以下操作不使用普通 Toolset 准入：
 
-各接入路径的身份验证、封装和错误封套仍互相独立：本地 Unix 保留 UID/套接字防护和 `local:` 来源前缀；Tunnel stdio 使用 `tunnel:`；worker HTTP MCP 保留 bearer、Host/Origin/session 处理并使用 `http:`；Hub WS/SSE 保留其协议封套/重放行为并使用 `hub:`；CLI 使用 `localadmin:`。CLI 准入门有意限制为现有四项本地 tmux 管理操作。HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上有所不同，而共享 Agent 操作使用同一套值/错误和精简 Process/Skill 结果层。
+- `event.list/get/mark` 是基础收件箱 API，不受普通 Toolset 开关控制。
+- CLI 的四项本地 tmux 管理操作继续使用管理准入规则。
+- `privateevent.inject` 仅允许 Unix 本地入口，`event.panel/settle` 仅允许 Hub。
+- 通知投递继续检查通知能力。
+
+其余普通操作先检查工具集，再检查既有能力条件。Skills 仍要求运行时 Skills 能力，Hub 的
+Room 语义读取及维护仍要求 Room Profile，Bootstrap 不追加该 Profile 条件。如果开关与能力
+同时不满足，普通操作先返回工具集拒绝。共享操作层普通工具集的错误码为
+`toolset_required`，Room 为 `room_toolset_required`；本地 MCP 的调用时可用性过滤仍保留
+自己的协议错误封套。
+
+各接入路径的身份验证、封装和错误封套仍互相独立：
+
+- 本地 Unix 保留 UID/套接字防护和 `local:` 来源前缀。
+- Tunnel stdio 使用 `tunnel:`。
+- worker HTTP MCP 保留 bearer、Host/Origin/session 处理并使用 `http:`。
+- Hub WS/SSE 保留其协议封套/重放行为并使用 `hub:`。
+- CLI 使用 `localadmin:`；其准入门有意限制为现有四项本地 tmux 管理操作。
+
+HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上有所不同，而共享 Agent
+操作使用同一套值/错误和精简 Process/Skill 结果层。
 
 Normal 并不等于 Room：只有显式启用 `room` 命名空间时，Normal 运行时才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
 
 重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`、`events`；仅当 `workspaceRoot` 未改变时重载 `pathPolicy`），且不会重建启动时派生的资源。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
 
-`agentic-gpt local` 是 Unix MCP 客户端，使用常规 MCP 操作准入门并记录 `local:` 来源。它不同于 `agentic-gpt tmux`：后者的 CLI 管理准入门仅允许 `tmux.listSessions`、`tmux.attach`、`tmux.createSession` 和 `tmux.closeSession`，并记录 `localadmin:` 来源。MCP `tmux.sessions`、`tmux.panes`、`tmux.exec` 和 `tmux.pasteText` 不属于这四项 CLI 管理操作。
+`agentic-gpt local` 是 Unix MCP 客户端，使用常规 MCP 操作准入门并记录 `local:` 来源。
+
+`agentic-gpt tmux` 的 CLI 管理准入门仅允许 `tmux.listSessions`、`tmux.attach`、
+`tmux.createSession` 和 `tmux.closeSession`，并记录 `localadmin:` 来源。MCP
+`tmux.sessions`、`tmux.panes`、`tmux.exec` 和 `tmux.pasteText` 不属于这四项 CLI 管理操作。
 
 ## GPT Actions API 端点
 
@@ -34,10 +58,23 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 
 - `GET /v1/info`：安全的 Hub 运行时概要。
 - `GET /v1/agents`：启用的本地 Agent、其在线状态和安全配置概要。
-- `POST /v1/process/exec`：启动一个受策略控制的 Bash 命令并短暂等待。请求必须提供 `agentId`、原始 shell 脚本 `command`；可选 `acquireConfirmation`、 `cwd`（工作目录）、`group`（1–32 个字符）和 `waitSeconds`（默认 5 秒，最多 30 秒）。策略针对完整提交脚本预检：支持 LF 命令分隔和可静态确定的字面续行；未主动获准覆盖时，任一命令被拒绝就拒绝整段脚本；无法静态判定的脚本通常需要整段确认，显式全局 `*` 规则可应用配置动作。具体语法与边界见[配置说明](configuration.zh-CN.md#bash-命令与-shell-初始化文件)。响应为扁平的 `ProcessResponse`，统一受 `limits.processResponseBytes` 预算约束。
+- `POST /v1/process/exec`：启动一个受策略控制的 Bash 命令并短暂等待。
+  - 必填字段是 `agentId` 和原始 shell 脚本 `command`。
+  - 可选字段是 `acquireConfirmation`、`cwd`（工作目录）、`group`（1–32 个字符）和
+    `waitSeconds`（默认 5 秒，最多 30 秒）。
+  - 策略针对完整提交脚本预检，支持 LF 命令分隔和可静态确定的字面续行。未主动获准覆盖时，
+    任一命令被拒绝就拒绝整段脚本；无法静态判定的脚本通常需要整段确认，显式全局 `*` 规则
+    可应用配置动作。具体语法与边界见
+    [配置说明](configuration.zh-CN.md#bash-命令与-shell-初始化文件)。
+  - 响应为扁平的 `ProcessResponse`，统一受 `limits.processResponseBytes` 预算约束。
 - `POST /v1/process/batch`：原子准入一批受管理 Bash 命令。请求必须提供 `agentId`、`elements`（每项含 `command`）；可选 `acquireConfirmation` 和批次级 `cwd`，元素可覆盖工作目录，以及由子进程继承的可选 `group` 和 `waitSeconds`（默认 5 秒，最多 30 秒）。全部元素先完成预检，再通过一次聚合确认；准入后不回滚已启动命令。响应为 `ProcessBatchResponse`，整个批次共用统一响应预算。
 - `GET /v1/process?agentId=...`：列出活动或近期保留的进程元数据，可选用 `group`、kind、state、limit 和 cursor 筛选。`limit` 默认值为 50，上限为 100。Agent 不可用时，Hub 可以为第一页返回缓存元数据，但不会从缓存继续使用 Agent 发出的 cursor。
-- `GET /v1/process/{processId}/read?agentId=...&waitSeconds=...&view=auto|status&cursor=...&maxBytes=...`：统一读取进程状态和捕获输出。wait 默认 5 秒、最大 30 秒、0 表示立即返回；auto 有 backlog 时立即返回，否则有界等待输出、终态/采集结算或期限；status 只等待执行终态/期限，不因输出提前返回。`maxBytes` 省略时使用 `limits.processResponseBytes`，显式值范围为 4096..1048576。
+- `GET /v1/process/{processId}/read?agentId=...&waitSeconds=...&view=auto|status&cursor=...&maxBytes=...`：
+  统一读取进程状态和捕获输出。
+  - wait 默认 5 秒、最大 30 秒，0 表示立即返回。
+  - auto 有 backlog 时立即返回，否则有界等待输出、终态/采集结算或期限。
+  - status 只等待执行终态/期限，不因输出提前返回。
+  - `maxBytes` 省略时使用 `limits.processResponseBytes`，显式值范围为 4096..1048576。
 - read 响应报告 `captureStatus`，stdout/stderr 使用 `data`、`encoding`、偏移和 `gap` segment，并提供 `nextCursor`、`hasMore`、`eof`。`hasMore` 不要求读完整日志；cursor 只推进实际返回数据，不同读取者不共享消费。cursor 仅用于 command/skill 输出；MCP 下游 CallToolResult 不使用输出 cursor。
 - `POST /v1/process/{processId}/cancel?agentId=...`：请求取消受管理进程组并返回观察到的结果/终止证据。`process_group_sigterm_observed` 和 `process_group_sigkill_observed` 是观察到相应停止信号的正面语义证据；未验证或缺少响应不等于已停止。普通同组管道/后台子进程在取消范围内；脱离进程组的后代不作保证。
 - `POST /v1/mcp/servers`：列出一个本地 Agent 中配置的 MCP 服务器；省略 `agentId` 时，则汇总所有当前已连接 Agent 的 MCP 服务器。
@@ -57,14 +94,30 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 - `POST /v1/room/state/list` 和 `POST /v1/room/state/read`：列出或读取有界的 `State/entities` Markdown 文档，分别使用 `RoomStateListResponse` 或 `RoomStateReadResponse`。
 - `POST /v1/room/maintenance/status` 和 `POST /v1/room/maintenance/submit`：检查由仓库所有者负责的就绪状态，或提交明确的语义维护请求。响应分别为 `RoomMaintenanceStatusResponse` 和 `RoomMaintenanceSubmitResponse`；submit 使用现有 local/workflow 模式及有界等待契约。
 
-Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirmation` 对象，拒绝旧 `needConfirm`／`confirmMethod` 字段及未知对象字段。
-`acquire` 省略通常为 false，tmux.pasteText 为 true；`method` 仅接受 ntfy/freedesktop，省略沿用配置。
-主动获准确认可单次覆盖命令和路径策略的拒绝。明确拒绝中止操作；超时、过期或提供方不可用时回退配置策略，只有配置 Allow 可继续，临时路径范围不生效；tmux.pasteText 的主动确认要求严格成功。仅 Process exec/batch 接受非空 read/write 路径数组，必须显式 acquire=true；文件与 tmux 拒绝 read/write 字段（包括空数组）。
-文件 read/search/edit 的本地 MCP 入口也使用该对象，读取／搜索批次只接受顶层对象。此升级不改变下游 MCP 的审批与 wire 决策合同。
+Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirmation` 对象：
+
+- 旧 `needConfirm`／`confirmMethod` 字段及未知对象字段会被拒绝。
+- `acquire` 省略通常为 false，`tmux.pasteText` 为 true。
+- `method` 仅接受 ntfy/freedesktop，省略时沿用配置。
+- 主动获准确认可单次覆盖命令和路径策略的拒绝；明确拒绝会中止操作。
+- 超时、过期或提供方不可用时回退配置策略，只有配置 Allow 可继续，临时路径范围不生效。
+- `tmux.pasteText` 的主动确认要求严格成功。
+- 仅 Process exec/batch 接受非空 read/write 路径数组，且必须显式 `acquire=true`；文件与 tmux
+  拒绝 read/write 字段，包括空数组。
+
+文件 read/search/edit 的本地 MCP 入口也使用该对象，读取／搜索批次只接受顶层对象。此升级
+不改变下游 MCP 的审批与 wire 决策合同。
 
 ntfy 确认通知的操作预览最多显示 1000 字符。通用操作若无法完整展示命令及访问范围，会将该渠道判为不可用；不会以截断预览获得完整范围的许可。随后按上述确认失败回退规则处理，paste 的强制批准仍终止。
 
-当配置要求 Confirm 且确认通道不可用时，受管理进程的 exec/read 响应通过 `error.code = process_confirmation_unavailable` 明确说明无法取得确认、操作未执行。进程元数据的拒绝原因以及确认协议/审计值仍为 `provider_unavailable`。调用方应检查 `agent.info` 的确认通道状态，并在通道恢复后按原有策略重试。需要确认的文件修改对应返回 `file_confirmation_unavailable`，不会应用文件变更；确认拒绝仍使用 `file_confirmation_denied`。
+当配置要求 Confirm 且确认通道不可用时：
+
+- 受管理进程的 exec/read 响应通过 `error.code = process_confirmation_unavailable` 明确说明
+  无法取得确认、操作未执行。
+- 进程元数据的拒绝原因以及确认协议/审计值仍为 `provider_unavailable`。
+- 调用方应检查 `agent.info` 的确认通道状态，并在通道恢复后按原有策略重试。
+- 需要确认的文件修改返回 `file_confirmation_unavailable`，不会应用文件变更；确认拒绝仍使用
+  `file_confirmation_denied`。
 
 这九个 Room 端点在 JSON 请求体中使用当前的 camelCase Agent 请求/响应 DTO。
 空请求 DTO 仍须传入 `{}`；没有端点接受 `agentId` 选择器。它们解析并捕获活动
@@ -93,7 +146,20 @@ Agent 内部进程模型及本地进程数据库不保存 `agentId`；对外 Pro
 
 Agent 的受管理进程历史是执行侧权威来源。Hub 进程状态条目和 Hub 进程缓存是用于路由和观察的投影；它们不能证明本地进程仍在运行，也不能证明副作用已撤销。Hub 缓存最多保留 4,096 个进程，在 `observedAt` 之后 15 分钟过期，并在 60 秒后标记为 `stale`。每 15 秒运行一次清理，移除已过期条目；容量淘汰最早观察到的条目。淘汰活动投影不会影响 Agent 进程或权威的 Hub 运行回执。
 
-Hub HTTP `process.read`、`process.list` 以及对应的 Apps MCP 进程检查响应会暴露 `freshness` 和 `observedAt` 元数据。创建端点直接返回的实时进程封套可能省略这些投影字段；其中的 Agent 进程负载仍具权威性。`live` 表示响应来自 Agent，`cached` 表示 Hub 投影仍在新鲜度窗口内且可用，`stale` 表示投影已较旧，`unknown` 表示当前没有可用事实（包括重启协调之后）。这些字段描述响应投影，不是 Agent 进程状态字段。只有缓存的状态响应属于降级证据，不是新的等待结果；Hub 不会为 Agent 发出的 cursor 臆造续页。Hub 缓存仅包含状态元数据，不能提供输出或结果内容。
+Hub HTTP `process.read`、`process.list` 以及对应的 Apps MCP 进程检查响应会暴露 `freshness`
+和 `observedAt` 元数据。创建端点直接返回的实时进程封套可能省略这些投影字段；其中的 Agent
+进程负载仍具权威性。
+
+`freshness` 的取值含义如下：
+
+- `live`：响应来自 Agent。
+- `cached`：Hub 投影仍在新鲜度窗口内且可用。
+- `stale`：投影已较旧。
+- `unknown`：当前没有可用事实，包括重启协调之后。
+
+这些字段描述响应投影，不是 Agent 进程状态字段。只有缓存的状态响应属于降级证据，不是新的
+等待结果；Hub 不会为 Agent 发出的 cursor 臆造续页。Hub 缓存仅包含状态元数据，不能提供输出
+或结果内容。
 
 Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗口为 24 小时；窗口结束后，只压缩符合条件的已完成负载：`runId`、请求/Agent 身份、命令哈希、状态以及冲突/未知/墓碑证据仍会保留。重放和去重所需的身份/哈希证据仍受保护；未知和冲突记录不会压缩。因此 `AgentRun` 会分别报告 `resultRetained` 和 `resultOmitted`；负载被省略不能证明命令未运行。
 
@@ -103,18 +169,53 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 当前 Agent 语义 Room 接口面是上述九项远程操作的权威来源。Hub Full 通过捕获的活动 Room 租约转发这些操作；它不会读取仓库、拥有 Room 文件、解释 Git 状态，也不会创建第二份内容存储。通用 Hub 运行回执可能为状态/迟到结果检查保留有界操作结果，但该回执不是 Room 内容的权威来源。
 
-读取范围属于当前契约：Notebook `limit` 默认值为 20，范围是 1–100；搜索 `query` 不能为空，且最多 256 个 Unicode 字符；Notebook 和 State Markdown 读取会拒绝超过现有 512 KiB 上限的内容；Diary 周期可以是 `current`、严格格式的日日期，或按顺序排列的周/月日期区间。`room.notebook.recent` 和 `room.notebook.search` 保留原公开名称，但现在返回当前 Markdown DTO（`path`、`title`、`contentPreview`、`truncated`、`effectiveAt`），不再返回已退役的 passage/JSONL 格式。
+读取范围属于当前契约：
+
+- Notebook `limit` 默认值为 20，范围是 1–100。
+- 搜索 `query` 不能为空，且最多 256 个 Unicode 字符。
+- Notebook 和 State Markdown 读取会拒绝超过现有 512 KiB 上限的内容。
+- Diary 周期可以是 `current`、严格格式的日日期，或按顺序排列的周/月日期区间。
+- `room.notebook.recent` 和 `room.notebook.search` 保留原公开名称，但现在返回当前 Markdown
+  DTO（`path`、`title`、`contentPreview`、`truncated`、`effectiveAt`），不再返回已退役的
+  passage/JSONL 格式。
 
 维护操作仍须明确提交，且由 Agent 所有。`room.maintenance.status` 为只读。`room.maintenance.submit` 接受一至五个唯一语义 slot、可选 `local` 或 `workflow` 模式，以及范围为 0–30 的 `waitSeconds`（默认值为 0）。workflow 等待只观察消费/快进；超时只结束等待，不会取消已提交的维护操作。现有仓库、路径、symlink、锁、clean-tree、预期变更、执行器和 Git 控制仍然有效。没有单独的维护等待 API，也不承诺新增确认机制。
 
-从已退役 Room JSONL 名称迁移的调用方必须选择明确的当前语义操作。旧 append/update/remove 或 passage/日期选择语义不会自动转换为 `room.maintenance.submit`；要更改 Room 内容的调用方必须构造文档规定的 slot/payload 请求，或弃用旧调用。应同时升级配对的 Hub 和 Agent 工件，刷新 [`../openapi/hub.yaml`](../openapi/hub.yaml)，迁移所有调用方，并在移除旧调用前验证实时活动 Room 路径。历史发布/迁移记录仍是历史记录，不是当前错误或兼容性契约。
+从已退役 Room JSONL 名称迁移的调用方必须选择明确的当前语义操作。旧 append/update/remove
+或 passage/日期选择语义不会自动转换为 `room.maintenance.submit`。迁移时：
+
+1. 为更改 Room 内容的调用方构造文档规定的 slot/payload 请求，或弃用旧调用。
+2. 同时升级配对的 Hub 和 Agent 工件。
+3. 刷新 [`../openapi/hub.yaml`](../openapi/hub.yaml) 并迁移所有调用方。
+4. 在移除旧调用前验证实时活动 Room 路径。
+
+历史发布/迁移记录仍是历史记录，不是当前错误或兼容性契约。
 
 
 ## 持久事件收件箱
 
-事件收件箱持久化在 `~/.agentic_gpt/state/events.sqlite3`；使用同一 `HOME` 的客户端共享事件和展示计数，修改 `agentId` 不切换收件箱。需要独立收件箱的实例应使用独立 `HOME`。事件 API 与 Process/Skill Install 的生命周期操作彼此独立。Standalone 的三个公开 MCP 工具 `event.list`、`event.get`、`event.mark` 不依赖 Process/Skills 工具集开关，也不新增可配置 namespace。Standalone 请求省略 `agentId` 时使用当前 Agent；若提供，则必须与当前 Agent 匹配，不作为跨 Agent 选择器。Hub Full 的三个工具要求显式 `agentId`；Coordinator 的八项工具保持不变，且不公开事件工具。
+事件收件箱的状态和接口边界如下：
 
-`EventSource.kind` 是创建时固定的事件来源类型，与入口/传输（如 Unix、stdio、HTTP、Hub）以及 Hub `RunReport` 相互独立：内部事件由服务端绑定 `process` 或 `skill_install` 和对应实体 ID；外部注入的来源种类固定为 `external`，来源引用由调用方通过 `ref` 提供。读取、筛选、标记或传输事件都不能改写来源。事件记录使用 camelCase 字段 `eventId`、`message`、`severity`（`low|medium|high`）、`createdAt`、`status`（`pending|handled|expired`）、`source: { kind, ref }`、`shownCount` 与可空 `expiresAt`。列表项以 `summary` 代替完整正文。
+- 收件箱持久化在 `~/.agentic_gpt/state/events.sqlite3`。
+- 使用同一 `HOME` 的客户端共享事件和展示计数；修改 `agentId` 不切换收件箱。需要独立收件箱
+  的实例应使用独立 `HOME`。
+- 事件 API 与 Process/Skill Install 的生命周期操作彼此独立。
+- Standalone 的三个公开 MCP 工具 `event.list`、`event.get`、`event.mark` 不依赖
+  Process/Skills 工具集开关，也不新增可配置 namespace。
+- Standalone 请求省略 `agentId` 时使用当前 Agent；若提供，则必须与当前 Agent 匹配，不作为
+  跨 Agent 选择器。
+- Hub Full 的三个工具要求显式 `agentId`；Coordinator 的八项工具保持不变，且不公开事件工具。
+
+`EventSource.kind` 是创建时固定的事件来源类型，与入口/传输（如 Unix、stdio、HTTP、Hub）
+以及 Hub `RunReport` 相互独立：
+
+- 内部事件由服务端绑定 `process` 或 `skill_install` 和对应实体 ID。
+- 外部注入的来源种类固定为 `external`，来源引用由调用方通过 `ref` 提供。
+- 读取、筛选、标记或传输事件都不能改写来源。
+
+事件记录使用 camelCase 字段 `eventId`、`message`、`severity`（`low|medium|high`）、
+`createdAt`、`status`（`pending|handled|expired`）、`source: { kind, ref }`、`shownCount`
+与可空 `expiresAt`。列表项以 `summary` 代替完整正文。
 
 | 操作 | 请求与结果 |
 |---|---|
@@ -148,7 +249,19 @@ Hub HTTP 路由使用现有 Hub API Bearer 认证及 Agent 启用状态授权：
 }
 ```
 
-面板统计所有未过期 pending 事件（含本次未展示项）；`new` 最多五项，按 high、medium、low 排序，同级按较早创建时间排序。摘要最多 32 个 Unicode 字符（超长时 31 字符加 `…`）；等级、时间和 ID 不截断。low 首次曝光后隐藏，默认 TTL 为 24 小时且可配置；medium 曝光三次后隐藏且不自动过期；high 保持候选直到处理。等级表示通知优先级，不表示内部事件成功/失败或是否需要人工介入。handled/expired 历史保留七天后清理。新事件只在后续工具调用中以面板提醒；同一响应内，原有 Browser/file 内容块会保留，面板为紧凑文本且只展示/计次一次。事件详情正文读取本身不计入曝光，面板实际展示的候选仍按正常规则计次。面板位于原结果根级键 `events`，不另加结果封套或面板封套。
+事件面板遵循以下展示规则：
+
+- 统计所有未过期 pending 事件，包括本次未展示项。
+- `new` 最多五项，按 high、medium、low 排序，同级按较早创建时间排序。
+- 摘要最多 32 个 Unicode 字符，超长时使用 31 字符加 `…`；等级、时间和 ID 不截断。
+- low 首次曝光后隐藏，默认 TTL 为 24 小时且可配置；medium 曝光三次后隐藏且不自动过期；
+  high 保持候选直到处理。
+- 等级表示通知优先级，不表示内部事件成功/失败或是否需要人工介入。
+- handled/expired 历史保留七天后清理。
+
+新事件只在后续工具调用中以面板提醒。同一响应内，原有 Browser/file 内容块会保留，面板为
+紧凑文本且只展示/计次一次。事件详情正文读取本身不计入曝光，面板实际展示的候选仍按正常
+规则计次。面板位于原结果根级键 `events`，不另加结果封套或面板封套。
 
 `events.new` 不是完整待处理列表；事件因展示次数限制而隐藏，不代表已 handled，需要完整待处理摘要时使用 `event.list`。列表/详情读取不标记 handled，但响应面板中实际展示的候选会增加 `shownCount`，收件箱访问也可能执行过期和保留期清理；不要将“不标记 handled”理解为数据库完全没有状态维护。已经了解并处理事件时可直接 `event.mark`，不要求每次都先 `event.get`。
 
@@ -156,7 +269,18 @@ Hub HTTP 路由使用现有 Hub API Bearer 认证及 Agent 启用状态授权：
 
 无目标的 `mcp.listServers` 聚合发现会在 Agent 端抑制面板生成，因此不会消耗事件曝光次数；单目标发现仍按正常规则附带面板。
 
-Agent 内部可靠传输命令清单新增 `event.list`、`event.get`、`event.mark`；内部私有 `event.settle` 用于反馈原响应判定，不是公开工具或 HTTP 路由。Hub 创建在副作用前绑定来源/origin；Agent 对远程来源等待 Hub 的最终判定，不以重启、完成先后或再次读取推断资格。可靠 `Response.eventSources` 携带该原始创建响应的来源及 `includesTerminal` 判定；独立私有 `event.sources` 只用于恢复待仲裁来源身份。二者分工不同，配合持久决策/可靠反馈支持 Hub 重启恢复，均不替代业务 `RunReport`，也不进入公开 HTTP/MCP 业务 DTO。外部 Unix CLI 注入仅为本地集成入口，stdin JSON 及其使用方式见[Standalone 运行指南](standalone-runtime.md)；不是模型可调用工具。
+内部事件传输的职责分工如下：
+
+- 可靠传输命令包括 `event.list`、`event.get`、`event.mark`。
+- 内部私有 `event.settle` 用于反馈原响应判定，不是公开工具或 HTTP 路由。
+- Hub 创建在副作用前绑定来源/origin；Agent 对远程来源等待 Hub 的最终判定，不以重启、
+  完成先后或再次读取推断资格。
+- 可靠 `Response.eventSources` 携带原始创建响应的来源及 `includesTerminal` 判定。
+- 独立私有 `event.sources` 只用于恢复待仲裁来源身份。
+
+后两者配合持久决策/可靠反馈支持 Hub 重启恢复，均不替代业务 `RunReport`，也不进入公开
+HTTP/MCP 业务 DTO。外部 Unix CLI 注入仅为本地集成入口；stdin JSON 及其使用方式见
+[Standalone 运行指南](standalone-runtime.md)，它不是模型可调用工具。
 
 公开定义见 [`openapi/hub.yaml`](../openapi/hub.yaml) 与实时 Agent MCP 工具 schema；此节概述不替代它们。
 
@@ -166,10 +290,25 @@ Agent 内部可靠传输命令清单新增 `event.list`、`event.get`、`event.m
 
 所有 `/mcp` `tools/call` 响应均使用 Hub 的 `AgenticResult` 封套，与 ChatGPT Apps/MCP 工具结果格式直接兼容。Hub 原生 JSON 以 `structuredContent` 和 JSON 文本 content block 暴露；顶层 `error` 会使 MCP 工具结果的 `isError=true`。
 
-`mcp.callTool` 不会在 Hub 顶层透传下游结果封套。实时 HTTP 端点返回扁平的 `ProcessResponse`；下游终态 CallToolResult 使用 `mcpResult`，状态为 `pending`、`included`、`deferred`、`unavailable` 或 `not_retained`。`included` 才包含完整对象；`deferred` 可通过 read 显式提高 `maxBytes` 重试，`not_retained` 不可恢复。最多 512 KiB 的序列化结果会予以保留。活动调用使用 `process.read` 和 `process.cancel` 跟进。
+`mcp.callTool` 不会在 Hub 顶层透传下游结果封套。实时 HTTP 端点返回扁平的
+`ProcessResponse`；下游终态 CallToolResult 使用 `mcpResult`：
+
+- 状态为 `pending`、`included`、`deferred`、`unavailable` 或 `not_retained`。
+- 只有 `included` 包含完整对象。
+- `deferred` 可通过 read 显式提高 `maxBytes` 重试；`not_retained` 不可恢复。
+- 最多 512 KiB 的序列化结果会予以保留。
+- 活动调用使用 `process.read` 和 `process.cancel` 跟进。
 Hub 没有原生 `file.read` 或 `file.edit` 工具。其通用异步 MCP 进程桥接不是类型化的图像内容接口；不要依赖它保留 `file.read` 图像 Content blocks。
 
-`mcp.batch` 返回扁平的 `McpBatchToolResponse`，其中 `results` 按顺序包含子进程投影。确认和启动任何子进程之前，会先完成验证与容量准入。并行模式使用共享调度器（全局最多 8 个、每个服务器最多 2 个）；顺序模式会等待每个子进程进入终态。`failFast=true` 时，只有尚未启动的子进程会标记为 `skipped`；已经启动的调用不会取消。单服务器批次可以获得临时服务器 allow 操作，多服务器确认则仍以整个批次为作用范围。每个子项都是普通的受管理进程，带有 `batchId`、可选 `batchCallId` 和 `batchIndex`，后续检查和取消使用相同的 `process.*` 生命周期接口。
+`mcp.batch` 返回扁平的 `McpBatchToolResponse`，其中 `results` 按顺序包含子进程投影：
+
+- 确认和启动任何子进程之前，会先完成验证与容量准入。
+- 并行模式使用共享调度器，全局最多 8 个、每个服务器最多 2 个；顺序模式会等待每个子进程
+  进入终态。
+- `failFast=true` 时，只有尚未启动的子进程会标记为 `skipped`；已经启动的调用不会取消。
+- 单服务器批次可以获得临时服务器 allow 操作；多服务器确认仍以整个批次为作用范围。
+- 每个子项都是普通的受管理进程，带有 `batchId`、可选 `batchCallId` 和 `batchIndex`；后续
+  检查和取消使用相同的 `process.*` 生命周期接口。
 
 取消以证据为准。Agentic 会使用准确的下游请求 ID 发送 MCP `notifications/cancelled`。如果未观察到下游终态响应，进程会变为 `detached`，而不是声称取消成功。仅 Hub 缓存的进程状态属于降级元数据证据，不会提供缓存结果，也不会报告取消成功。
 
@@ -193,7 +332,15 @@ ntfy 确认回调路由有意不纳入 `openapi/hub.yaml`，仅供确认操作�
 
 Room Skill 包在 workspace 下以 `<workspaceRoot>/skills/` 的形式可见；由工具管理的激活状态则作为私有持久状态存储在 `~/.agentic_gpt/state/active-skills.json`。启动只使用当前私有状态根，不迁移旧目录；升级迁移见[运维指南](operations.md#私有状态布局迁移)。激活 Skill 不会运行它或授予权限；过期的活动条目会以 `missing` 状态继续显示，直到被显式停用。内置 `skill-installer` 指南默认处于激活状态，也可显式停用。
 
-安装任务持久化在 `~/.agentic_gpt/state/skill-installs/` 下；激活状态和安装记录均不绑定 `agentId`，启动不会导入旧 `<workspaceRoot>/state/` 或按 Agent ID 分隔的目录。安装记录保留终态七天（最多 100 条），且公开状态绝不暴露内联负载或 URL 查询/片段值。显式替换前，现有 Skill 会归档到 `skills/.archive/<id>/`。远程文件 URL 必须使用公开 HTTPS，并在 DNS 解析和重定向后重新验证；部署方可通过 `room.skills.allowedHosts` 收窄允许的主机。
+Skill 安装状态遵循以下规则：
+
+- 安装任务持久化在 `~/.agentic_gpt/state/skill-installs/` 下。
+- 激活状态和安装记录均不绑定 `agentId`；启动不会导入旧 `<workspaceRoot>/state/` 或按
+  Agent ID 分隔的目录。
+- 安装记录保留终态七天，最多 100 条；公开状态绝不暴露内联负载或 URL 查询/片段值。
+- 显式替换前，现有 Skill 会归档到 `skills/.archive/<id>/`。
+- 远程文件 URL 必须使用公开 HTTPS，并在 DNS 解析和重定向后重新验证；部署方可通过
+  `room.skills.allowedHosts` 收窄允许的主机。
 
 ## Room 会话引导包
 
@@ -304,9 +451,27 @@ MCP schema 仍是工具可用性和参数的事实来源。指南说明选择、
 
 完整的 YAML frontmatter 起始块（包括两个 `---` 分隔符）必须在前 1,048,576 字节（1 MiB）内结束；结束分隔符恰好位于该边界时也接受。此元数据上限独立于返回内容截断。超限的入口文件返回 `bootstrap_invalid`；超限的可选指南以 `guide_frontmatter_invalid` 排除。整个文件仍会被流式读取，以完成 UTF-8 验证、行计数、SHA-256 计算和包 revision 计算。
 
-每个文本资源都是 UTF-8 Markdown，`mediaType` 为 `text/markdown`。`sizeBytes` 和 `sha256` 描述完整原文件；`returnedSizeBytes` 描述实际返回的内容。入口文件上限为 65,536 字节，指南上限为 262,144 字节。有效但过大的文档会返回前缀，设置 `truncated: true`，并附带 `entrypoint_truncated` 或 `guide_truncated` 警告。截断时优先使用上限内最后一个完整换行；否则截到有效 UTF-8 边界。`totalLines` 和 `returnedThroughLine` 是从 1 开始的逻辑行数，`omittedFromLine` 标识首个省略行，`lastLineComplete` 用来区分完整行前缀与部分行前缀。
+每个文本资源都是 UTF-8 Markdown，`mediaType` 为 `text/markdown`：
 
-稳定的警告前缀包括 `entrypoint_truncated`、`guide_truncated`、`guides_truncated`、`guides_dir_symlink_ignored`、`guide_dir_entry_unreadable`、`guide_symlink_ignored`、`guide_unreadable`、`guide_non_utf8`、`guide_frontmatter_invalid`、`guide_metadata_invalid` 和 `guide_duplicate_id`。包级失败使用 `bootstrap_not_found`、`bootstrap_invalid` 或 `bootstrap_read_failed`；Room 路由还会返回 `room_not_active`、`room_state_conflict`、`room_bootstrap_timeout` 和 `room_bootstrap_read_timeout`。这些操作为只读、可安全重试、非破坏性，且不会触发具有后果的副作用。
+- `sizeBytes` 和 `sha256` 描述完整原文件；`returnedSizeBytes` 描述实际返回的内容。
+- 入口文件上限为 65,536 字节，指南上限为 262,144 字节。
+- 有效但过大的文档会返回前缀，设置 `truncated: true`，并附带 `entrypoint_truncated`
+  或 `guide_truncated` 警告。
+- 截断时优先使用上限内最后一个完整换行；否则截到有效 UTF-8 边界。
+- `totalLines` 和 `returnedThroughLine` 是从 1 开始的逻辑行数，`omittedFromLine` 标识首个
+  省略行，`lastLineComplete` 用来区分完整行前缀与部分行前缀。
+
+错误和警告分为三组：
+
+- 稳定的警告前缀包括 `entrypoint_truncated`、`guide_truncated`、`guides_truncated`、
+  `guides_dir_symlink_ignored`、`guide_dir_entry_unreadable`、`guide_symlink_ignored`、
+  `guide_unreadable`、`guide_non_utf8`、`guide_frontmatter_invalid`、`guide_metadata_invalid`
+  和 `guide_duplicate_id`。
+- 包级失败使用 `bootstrap_not_found`、`bootstrap_invalid` 或 `bootstrap_read_failed`。
+- Room 路由还会返回 `room_not_active`、`room_state_conflict`、`room_bootstrap_timeout` 和
+  `room_bootstrap_read_timeout`。
+
+这些操作为只读、可安全重试、非破坏性，且不会触发具有后果的副作用。
 
 MCP 工具为 `room.bootstrap` 和 `room.bootstrap.read`。对应的 GPT Actions 路由是 `POST /v1/room/bootstrap` 和 `POST /v1/room/bootstrap/read`，operation ID 为 `roomBootstrap` 和 `roomBootstrapRead`。两个接口都限定于 Room，不接收 `agentId`。
 
@@ -327,13 +492,25 @@ GET  /v1/agents/{agentId}/events?connectionId=...
 POST /v1/agents/{agentId}/messages?connectionId=...
 ```
 
-WebSocket 与 HTTP/SSE 对请求/响应式 `HubCommand` 消息使用相同的可靠确认/重放语义。Hub 发送的命令封套包含 `eventId`、`runId`、`requestId`、`commandHash` 和原始 `HubCommand`。Agent 会先将已接受命令写入本地传输账本，再发送 `TransportAck`；命令结果带有 `runId`，即使原连接已过期，只要 `agentId`、`runId` 和 `requestId` 匹配，仍会作为迟到结果接受。
+WebSocket 与 HTTP/SSE 对请求/响应式 `HubCommand` 消息使用相同的可靠确认/重放语义。
+Hub 发送的命令封套包含 `eventId`、`runId`、`requestId`、`commandHash` 和原始
+`HubCommand`。Agent 会先将已接受命令写入本地传输账本，再发送 `TransportAck`。命令结果
+带有 `runId`；即使原连接已过期，只要 `agentId`、`runId` 和 `requestId` 匹配，仍会作为
+迟到结果接受。
+
 `ConfirmationRequest` 不是带有运行 ID 的命令，也不携带 `runId`。Hub 确认操作的所有权由已捕获的 `(agentId, connectionId, requestId, sender)` 元组确定：回调会针对该连接/请求及捕获的投递目标解决一项 claim；它不会只依据 Agent ID 重新选择发送方，也不会臆造运行身份。
+
 当前连接被替换或移除时，若仍有未解决的确认请求，系统会产生一次终态 `ProviderUnavailable` claim（原因是 `provider_unavailable`）；当该传输可写时，会在关闭旧流之前将其发送到捕获的 sender。回调、确认超时、发布失败、连接替换和断开会竞争解决同一 claim，因此都不能再次发出终态决策或重新选择 sender。如果捕获的 sender 已断开，Agent 的断开排空行为仍是后备方案；Hub 不承诺通过已失效的传输投递。
 
 有界的 Hub/HTTP/MCP 等待超时只会结束本地等待者，不会取消远程执行。即使调用方已收到超时且不再有等待者，只要迟到的 `TransportAck`、`TransportRunStatus` 或 `Response` 匹配，仍可能推进已持久化的运行回执。只有已证实的 channel-send 失败才使用 `not_sent`，且该状态不会重放；超时或缺少 ACK 不属于 `not_sent`。
 
-本契约涵盖的 Hub 传输回执状态包括 `created`、`dispatched`、`acked`、`started`、`running`、`failed`、`unknown`、`completed`、`timeout_waiting_result` 和 `not_sent`；这并非 AgentReport 或 Process 状态的完整清单。`sent_no_ack`、`acked_running`、`wait_expired`、`remote_unknown` 和 `cancel_requested` 等词汇用于描述观察结果或调用方状态，并不是额外的 wire 状态或持久化状态。这里不会引入 `cancel_requested` 传输状态。
+本契约涵盖的 Hub 传输回执状态包括 `created`、`dispatched`、`acked`、`started`、
+`running`、`failed`、`unknown`、`completed`、`timeout_waiting_result` 和 `not_sent`。
+这并非 AgentReport 或 Process 状态的完整清单。
+
+`sent_no_ack`、`acked_running`、`wait_expired`、`remote_unknown` 和 `cancel_requested` 等词汇
+用于描述观察结果或调用方状态，并不是额外的 wire 状态或持久化状态。这里不会引入
+`cancel_requested` 传输状态。
 
 两种传输都采用相同的当前连接代际准入规则。`Hello`、`Heartbeat`、`ProcessUpdate`、`RunReport` 和 `ConfirmationRequest` 都是仅允许当前连接处理的生命周期消息：只有 Agent 的最新连接可以更新元数据、进程缓存、报告、最近活动状态、确认准入或 Room 租约。过期 WebSocket 消息会被处理器拒绝，已退役的流会收到 `Close`；过期 HTTP/SSE 消息会以 `409 stale_connection` 拒绝。本地 Agent 应停止该代际对应的 writer。
 
@@ -341,7 +518,16 @@ WebSocket 与 HTTP/SSE 对请求/响应式 `HubCommand` 消息使用相同的可
 
 每个 SSE 连接都必须使用全新且非空的 `connectionId`；同一个当前 ID 不能标识第二条流。省略 `connectionId` 时，Hub 会生成新的 ID。显式传入空 ID 会返回 `400 invalid_connection_id`；重复使用当前 ID 会返回 `409 connection_id_in_use`。替换成功后会关闭旧流。这些 ID 在 agent-secret 身份验证之后用于标识连接代际，不是独立的对端身份验证机制。
 
-V1 中，`Hello`、`Heartbeat`、`HeartbeatAck`、确认消息和 `ProcessUpdate` 仍是尽力而为的生命周期消息。`process.exec`、`process.batch`、`process.read`、`process.list`、`process.cancel` 以及 `event.list`、`event.get`、`event.mark` 是可靠的请求/响应命令；私有 `event.settle` 用于响应事件仲裁反馈。`Hello.bootGeneration` 变更会使缓存中的活动进程变为 `unknown_after_restart`；终态进程仍予保留，且不会重放副作用。
+V1 消息分为以下两类：
+
+- `Hello`、`Heartbeat`、`HeartbeatAck`、确认消息和 `ProcessUpdate` 仍是尽力而为的生命周期
+  消息。
+- `process.exec`、`process.batch`、`process.read`、`process.list`、`process.cancel` 以及
+  `event.list`、`event.get`、`event.mark` 是可靠的请求/响应命令；私有 `event.settle` 用于响应
+  事件仲裁反馈。
+
+`Hello.bootGeneration` 变更会使缓存中的活动进程变为 `unknown_after_restart`；终态进程仍予
+保留，且不会重放副作用。
 
 Agent 重启时，传输账本是命令/结果的持久权威来源：绑定所有者的已完成记录可以重新发送匹配结果；绑定所有者的已接受记录可以从已存储命令恢复；没有完成结果的 started/running 记录会变为 `unknown`，而不会重放副作用。claim 会被锁定并绑定到显式的 `agentId`；其他所有者不能接管该记录。旧的无所有者记录继续保持 `LegacyUnowned`：不会自动协调、执行，也不会用于披露结果。恢复操作须由运维人员检查保留的原始记录和更新的所有者绑定证据；绝不能为了让启动通过而删除去重证据。
 

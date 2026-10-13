@@ -10,7 +10,14 @@
 bash scripts/release-preflight.sh
 ```
 
-该[预检脚本](../../scripts/release-preflight.sh)不会创建 tag、构建 Linux 发行包或发布 GitHub Release；它会依次检查格式（`cargo fmt --all -- --check`）、检查并测试 Rust 工作区、构建 `agentic-gpt` 与 `agentic-gpt-hub`，再运行 OpenAPI schema 和真实进程的跨端契约检查。Python 环境默认放在 `target/contract-venv`：环境不存在时创建虚拟环境；无论新建还是复用，都会安装 `PyYAML` 与 `jsonschema[format]>=4.25,<5`。
+该[预检脚本](../../scripts/release-preflight.sh)不会创建 tag、构建 Linux 发行包或发布 GitHub Release。它会依次执行：
+
+1. 检查格式（`cargo fmt --all -- --check`）。
+2. 检查并测试 Rust 工作区。
+3. 构建 `agentic-gpt` 与 `agentic-gpt-hub`。
+4. 运行 OpenAPI schema 和真实进程的跨端契约检查。
+
+Python 环境默认放在 `target/contract-venv`：环境不存在时创建虚拟环境；无论新建还是复用，都会安装 `PyYAML` 与 `jsonschema[format]>=4.25,<5`。
 
 若当前已检出候选标签对应的提交，可运行以下非发布检查：
 
@@ -38,7 +45,9 @@ cargo install cross --git https://github.com/cross-rs/cross
 ./scripts/dist-linux.sh
 ```
 
-脚本对 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu` 执行工作区的 release 构建，并将三个二进制复制到各自 `dist/<target>/` 目录：`agentic-gpt`、`agentic-gpt-hub`、`agentic-browser-host`。此命令会编译并写入或覆盖本地 `dist/` 产物，但不会创建 tag 或发布 GitHub Release。
+脚本对 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu` 执行工作区的 release 构建，并将三个二进制复制到各自 `dist/<target>/` 目录：`agentic-gpt`、`agentic-gpt-hub`、`agentic-browser-host`。
+
+此命令会编译并写入或覆盖本地 `dist/` 产物，但不会创建 tag 或发布 GitHub Release。
 
 [`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述三个二进制，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布两个压缩包与校验和文件。
 
@@ -58,6 +67,10 @@ rust_version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import
 
 ## CI 覆盖范围与证据边界
 
-[`ci.yml`](../../.github/workflows/ci.yml) 对 `main` 的推送和以其为目标的 pull request 运行 `fmt`、工作区 `check`、严格 Clippy（`cargo clippy --workspace --all-targets -- -D warnings`）、工作区测试、Agent/Hub 构建和跨端契约检查。CI 还会在隔离 HOME 中运行统一迁移脚本的 Python 集成测试。严格 Clippy 属于 CI 门禁；本地发布预检与标签发布工作流都**不运行 Clippy**，因此预检成功不能证明严格 Clippy 已通过，也不能据此判断是否存在警告。
+[`ci.yml`](../../.github/workflows/ci.yml) 对 `main` 的推送和以其为目标的 pull request 运行 `fmt`、工作区 `check`、严格 Clippy（`cargo clippy --workspace --all-targets -- -D warnings`）、工作区测试、Agent/Hub 构建和跨端契约检查。CI 还会在隔离 HOME 中运行统一迁移脚本的 Python 集成测试。
 
-发布工作流检查标签提交的格式、编译、测试、Agent/Hub 构建、标签与 Cargo 版本配对及跨端契约，再构建两个 Linux 目标的包。其结果只证明这些步骤在该次运行中通过；不证明 ARM 上的实际运行行为、外部 Actions 导入、Console 构建或生产部署。请以对应工作流运行记录为准，不将本指南或本地预检视为这些独立范围的验证。
+严格 Clippy 属于 CI 门禁；本地发布预检与标签发布工作流都**不运行 Clippy**，因此预检成功不能证明严格 Clippy 已通过，也不能据此判断是否存在警告。
+
+发布工作流检查标签提交的格式、编译、测试、Agent/Hub 构建、标签与 Cargo 版本配对及跨端契约，再构建两个 Linux 目标的包。
+
+其结果只证明这些步骤在该次运行中通过；不证明 ARM 上的实际运行行为、外部 Actions 导入、Console 构建或生产部署。请以对应工作流运行记录为准，不将本指南或本地预检视为这些独立范围的验证。

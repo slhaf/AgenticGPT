@@ -22,10 +22,13 @@ python3 scripts/check_contract_parity.py
 `target/debug/agentic-gpt` 和 `target/debug/agentic-gpt-hub`；
 `--agent-bin PATH` 和 `--hub-bin PATH` 用于指定二进制文件。它会启动隔离的
 loopback/私有主目录进程并在结束时清理；schema 验证与实时行为是两项独立要求。
+
 该检查序列用于验证包含 Agent 事件工具在内的契约；本文不表示 Hub parity 门禁已通过。
 通过一致性门禁不能替代前面的严格 Clippy 检查。
 
-真实 Agent 集成测试为每个夹具设置短且唯一的临时 `HOME`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`XDG_RUNTIME_DIR` 和 `TMPDIR`，子进程显式继承这些目录；不得通过修改测试进程的全局 `HOME` 隔离并行用例。runtime/socket 仍位于 `HOME/.agentic_gpt/runtime/agent/<agentId>/`，完整套接字路径不得超过 100 字节，长度应按夹具主目录计算。清理时先停止并等待拥有状态的进程退出，再删除临时根；失败和提前返回也应执行清理。
+真实 Agent 集成测试为每个夹具设置短且唯一的临时 `HOME`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`XDG_RUNTIME_DIR` 和 `TMPDIR`，子进程显式继承这些目录；不得通过修改测试进程的全局 `HOME` 隔离并行用例。runtime/socket 仍位于 `HOME/.agentic_gpt/runtime/agent/<agentId>/`，完整套接字路径不得超过 100 字节，长度应按夹具主目录计算。
+
+清理时先停止并等待拥有状态的进程退出，再删除临时根；失败和提前返回也应执行清理。
 
 ## 私有状态布局迁移
 
@@ -40,7 +43,9 @@ python3 scripts/migrate-agentic.py --write
 
 统一脚本自动读取当前用户的 `~/.agentic_gpt/config.json`，仅接受 `--write`。不带参数时预览配置变更，并在临时目录复制、转换和验证旧状态；不替换配置或发布状态。预览会创建私有锁文件并清理临时副本。`--write` 在两项验证全部通过后迁移配置及状态。迁移 Process 数据库要求 Python 链接的 SQLite 版本至少为 3.35。配置策略转换见[确认与策略格式迁移](#确认与策略格式迁移)。
 
-脚本仅选择配置中当前 `agentId` 对应的旧 `~/.agentic_gpt/state/agent/<旧目录键>/`，复制支持的事件、Process 和 Skill 状态并转换数据库布局，保留原目录供回退检查。它不会扫描或合并其他 Agent 目录，也不导入 `<workspaceRoot>/state/`；旧 `jobs.sqlite3` 及未知文件保留在原处，不导入新 Process 数据库。新版根中已有任一受支持的状态对象或数据库 sidecar 时，脚本报告状态迁移跳过，不会覆盖或拼接新旧状态，配置迁移仍独立执行。没有当前身份的旧目录时也会报告跳过。启动过程本身不执行迁移；需要保留旧状态时，应在第一次启动新版 Agent 前执行脚本。
+脚本仅选择配置中当前 `agentId` 对应的旧 `~/.agentic_gpt/state/agent/<旧目录键>/`，复制支持的事件、Process 和 Skill 状态并转换数据库布局，保留原目录供回退检查。它不会扫描或合并其他 Agent 目录，也不导入 `<workspaceRoot>/state/`；旧 `jobs.sqlite3` 及未知文件保留在原处，不导入新 Process 数据库。
+
+新版根中已有任一受支持的状态对象或数据库 sidecar 时，脚本报告状态迁移跳过，不会覆盖或拼接新旧状态，配置迁移仍独立执行。没有当前身份的旧目录时也会报告跳过。启动过程本身不执行迁移；需要保留旧状态时，应在第一次启动新版 Agent 前执行脚本。
 
 脚本检查运行锁和当前身份的本地 socket；这些检查不能替代运维人员停止其他身份实例。迁移后再启动 Agent，并通过事件、Process 和 Skill 接口核对结果。迁移成功输出只证明脚本处理完成，不证明远程连接、tunnel 或外部副作用恢复。源目录选择、转换明细和回滚限制见[迁移指南](development/agent-state-migration.zh-CN.md)。
 
@@ -145,15 +150,23 @@ Standalone 还应确认：
 
 ### Process Bash 输入切换检查
 
-部署采用新 Process 输入契约的配对 Agent/Hub 工件时，应先更新所有调用方：`process.exec` 使用原始 `command` 脚本与可选 `cwd`；`process.batch` 的每项使用 `command`，批次级 `cwd` 可被元素覆盖。`program`、`args`、`workingDirectory` 不再是执行输入，客户端若需表达 argv，必须自行按 shell 规则显式引用参数并构造脚本。保留在历史 `ProcessInfo` 中的旧元数据不构成输入兼容性。此次切换不改写数据库；旧未完成记录不会重放，已完成记录保留其历史结果。不要把此部署说明解释为发布或推送已发生。
+部署采用新 Process 输入契约的配对 Agent/Hub 工件时，应先更新所有调用方：`process.exec` 使用原始 `command` 脚本与可选 `cwd`；`process.batch` 的每项使用 `command`，批次级 `cwd` 可被元素覆盖。`program`、`args`、`workingDirectory` 不再是执行输入，客户端若需表达 argv，必须自行按 shell 规则显式引用参数并构造脚本。
 
-对已授权的本地实例，可用只含字面量 `printf` 的无副作用脚本做定向冒烟，例如 `process.exec` 的 `command` 为 `printf '%s\n' 'process smoke'`。确认进程退出码为 0 时状态为 `completed`，再通过 `process.read` 检查捕获输出；非零退出码应为 `failed` 并保留实际退出码。读取时分别观察执行终态与 `captureStatus`/EOF；`waitSeconds` 只结束本次等待，不取消执行。需验证取消时另启动获准的长时无害任务并显式调用 `process.cancel`：只有 `process_group_sigterm_observed` 或 `process_group_sigkill_observed` 表示观察到对应停止信号；unknown、detached 或缺少证据不能作为停止证明。普通同组管道和后台子进程属于目标范围；不要将该检查外推到脱离进程组的后代。
+保留在历史 `ProcessInfo` 中的旧元数据不构成输入兼容性。此次切换不改写数据库；旧未完成记录不会重放，已完成记录保留其历史结果。不要把此部署说明解释为发布或推送已发生。
+
+对已授权的本地实例，可用只含字面量 `printf` 的无副作用脚本做定向冒烟，例如 `process.exec` 的 `command` 为 `printf '%s\n' 'process smoke'`。确认进程退出码为 0 时状态为 `completed`，再通过 `process.read` 检查捕获输出；非零退出码应为 `failed` 并保留实际退出码。读取时分别观察执行终态与 `captureStatus`/EOF；`waitSeconds` 只结束本次等待，不取消执行。
+
+需验证取消时另启动获准的长时无害任务并显式调用 `process.cancel`：只有 `process_group_sigterm_observed` 或 `process_group_sigkill_observed` 表示观察到对应停止信号；unknown、detached 或缺少证据不能作为停止证明。普通同组管道和后台子进程属于目标范围；不要将该检查外推到脱离进程组的后代。
 
 Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按[配置说明](configuration.md)核对 Default/Disabled/显式路径以及文件所有权和可写性。策略预检针对提交脚本，不审计 init 文件，且配置快照不冻结文件内容或可执行身份。相对 init 路径若随模型可选 cwd 或可写位置变化，属于信任风险；优先使用用户所有、受保护的绝对路径。此为运维建议，不是新增执行限制。
 
 ### WP1 收尾证据边界
 
-当前 WP1 收尾证据范围有限：最终清理阶段通过了 `cargo fmt --all -- --check`、集成的 `cargo test -p agentic-gpt-hub` 套件，以及无警告的 `cargo build -p agentic-gpt-hub`。一次隔离的 Hub HTTP/SSE 冒烟检查使用模拟 Agent 对等端，覆盖了六种确认、替换、回调、超时和迟到回执场景。此后，针对同一临时 SQLite 数据库执行的真实 Hub 重启保留了两条状态为 `completed` 的 `/v1/runs` 记录和 `sessions[]`；`/v1/info` 则报告 `pendingRequestCount`、`pendingConfirmationCount` 和 `cachedJobCount` 均为零。这只证明 Hub 侧的回执/会话清理和保留行为；没有执行真实 Agent 或传输账本重启，也不能证明历史路线图中的所有场景都完成了端到端验证。外部 ntfy 提供方行为仍未验证；本地/mock 回调路径不能作为等价证据。
+当前 WP1 收尾证据范围有限：最终清理阶段通过了 `cargo fmt --all -- --check`、集成的 `cargo test -p agentic-gpt-hub` 套件，以及无警告的 `cargo build -p agentic-gpt-hub`。一次隔离的 Hub HTTP/SSE 冒烟检查使用模拟 Agent 对等端，覆盖了六种确认、替换、回调、超时和迟到回执场景。
+
+此后，针对同一临时 SQLite 数据库执行的真实 Hub 重启保留了两条状态为 `completed` 的 `/v1/runs` 记录和 `sessions[]`；`/v1/info` 则报告 `pendingRequestCount`、`pendingConfirmationCount` 和 `cachedJobCount` 均为零。
+
+这只证明 Hub 侧的回执/会话清理和保留行为；没有执行真实 Agent 或传输账本重启，也不能证明历史路线图中的所有场景都完成了端到端验证。外部 ntfy 提供方行为仍未验证；本地/mock 回调路径不能作为等价证据。
 
 ## Standalone 部署检查
 
@@ -169,6 +182,7 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 实时更新/重启边界适用于 Standalone、Local 和 Hub 连接模式下的 Agent worker，
 并非 Standalone 独有。Agent worker 运行时，对 `policy`、`limits`、`mcpServers`、
 `toolsets.enabled` 和 `events` 的有效变更会以原子方式应用于后续准入、调用和工具发现。
+
 `events` 配置变更影响后续 process/skill-install 准入；已准入的 process 和安装任务保留准入时的配置快照。
 若 `workspaceRoot` 未变更，`pathPolicy` 也会重载。候选配置若变更
 `workspaceRoot`，则旧 `workspaceRoot` 和 `pathPolicy` 会作为一个原子配置对继续
@@ -177,6 +191,7 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 对于 Standalone HTTP MCP 监听器，应通过受控变更验证协调器处理
 `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` 以及 bearer token
 引用或其解析值。启用/禁用和端点变更会在不重启 worker 的情况下协调生效。
+
 监听器身份发生变化时，会关闭有状态 HTTP session 并丢弃监听器本地 OAuth 状态；
 token 变更则会就地更新直接身份验证，并在吊销 OAuth 记录的同时保留现有 session。
 凭据无法解析时会 fail closed；候选配置无效时保留上一个有效监听器；端口绑定冲突
@@ -186,6 +201,7 @@ token 变更则会就地更新直接身份验证，并在吊销 OAuth 记录的�
 tunnel/客户端设置、上报模式和 Skill 安装并发度等由启动时拥有的字段
 发生变化时，需要重启。共享 watcher 会记录日志
 `config changes require restart; fields=...`，包含已变更字段名，但绝不包含密钥值。
+
 Standalone supervisor 还会发出 `restart_required`；Hub 模式没有 supervisor 事件。
 编辑文件不会切换现有子进程树。实时启用 Room 命名空间时使用当前活动 Room 根目录；
 需要重启的 Room 配置变更在重启前不会移动该根目录。
@@ -193,7 +209,9 @@ Standalone supervisor 还会发出 `restart_required`；Hub 模式没有 supervi
 `agentic-gpt local` 命令是仅所有者可用的 Unix MCP 客户端，并保留 `local:` 审计来源。
 它不同于 `agentic-gpt tmux` 本地管理员 CLI；后者只暴露四个命令：`list`、
 `attach`、`create` 和 `close`（`RequestContext` 中的操作名称为 `tmux.listSessions`、
-`tmux.attach`、`tmux.createSession` 和 `tmux.closeSession`）。这些 CLI 调用使用
+`tmux.attach`、`tmux.createSession` 和 `tmux.closeSession`）。
+
+这些 CLI 调用使用
 `localadmin:` 来源，不增加远程审批语义，也不伪造 AppState。其他接入来源仍为
 `tunnel:`、`http:` 和 `hub:`。
 
@@ -205,7 +223,10 @@ Standalone supervisor 还会发出 `restart_required`；Hub 模式没有 supervi
 3. 确认 `/v1/agents` 显示预期的、具备命令能力且在线的 Agent。
 4. 通过 `/v1/process/exec` 运行一条无害命令。
 5. 通过 `GET /v1/process` 检查进程元数据；从 `GET /v1/process/{processId}/read` 读取输出或状态，并通过 `POST /v1/process/{processId}/cancel` 请求取消。
-   read 的 `waitSeconds` 默认 5 秒、上限 30 秒、0 表示立即；`maxBytes` 省略时使用 `limits.processResponseBytes`（默认 8192 字节），显式范围为 4096..1048576。cursor 非消费且不共享，仅用于 command/skill；`captureStatus`、`gap`、`eof` 和 `hasMore` 由读取响应报告。MCP CallToolResult 使用 `pending`/`included`/`deferred`/`unavailable`/`not_retained`，完整对象不切碎。
+   - read 的 `waitSeconds` 默认 5 秒、上限 30 秒、0 表示立即。
+   - `maxBytes` 省略时使用 `limits.processResponseBytes`（默认 8192 字节），显式范围为 4096..1048576。
+   - cursor 非消费且不共享，仅用于 command/skill；`captureStatus`、`gap`、`eof` 和 `hasMore` 由读取响应报告。
+   - MCP CallToolResult 使用 `pending`/`included`/`deferred`/`unavailable`/`not_retained`，完整对象不切碎。
 6. 验证 `/mcp`；契约发生变化时刷新 GPT Actions schema。
 7. 如果启用了 Standalone 上报，确认仅上报的连接会拒绝 Hub 执行请求。
 
@@ -231,7 +252,9 @@ test ! -e "$HUB_DB-wal" || cp -a "$HUB_DB-wal" "$BACKUP_DIR/hub.sqlite3-wal"
 test ! -e "$HUB_DB-shm" || cp -a "$HUB_DB-shm" "$BACKUP_DIR/hub.sqlite3-shm"
 ```
 
-如果存在，也应复制 `<workspaceRoot>/.agentic-gpt-audit.jsonl`，以及绑定所有者的 `~/.agentic_gpt/transport-runs.jsonl` 和其 `.lock`、`.recovery`、`.backup` 证据。如果 `HOME` 或 Agent home 被重定位，应使用部署中的实际 `agentic_home` 路径；绝不要从 Hub 数据库推断传输状态。
+如果存在，也应复制 `<workspaceRoot>/.agentic-gpt-audit.jsonl`，以及绑定所有者的 `~/.agentic_gpt/transport-runs.jsonl` 和其 `.lock`、`.recovery`、`.backup` 证据。
+
+如果 `HOME` 或 Agent home 被重定位，应使用部署中的实际 `agentic_home` 路径；绝不要从 Hub 数据库推断传输状态。
 5. **部署并重新连接。** 将 Hub 和 Agent 二进制作为一对替换，保留现有配置路径，并沿用现有参数和密钥引用重启。首先重新连接具备命令能力的 Room Agent；Normal、ReportingOnly、过期或未就绪的连接不得成为 Room 目标。不要添加版本字段、feature flag、别名或双重执行路径。
 6. **验证当前契约。** 确认 `GET /v1/info` 和 `/v1/agents`；随后检查 Full MCP `tools/list` 中存在当前九个 Room 名称（且没有已退役名称），Coordinator `tools/list` 中不存在这些名称。通过已验证身份的 HTTP API，使用当前 camelCase DTO 请求体且不带 `agentId`，分别调用 `/v1/room/diary/active`、`/v1/room/diary/read`、`/v1/room/notebook/recent`、`/v1/room/notebook/search`、`/v1/room/notebook/read`、`/v1/room/state/list`、`/v1/room/state/read`、`/v1/room/maintenance/status` 和 `/v1/room/maintenance/submit`。检查缺少必需 JSON 字段时提取器返回 422 `text/plain`、语义验证错误返回 400 JSON、没有活动 Room 时返回 404、租约冲突返回 409、传输等待超时返回 504。确认成功读取的内容由 Agent 所有且有界；Hub 回执只是有界结果投影。
 7. **验证维护所有权。** 仅在可丢弃或明确获准的 Room 仓库上，通过 `room.maintenance.submit` 以 `local` 模式提交一项已文档化的语义 slot/payload，并确认返回的状态、revision、请求残留清理和 Git 变更都限于声明目标。可丢弃的本地冒烟检查可以使用现有 Notebook payload 形状，例如：
@@ -282,8 +305,13 @@ Agent 进程历史持久存储在 `~/.agentic_gpt/state/process.sqlite3` 中，�
 
 Agent 配置写入会在 `backups/` 下保留有界私有备份，并使用 setup journal 替换 secret 引用。如果 journal 中的哈希或文件类型不对应任何预期的变更前/变更后状态，启动会 fail closed 并报告恢复冲突。停止 Agent，保留 journal 和当前文件，并从经过验证的副本解决冲突；不要删除 journal、强行选择一侧，也不要在诊断信息中暴露 secret 内容。
 
-传输账本绑定所有者并使用文件锁。记录损坏或最后一行被截断时会 fail closed，并将原始字节保存在私有 `.recovery` sidecar 中；压缩可能会在 `.backup` 中留下先前账本。保留这些原始文件以供诊断，不要为了让启动通过而丢弃或截断账本。旧的无所有者记录继续保持 `LegacyUnowned`：不会自动协调、执行，也不会用于披露结果。恢复须由运维人员检查保留的原始记录和更新的所有者绑定证据；绝不能为绕过所有权错误而删除或截断去重证据。Agent 审计 JSONL 采用尽力写入，并在达到 8 MiB 时轮转，保留当前文件和一个 `.1` 备份。轮转或写入失败意味着审计记录丢失，不能证明命令、结果或副作用不存在。任何恢复之后，重新连接拥有这些状态的进程并检查进程状态；没有独立终止证据时，不得将 `unknown_after_restart`、`unknown`、`detached` 或本地等待者超时转成 `cancelled`。
+传输账本绑定所有者并使用文件锁。记录损坏或最后一行被截断时会 fail closed，并将原始字节保存在私有 `.recovery` sidecar 中；压缩可能会在 `.backup` 中留下先前账本。保留这些原始文件以供诊断，不要为了让启动通过而丢弃或截断账本。
 
+旧的无所有者记录继续保持 `LegacyUnowned`：不会自动协调、执行，也不会用于披露结果。恢复须由运维人员检查保留的原始记录和更新的所有者绑定证据；绝不能为绕过所有权错误而删除或截断去重证据。
+
+Agent 审计 JSONL 采用尽力写入，并在达到 8 MiB 时轮转，保留当前文件和一个 `.1` 备份。轮转或写入失败意味着审计记录丢失，不能证明命令、结果或副作用不存在。
+
+任何恢复之后，重新连接拥有这些状态的进程并检查进程状态；没有独立终止证据时，不得将 `unknown_after_restart`、`unknown`、`detached` 或本地等待者超时转成 `cancelled`。
 
 ## v0.9 验收清单（历史记录）
 
