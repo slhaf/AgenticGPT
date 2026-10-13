@@ -34,13 +34,13 @@ loopback/私有主目录进程并在结束时清理；schema 验证与实时行�
 升级旧布局时，先停止使用该 `HOME` 的所有 Agent（包括 supervisor、worker 和本地服务），保留旧目录，再从仓库运行：
 
 ```bash
-python3 scripts/migrate-agent-state.py --config "$HOME/.agentic_gpt/config.json" --dry-run
-python3 scripts/migrate-agent-state.py --config "$HOME/.agentic_gpt/config.json"
+python3 scripts/migrate-agentic.py
+python3 scripts/migrate-agentic.py --write
 ```
 
-`--config` 省略时读取 `$HOME/.agentic_gpt/config.json`；目标始终由本次命令的 `HOME` 决定，自定义配置路径不会改变目标 home。迁移 Process 数据库要求 Python 链接的 SQLite 版本至少为 3.35。`--dry-run` 会在临时目录复制、转换并验证，但不发布新状态。
+统一脚本自动读取当前用户的 `~/.agentic_gpt/config.json`，仅接受 `--write`。不带参数时预览配置变更，并在临时目录复制、转换和验证旧状态；不替换配置或发布状态。预览会创建私有锁文件并清理临时副本。`--write` 在两项验证全部通过后迁移配置及状态。迁移 Process 数据库要求 Python 链接的 SQLite 版本至少为 3.35。配置策略转换见[确认与策略格式迁移](#确认与策略格式迁移)。
 
-脚本仅选择配置中当前 `agentId` 对应的旧 `~/.agentic_gpt/state/agent/<旧目录键>/`，复制支持的事件、Process 和 Skill 状态并转换数据库布局，保留原目录供回退检查。它不会扫描或合并其他 Agent 目录，也不导入 `<workspaceRoot>/state/`；旧 `jobs.sqlite3` 及未知文件保留在原处，不导入新 Process 数据库。新版根中已有任一受支持的状态对象或数据库 sidecar 时，脚本返回 `skip`，不会覆盖或拼接新旧状态。启动过程本身不执行迁移；需要保留旧状态时，应在第一次启动新版 Agent 前执行脚本。
+脚本仅选择配置中当前 `agentId` 对应的旧 `~/.agentic_gpt/state/agent/<旧目录键>/`，复制支持的事件、Process 和 Skill 状态并转换数据库布局，保留原目录供回退检查。它不会扫描或合并其他 Agent 目录，也不导入 `<workspaceRoot>/state/`；旧 `jobs.sqlite3` 及未知文件保留在原处，不导入新 Process 数据库。新版根中已有任一受支持的状态对象或数据库 sidecar 时，脚本报告状态迁移跳过，不会覆盖或拼接新旧状态，配置迁移仍独立执行。没有当前身份的旧目录时也会报告跳过。启动过程本身不执行迁移；需要保留旧状态时，应在第一次启动新版 Agent 前执行脚本。
 
 脚本检查运行锁和当前身份的本地 socket；这些检查不能替代运维人员停止其他身份实例。迁移后再启动 Agent，并通过事件、Process 和 Skill 接口核对结果。迁移成功输出只证明脚本处理完成，不证明远程连接、tunnel 或外部副作用恢复。源目录选择、转换明细和回滚限制见[迁移指南](development/agent-state-migration.zh-CN.md)。
 
@@ -350,23 +350,22 @@ agentic-gpt local call mcp.batch \
 运行时不自动转换旧格式；命令及路径策略采用显式 defaultAction 和字符串模式数组，固定 deny > confirm > allow 优先级。
 请求调用方改用 acquireConfirmation，具体范围和默认值见[配置说明](configuration.zh-CN.md#单次主动确认)。下游 MCP 审批合同保持原有语义。
 
-仓库提供手动脚本 [migrate-confirmation-policy.py](../scripts/migrate-confirmation-policy.py)。先停止不遵守配置锁的编辑器及其他写者，再明确指定输入文件：
+仓库提供手动脚本 [migrate-agentic.py](../scripts/migrate-agentic.py)，自动读取当前用户的 `~/.agentic_gpt/config.json`。先停止不遵守配置锁的编辑器及其他写者：
 
 ```bash
-# 默认只预览授权相关变更，并隐藏命令参数；不输出 Hub／tunnel／MCP 密钥或其他配置内容。
-python3 scripts/migrate-confirmation-policy.py /path/to/old-config.json --home /home/replace-user
-# 输出新文件；已有目标先备份。核对预览中的假设和冲突后再执行。
-python3 scripts/migrate-confirmation-policy.py /path/to/old-config.json --home /home/replace-user --output /path/to/new-config.json
-# 或备份后原子替换明确指定的输入。
-python3 scripts/migrate-confirmation-policy.py /path/to/old-config.json --home /home/replace-user --write
+# 预览配置变更并验证旧状态，隐藏命令参数及其他配置凭据。
+python3 scripts/migrate-agentic.py
+# 核对预览中的假设和冲突后，备份并迁移配置及状态。
+python3 scripts/migrate-agentic.py --write
 ```
 
-脚本不读取默认 HOME，不自动查找配置，也不调用 Agent runtime。旧路径含 `~` 或缺失的历史预设需要 `--home`；
-缺少 workspaceRoot 时可用 `--workspace /path/to/workspace`，否则使用显式 --home 下的历史初始化工作区并报告假设。
-使用环境变量或相对根路径的配置必须先明确其具体绝对路径。未知／混合规则形状、重复 JSON 字段及符号链接配置文件会失败。
+同一脚本同时迁移配置和私有状态，仅接受 `--write`，无需指定输入、输出、HOME 或工作区。旧路径中的 `~` 使用当前用户 HOME；
+已有 workspaceRoot 沿用原值，未设置时按 Agentic 默认目录 `~/.agentic_gpt/workspace` 补齐并报告。
+脚本不调用 Agent runtime。使用环境变量或相对根路径的配置必须先明确其具体绝对路径。
+未知／混合规则形状、重复 JSON 字段及符号链接配置文件会失败。
 缺失的旧稀疏策略只在此手动脚本内按历史初始化预设恢复，所有补齐均出现在报告中；新运行时加载不恢复这些历史预设。
 
-默认预览中，旧命令规则只显示规则索引、程序名称和参数数量，新命令模式显示 `[redacted]`；冲突引用规则索引及内置规则名称，不输出命令参数。参数可能包含凭据，因此检查完整规则时先用 `--output` 生成权限为 `0600` 的私有配置文件，再在本地审阅该文件，不将其内容贴入日志。
+默认预览中，旧命令规则只显示规则索引、程序名称和参数数量，新命令模式显示 `[redacted]`；冲突引用规则索引及内置规则名称，不输出命令参数。参数可能包含凭据；写入后可在本地审阅权限为 `0600` 的配置文件，不将其内容贴入日志。
 
 脚本将旧 argv 前缀转换为转义后的字面参数模式，并追加 `**`；按旧 profile 将原内置 confirm/deny 写成显式规则。
 旧配置 allow／confirm 曾可覆盖内置规则，迁移后固定优先级可能重新要求确认或拒绝；报告列出这些冲突，须人工决定是否调整显式规则。
@@ -377,9 +376,13 @@ sandbox.readPaths/writePaths 从旧具体读取／写入根生成，不从全局
 路径策略与 OS 挂载是独立边界：拒绝模式不代表宿主目录从 sandbox namespace 消失，须复核挂载范围及实际执行用户权限。
 迁移不会依据全局策略通配符新增宿主根挂载，也不为 tmux、MCP 或 Browser 增加通用沙箱。
 
-实际写入会对规范化目标路径加同一把 `<目标>.config.lock` Linux `flock` 配置锁，与 Agent／配置 CLI 写者协调；持锁贯穿写前字节校验、备份、临时写入、原子替换和目录 fsync，关闭文件描述符时释放。锁文件使用 `0600`，拒绝符号链接或非普通文件；完成后保留锁文件，预览不创建锁。`--output` 只锁输出目标，`--write` 在持锁后再次核对输入字节；不遵守该锁的写者仍需先停止。
+实际写入会对规范化目标路径加同一把 `<目标>.config.lock` Linux `flock` 配置锁，与 Agent／配置 CLI 写者协调；持锁贯穿写前字节校验、备份、临时写入、原子替换和目录 fsync，关闭文件描述符时释放。锁文件使用 `0600`，拒绝符号链接或非普通文件；完成后保留锁文件；预览也持有配置锁、迁移锁及 Agent run 锁，临时状态副本在结束时清理。`--write` 在持锁后再次核对输入字节；不遵守该锁的写者仍需先停止。
 
-每次实际写入先创建权限为 0600 的 `.backup.<UTC时间>.<随机标识>.json` 备份，再在目标目录写临时文件并原子替换；
-失败会清理临时文件，已创建备份保留用于恢复。新输出文件也保留输入快照备份；已有输出则备份原输出。
+配置需要变更时，先创建权限为 0600 的 `.backup.<UTC时间>.<随机标识>.json` 备份，再在目标目录写临时文件并原子替换；
+失败会清理临时文件，已创建备份保留用于恢复。
 其他配置字段原样保留在输出，备份及输出可能包含凭据，应按私有配置保管。
 迁移后使用显式 `--config` 验证配置，在隔离 HOME 中做冒烟检查，再恢复部署；不要把真实 HOME 用作测试目录。
+
+### 合并迁移的失败处理
+
+配置转换和旧状态复制、转换、校验全部完成后才开始写入。状态目标已存在或旧目录不存在时，状态项报告跳过，不阻止配置迁移。普通写入异常、可处理的中断或 SIGTERM 会撤回本次发布的状态；若配置已替换但后续同步失败，也会尝试恢复原配置，备份保留。断电、强制终止或回滚本身失败时仍需检查配置和状态完整性，不能将下次状态跳过当作上次完整成功的证明。

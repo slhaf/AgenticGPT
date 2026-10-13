@@ -77,3 +77,16 @@
 - 最终验证：cargo test --workspace 518 passed/0 failed/1 ignored；cargo clippy --workspace --all-targets -- -D warnings、cargo fmt --all -- --check、git diff --check通过；Agent/Hub build与 live check_contract_parity.py PASS。
 - 补充真实迁移CLI检查：转换结果可加载，Python共享flock阻塞Rust config writer后释放完成；真实tmux最终binary smoke PASS；真实bwrap scope smoke PASS。
 - 完成隔离资源清理。未触发用户实际桌面动作、未执行真实配置迁移、未推送或发布；生产tunnel可执行传输和恢复partial-A/B interleaving仍维持现有gate明确限定，不宣称本次已复现。
+
+## 阶段 5：迁移入口简化
+- 删除 input、--output、--home、--workspace 参数及对应分支，仅保留 --write；使用 Path.home() 和标准 .agentic_gpt/config.json。
+- 同步运维说明；自定义 workspaceRoot 保留，未设置时沿用标准 workspace。
+- 隔离 CLI 冒烟通过：自动配置定位、只读预览、实际写入与原字节备份、0600 权限、HOME 展开、自定义/默认工作区、幂等重复运行、旧参数拒绝、配置不存在失败。所有临时 HOME 已清理，未读取或迁移真实用户配置。
+- Python AST 语法与 git diff --check 通过；本次只涉及 Python 迁移入口与文档，无 Rust 改动，未重复完整 Rust CI。
+
+## 阶段 6：统一迁移脚本
+- 新增单文件 scripts/migrate-agentic.py，删除两个旧入口，默认预览，仅 --write，自动读取标准配置/HOME；一起转换配置策略与当前 agentId 的私有状态。
+- 先完成全部转换验证，再发布状态和原子写配置；持有迁移/run/config 锁，原状态保留、配置变更备份。无旧状态或已有新状态仅跳过状态项。
+- 修复独立审查发现的写完配置后中断恢复缺口；外层提交区任何可捕获异常均尝试恢复配置并撤回本次状态，复审通过。
+- 新增 8 个⑤档真实文件/SQLite 集成回归，并接入 CI；隔离 HOME/XDG/TMP/D-Bus 下全部通过。Python AST 与 git diff --check 通过；无真实配置/状态读写，无 Rust 改动，不重复 Rust CI，也未推送或运行远端 CI。
+- 更新运维和私有状态迁移指南，所有当前文档旧入口引用已替换。
