@@ -30,6 +30,14 @@ The root Cargo workspace contains five Rust crates: `crates/agentic-gpt` (Linux 
 
 Use `rustfmt` defaults and idiomatic Rust naming: `snake_case` functions/modules, `PascalCase` types, and `SCREAMING_SNAKE_CASE` constants. Preserve camelCase JSON contracts through explicit Serde attributes. Kotlin uses four-space indentation, `PascalCase` types/composables, `camelCase` members, and lowercase package names under `work.slhaf.agentic.console`. Prefer shared code over duplicated platform implementations.
 
+## 工程纪律
+
+以解决当前问题为目标，不以流程完备、验证覆盖或工程产物的数量衡量工作质量。
+
+选择足够可靠且总成本最低的执行方式。额外的检查、实现与验证必须具有明确的任务收益；不要仅因“更稳妥”“更完整”或“符合最佳实践”而增加步骤或建设配套机制。
+
+检查应围绕会影响后续行动的具体问题展开。已有结果足以支持当前结论时，接受该结论并继续推进或结束，不重复确认，也不为排除缺乏依据的可能性继续扩大工作。
+
 ## 文档
 
 新建、修改或审查文档，以及修改面向模型的工具定义前，先阅读 [`docs/documentation-standard.md`](docs/documentation-standard.md)；该文件也是工具定义写法的规范。新增文档使用中文；修改现有中英文版本时，保持两者的功能事实一致。
