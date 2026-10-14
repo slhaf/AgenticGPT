@@ -49,7 +49,7 @@ cargo install cross --git https://github.com/cross-rs/cross
 
 此命令会编译并写入或覆盖本地 `dist/` 产物，但不会创建 tag 或发布 GitHub Release。
 
-[`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述三个二进制，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布两个压缩包与校验和文件。
+[`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述三个二进制，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布两个压缩包与校验和文件，并使用标签对应的 `docs/release-notes-<tag>.md` 作为 Release 正文。
 
 ## 触发实际发布
 
@@ -67,7 +67,7 @@ rust_version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import
 
 ## CI 覆盖范围与证据边界
 
-[`ci.yml`](../../.github/workflows/ci.yml) 对 `main` 的推送和以其为目标的 pull request 运行 `fmt`、工作区 `check`、严格 Clippy（`cargo clippy --workspace --all-targets -- -D warnings`）、工作区测试、Agent/Hub 构建和跨端契约检查。CI 还会在隔离 HOME 中运行统一迁移脚本的 Python 集成测试。
+[`ci.yml`](../../.github/workflows/ci.yml) 对 `main` 的推送和以其为目标的 pull request 运行 `fmt`、工作区 `check`、严格 Clippy（`cargo clippy --workspace --all-targets -- -D warnings`）、工作区测试、Agent/Hub 构建和跨端契约检查。旧的一次性迁移脚本及其 Python 集成测试已移除，不属于当前 CI。
 
 严格 Clippy 属于 CI 门禁；本地发布预检与标签发布工作流都**不运行 Clippy**，因此预检成功不能证明严格 Clippy 已通过，也不能据此判断是否存在警告。
 

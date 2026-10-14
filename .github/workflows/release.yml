@@ -72,6 +72,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: docs/release-notes-${{ github.ref_name }}.md
           files: |
             release/*.tar.gz
             release/SHA256SUMS
