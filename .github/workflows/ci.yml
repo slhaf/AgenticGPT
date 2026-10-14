@@ -17,22 +17,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Test Agentic migrations
-        run: |
-          migration_test_home=$(mktemp -d /tmp/am-test.XXXXXX)
-          trap 'rm -rf "$migration_test_home"' EXIT
-          HOME="$migration_test_home" \
-            XDG_CONFIG_HOME="$migration_test_home/config" \
-            XDG_DATA_HOME="$migration_test_home/data" \
-            XDG_CACHE_HOME="$migration_test_home/cache" \
-            XDG_STATE_HOME="$migration_test_home/state" \
-            XDG_RUNTIME_DIR="$migration_test_home/runtime" \
-            TMPDIR="$migration_test_home" \
-            DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent \
-            DBUS_SYSTEM_BUS_ADDRESS=unix:path=/nonexistent \
-            PYTHONDONTWRITEBYTECODE=1 \
-            python3 -m unittest discover -s scripts/tests -p test_migrate_agentic.py -v
-
       - name: Install repository Rust toolchain
         # rustup reads rust-toolchain.toml and installs its version/components.
         run: |

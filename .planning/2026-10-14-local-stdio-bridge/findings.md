@@ -15,3 +15,6 @@
 
 - CI模拟：migration测试glob指向已缺失文件，初始baseline 300559a也无此文件；本机Python3.14.8返回5(NO TESTS RAN)，未修改无关CI。后续所有workflow检查含live parity通过，故不能宣称完整workflow全绿。
 - 无公开HTTP/OpenAPI/MCP工具schema改变；仅公开local CLI新增bridge。CLI帮助双语、README双语、运行指南和接口说明已同步。
+
+- 阶段3：git log --diff-filter=D证实test_migrate_agentic.py在9fe505c删除；其他当前脚本无该引用。删除CI遗留migration步骤，保留所有Rust与live parity门禁。运维/开发文档已说明当前Rust+parity链，无须额外改文档。
+- 为防手写模拟步骤漂移，本次临时模拟器直接读取workflow jobs.rust.steps中每个run，使用临时HOME/XDG/TMP/两种D-Bus与目标venv解释器执行，checkout/cache操作不模拟。

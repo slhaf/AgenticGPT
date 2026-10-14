@@ -25,3 +25,9 @@
 
 - live contract parity gate: PASS，模拟剩余步骤全部通过。完整CI有首步既有migration发现失败；未运行远程GitHub Actions，未发布/部署。
 - cmark-gfm渲染4文档成功，新链接/章节与diff-check通过。阶段2完成，文档与验证记录一并提交。
+
+- 用户授权顺手修复CI模拟失败；延续计划阶段3，核对迁移脚本/测试删除与其他引用后修workflow，不恢复已移除功能。
+
+- 阶段3：workflow YAML成功解析，移除失效步骤后逐条执行原始run命令；工具链/fmt/check/严格Clippy已通过，正在完成剩余链路。
+
+- 阶段3完整本地模拟通过：从修正后的 .github/workflows/ci.yml 读取并执行全部8条run步骤，工具链/fmt/check/strict Clippy/workspace tests/build/dependencies/live parity均PASS。Rust合计527 passed / 0 failed / 1 existing ignored；contract parity gate: PASS。临时状态根与验证子进程已回收，日志保留 /tmp/agentic-ci-fixed.log。未运行远程Actions。
