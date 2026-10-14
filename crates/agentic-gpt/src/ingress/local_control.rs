@@ -1,5 +1,7 @@
 use std::fs;
 use std::io;
+use std::net::Shutdown;
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -11,7 +13,7 @@ use anyhow::{anyhow, Result};
 use rmcp::{model::CallToolRequestParams, ServiceExt};
 use serde_json::{json, Map, Value};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
 
 use crate::config::Config;
@@ -141,6 +143,64 @@ pub(crate) async fn call_tool(
     Ok(value)
 }
 
+/// A process-scoped byte bridge: the external client owns the MCP handshake.
+pub(crate) async fn bridge_stdio(config_path: &Path) -> Result<()> {
+    let stream = connect_stream(config_path).await?.into_std()?;
+    stream.set_nonblocking(false)?;
+    let result = async {
+        let mut input = fs::File::from(io::stdin().as_fd().try_clone_to_owned()?);
+        let mut output = fs::File::from(io::stdout().as_fd().try_clone_to_owned()?);
+        let mut upstream = stream.try_clone()?;
+        let mut downstream = stream.try_clone()?;
+        let (finished, mut completion) = mpsc::channel(2);
+        let input_finished = finished.clone();
+
+        // Tokio's stdin read cannot be cancelled, so it can hold runtime shutdown
+        // indefinitely when the Agent disconnects. These blocking threads belong
+        // to this CLI process and are reclaimed on exit, even if stdin stays open.
+        // Raw files also keep stdout unbuffered and reserved for protocol bytes.
+        std::thread::Builder::new()
+            .name("local-mcp-stdin".into())
+            .spawn(move || {
+                let result = copy_bridge_bytes(&mut input, &mut upstream)
+                    .map_err(|error| anyhow!("local_mcp_stdio_input_failed: {error}"));
+                let _ = input_finished.blocking_send(result);
+            })?;
+        std::thread::Builder::new()
+            .name("local-mcp-stdout".into())
+            .spawn(move || {
+                let result = copy_bridge_bytes(&mut downstream, &mut output)
+                    .map_err(|error| anyhow!("local_mcp_stdio_output_failed: {error}"));
+                let _ = finished.blocking_send(result);
+            })?;
+
+        completion
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("local_mcp_stdio_bridge_failed"))?
+    }
+    .await;
+    // Either EOF/error ends this one connection, without touching Agent resources.
+    let _ = stream.shutdown(Shutdown::Both);
+    result
+}
+
+fn copy_bridge_bytes(reader: &mut impl io::Read, writer: &mut impl io::Write) -> io::Result<()> {
+    // A blocking socket-to-pipe splice can hold the pipe while waiting for the
+    // next socket bytes, preventing the client from reading the last response.
+    // Use explicit bounded reads/writes rather than io::copy's kernel fast path.
+    let mut buffer = [0; 8192];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        writer.write_all(&buffer[..read])?;
+    }
+}
+
 pub(crate) struct LocalProcessClient {
     client: rmcp::service::RunningService<rmcp::RoleClient, ()>,
 }
@@ -179,6 +239,13 @@ fn parse_process_list(value: Value) -> Result<ProcessListResponse> {
 async fn connect(
     config_path: &Path,
 ) -> Result<rmcp::service::RunningService<rmcp::RoleClient, ()>> {
+    let stream = connect_stream(config_path).await?;
+    ().serve(stream)
+        .await
+        .map_err(|_| anyhow!("local_mcp_initialize_failed"))
+}
+
+async fn connect_stream(config_path: &Path) -> Result<UnixStream> {
     let config = Config::load(config_path)?;
     let path = socket_path(&config.agent_id)?;
     let stream = timeout(LOCAL_CONNECT_TIMEOUT, UnixStream::connect(&path))
@@ -191,9 +258,7 @@ async fn connect(
     if credentials.uid() != effective_uid() {
         return Err(anyhow!("local_mcp_peer_uid_mismatch"));
     }
-    ().serve(stream)
-        .await
-        .map_err(|_| anyhow!("local_mcp_initialize_failed"))
+    Ok(stream)
 }
 
 async fn bind_at(path: PathBuf) -> Result<LocalMcpListener> {

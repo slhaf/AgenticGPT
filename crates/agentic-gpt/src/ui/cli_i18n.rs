@@ -156,6 +156,11 @@ const COMMAND_CATALOG: &[CatalogEntry] = &[
         "调用一个本地 MCP 工具",
     ),
     CatalogEntry::new(
+        "local.stdio",
+        "Bridge stdio MCP to the running local agent",
+        "通过 stdio MCP 连接已运行的本地代理",
+    ),
+    CatalogEntry::new(
         "stdio-worker",
         "Run an internal supervised worker",
         "运行内部受监督工作进程",

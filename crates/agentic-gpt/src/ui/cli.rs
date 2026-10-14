@@ -97,6 +97,7 @@ pub(crate) enum Commands {
 #[derive(Subcommand)]
 pub(crate) enum LocalCommand {
     ListTools,
+    Stdio,
     Call {
         tool: String,
         #[arg(long, conflicts_with = "arguments_file")]
@@ -124,6 +125,7 @@ pub(crate) enum TmuxCommand {
 async fn handle_local(config_path: PathBuf, command: LocalCommand) -> Result<()> {
     let value = match command {
         LocalCommand::ListTools => local_control::list_tools(&config_path).await?,
+        LocalCommand::Stdio => return local_control::bridge_stdio(&config_path).await,
         LocalCommand::Call {
             tool,
             arguments,
