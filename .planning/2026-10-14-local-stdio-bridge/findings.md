@@ -12,3 +12,6 @@
 - 文档工作者已完成四文件，暂保留到阶段2提交。
 
 - 真正交互测试发现 std::io::copy 的 Linux socket→pipe splice 路径造成stdout读阻塞；大帧fakepeer发送后关闭不会暴露该问题。手工小帧fakepeer复现：输入151bytes准确到达，stdout读与服务端socket读同时阻塞直到bridge kill。显式8KiB read/write_all替代后真实initialize与disconnect通过。故保留真实握手测试，不能仅依靠fakebyte测试。
+
+- CI模拟：migration测试glob指向已缺失文件，初始baseline 300559a也无此文件；本机Python3.14.8返回5(NO TESTS RAN)，未修改无关CI。后续所有workflow检查含live parity通过，故不能宣称完整workflow全绿。
+- 无公开HTTP/OpenAPI/MCP工具schema改变；仅公开local CLI新增bridge。CLI帮助双语、README双语、运行指南和接口说明已同步。

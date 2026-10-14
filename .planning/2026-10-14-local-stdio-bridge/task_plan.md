@@ -5,7 +5,7 @@
 
 ## 阶段
 1. [complete] 实现 CLI、桥接和真实集成回归；定点验证后提交。
-2. [in_progress] 同步用户文档，按 GitHub CI workflow 模拟 migrations、工具链、fmt/check/clippy/test、runtime build、Python dependencies 和 live contract parity，并完成隔离链路验证、独立审查；提交并汇报。
+2. [complete] 同步用户文档，按 GitHub CI workflow 模拟 migrations、工具链、fmt/check/clippy/test、runtime build、Python dependencies 和 live contract parity，并完成隔离链路验证、独立审查；提交并汇报。
 
 ## 测试保留价值
 新增⑤链路测试保护真实 public CLI 的握手透传、双向完整消息、多客户端隔离及共享 daemon 状态、stdin EOF/daemon disconnect 释放资源、服务缺失不启动 runtime。现有 local_control 集成和 Tunnel stdio 测试都不经过这个新桥接入口，因此不能发现桥接预握手、响应串线或标准输入阻塞退出回归。拒绝①②③固定文本/helper 测试。

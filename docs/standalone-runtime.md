@@ -132,6 +132,30 @@ printf '%s' '{"message":"需要查看部署状态","ref":"deploy-42","severity":
 `--arguments` 和 `--arguments-file PATH|-` 接受一个 JSON object，上限为 2 MiB。结构化 MCP 结果写入 stdout；日志和
 类型化连接错误写入 stderr。运行时停止或重启期间会返回 `local_mcp_unavailable`；客户端可以重新连接，但不得重放有副作用的调用。
 
+### 通过 stdio 桥接到已有 Agent
+
+需要 stdio MCP 客户端时，可运行 `agentic-gpt local stdio --config PATH`，让客户端通过标准输入/输出使用已有 Agent 的本地 Unix MCP socket。该命令只启动一个桥接进程，不启动 Agent；必须先运行 `agentic-gpt run`。Local 和 Standalone 模式提供 Unix socket，Hub 模式没有本地 Unix socket，因此不适用。
+
+客户端配置的通用示意如下。将两个绝对路径替换为当前机器上可执行文件和配置文件的实际路径；这是 command/args 示例，不代表任何厂商专属设置格式：
+
+```json
+{
+  "command": "/absolute/path/to/agentic-gpt",
+  "args": [
+    "local",
+    "stdio",
+    "--config",
+    "/absolute/path/to/config.json"
+  ]
+}
+```
+
+每个客户端连接会启动独立的桥接进程。客户端负责 MCP 握手；桥接进程在客户端与 Agent Unix socket 之间原样双向转发 MCP 字节，不自行发送 `initialize`。标准输入和标准输出仅用于 MCP 协议，诊断日志写入标准错误。
+
+找不到运行中的 Agent 或连接被拒绝时，桥接进程向标准错误报告 `local_mcp_unavailable` 并退出，标准输出保持空。连接超时或服务端 UID 不匹配时，分别报告 `local_mcp_connect_timeout` 或 `local_mcp_peer_uid_mismatch`。桥接不会自动启动 Agent、重连或重放请求。客户端标准输入 EOF 或 Agent socket EOF 都会结束该桥接进程，不关闭 Agent 或其他连接；已经准入的托管任务仍按 Agent 既有生命周期处理。
+
+桥接和 TUI/CLI 共用本地 Unix MCP 的 16 个总连接额度。每个客户端拥有独立 MCP 会话，但共享同一个 Agent 的配置、策略、托管任务、事件收件箱和临时授权；此入口不提供多租户隔离或事件广播。Unix socket 的同 UID 限制和 `local:` 来源仍适用。通过此桥接调用隐藏的 `privateevent.inject` 时，仍按本地 Unix 权限处理；Tunnel 自身的 stdio 入口不提供该工具。
+
 ## Tunnel、HTTP 与本地工具表面
 
 Normal 与 Room profile 选择 namespace 预设，而不是固定最终运行时表面：Normal 启用 `agent`、`file`、`mcp`、`process`、`skills`、

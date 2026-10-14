@@ -93,7 +93,7 @@ agentic-gpt config init --mode local --non-interactive
 agentic-gpt run
 ```
 
-使用上面的 `local list-tools` 和 `local call` 命令访问本机 Agent。详见[本地 MCP 控制通道](docs/standalone-runtime.md)。
+使用上面的 `local list-tools` 和 `local call` 命令访问本机 Agent；stdio MCP 客户端可使用 `agentic-gpt local stdio`。详见[本地 MCP 控制通道](docs/standalone-runtime.md)。
 
 ### Hub
 

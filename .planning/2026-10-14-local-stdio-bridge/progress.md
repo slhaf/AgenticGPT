@@ -17,3 +17,11 @@
 
 - 定点集成通过：新桥接5/5、原Unix1/1；cargo check/build通过、workspace严格Clippy通过。独立专家与复审无actionable finding。
 - 用户追加要求：模拟 GitHub CI，已读取 .github/workflows/ci.yml，将在阶段2执行含migration与live parity的完整链。
+
+- CI模拟首步失败：unittest discover -s scripts/tests -p test_migrate_agentic.py 找到0测试，当前Python返回5(NO TESTS RAN)。正在核对仓库既有workflow与测试文件是否匹配；先不修改无关CI。
+
+- 本地CI后续步骤：Rust 1.99.0/Cargo1.99.0、fmt/check/workspace严格Clippy、cargo test --workspace (527 passed / 0 failed / 1 existing ignored)、Agent/Hub build、venv与parity dependencies通过；live parity START尚未完成。
+- baseline 300559a 的 scripts/tests 也无迁移测试文件；首步NO TESTS RAN属于既有workflow失配，本次未修改CI。
+
+- live contract parity gate: PASS，模拟剩余步骤全部通过。完整CI有首步既有migration发现失败；未运行远程GitHub Actions，未发布/部署。
+- cmark-gfm渲染4文档成功，新链接/章节与diff-check通过。阶段2完成，文档与验证记录一并提交。

@@ -52,6 +52,8 @@ Tmux 与 Browser 工具集关闭时，启动不创建默认 tmux 会话，也不
 `tmux.createSession` 和 `tmux.closeSession`，并记录 `localadmin:` 来源。MCP
 `tmux.sessions`、`tmux.panes`、`tmux.exec` 和 `tmux.pasteText` 不属于这四项 CLI 管理操作。
 
+`agentic-gpt local stdio --config PATH` 为每个 stdio MCP 客户端启动独立进程，并将 MCP 流原样转发到已有 Agent 的 Unix socket。它适用于 Local 和 Standalone，不适用于没有本地 socket 的 Hub 模式；连接仍受同 UID 限制并记录 `local:` 来源。各客户端有独立 MCP session，但共享 Agent 状态与 16 个 Unix 连接总额度。命令示例及生命周期、错误行为见[本地 stdio 桥接说明](standalone-runtime.md#通过-stdio-桥接到已有-agent)。
+
 ## GPT Actions API 端点
 
 GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。

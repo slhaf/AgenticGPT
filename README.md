@@ -93,7 +93,7 @@ agentic-gpt config init --mode local --non-interactive
 agentic-gpt run
 ```
 
-Use the `local list-tools` and `local call` commands above to access the Agent. See the [local MCP control channel](docs/standalone-runtime.md).
+Use the `local list-tools` and `local call` commands above to access the Agent; stdio MCP clients can use `agentic-gpt local stdio`. See the [local MCP control channel](docs/standalone-runtime.md).
 
 ### Hub
 
