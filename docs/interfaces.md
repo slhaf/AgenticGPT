@@ -339,7 +339,7 @@ Standalone Tunnel 文档见 [`standalone-runtime.md`](standalone-runtime.md)。
 
 ntfy 确认回调路由有意不纳入 `openapi/hub.yaml`，仅供确认操作按钮使用。
 
-Room Skill 包在 workspace 下以 `<workspaceRoot>/skills/` 的形式可见；由工具管理的激活状态则作为私有持久状态存储在 `~/.agentic_gpt/state/active-skills.json`。启动只使用当前私有状态根，不迁移旧目录；升级迁移见[运维指南](operations.md#私有状态布局迁移)。激活 Skill 不会运行它或授予权限；过期的活动条目会以 `missing` 状态继续显示，直到被显式停用。内置 `skill-installer` 指南默认处于激活状态，也可显式停用。
+Room Skill 包在 workspace 下以 `<workspaceRoot>/skills/` 的形式可见；由工具管理的激活状态则作为私有持久状态存储在 `~/.agentic_gpt/state/active-skills.json`。启动只使用当前私有状态根，不迁移旧目录；旧数据的备份与升级边界见[运维指南](operations.md#私有状态布局)。激活 Skill 不会运行它或授予权限；过期的活动条目会以 `missing` 状态继续显示，直到被显式停用。内置 `skill-installer` 指南默认处于激活状态，也可显式停用。
 
 Skill 安装状态遵循以下规则：
 

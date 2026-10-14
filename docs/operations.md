@@ -84,7 +84,7 @@ Tunnel 凭据不可用时设置 `mode=local`；要验证完整的推荐路径则
 - 运行时目录权限为 `0700`、套接字权限为 `0600`，且只接受相同 UID。
 - 存在 `event.list`、`event.get`、`event.mark`，以及 `process.exec`、`process.batch`、`process.read`、`process.list`、`process.cancel`、`mcp.callTool` 和 `mcp.batch`。
 - 事件收件箱工具独立于工具集开关；隐藏事件不因此视为已处理。它们管理收件箱状态，不是进程控制接口。
-- Process 历史使用 `~/.agentic_gpt/state/process.sqlite3`；事件历史使用独立的 `~/.agentic_gpt/state/events.sqlite3`。现有 `jobs.sqlite3` 会有意保持原样且不可访问，不迁移或备份 Job 历史。
+- Process 历史使用 `~/.agentic_gpt/state/process.sqlite3`；事件历史使用独立的 `~/.agentic_gpt/state/events.sqlite3`。现有 `jobs.sqlite3` 会有意保持原样，不能通过 Process 接口访问；运行时不会自动迁移或备份旧 Job 历史，升级前应自行保留并备份旧数据库。
 - [持久事件收件箱](interfaces.md#持久事件收件箱)说明同一私有状态根的共享收件箱和提醒范围。
 - 已移除的 v0.8 受管理生命周期名称不存在。
 
@@ -150,11 +150,13 @@ Standalone 还应确认：
 
 Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按[配置说明](configuration.md)核对 Default/Disabled/显式路径以及文件所有权和可写性。策略预检针对提交脚本，不审计 init 文件，且配置快照不冻结文件内容或可执行身份。相对 init 路径若随模型可选 cwd 或可写位置变化，属于信任风险；优先使用用户所有、受保护的绝对路径。此为运维建议，不是新增执行限制。
 
-### WP1 收尾证据边界
+### WP1 收尾证据边界（历史记录）
 
-当前 WP1 收尾证据范围有限：最终清理阶段通过了 `cargo fmt --all -- --check`、集成的 `cargo test -p agentic-gpt-hub` 套件，以及无警告的 `cargo build -p agentic-gpt-hub`。一次隔离的 Hub HTTP/SSE 冒烟检查使用模拟 Agent 对等端，覆盖了六种确认、替换、回调、超时和迟到回执场景。
+本节保留 Process 切换前、使用 Job 接口时的 WP1 观测，不是 0.10.0 的验收结果。该阶段证据范围有限：最终清理阶段通过了 `cargo fmt --all -- --check`、集成的 `cargo test -p agentic-gpt-hub` 套件，以及无警告的 `cargo build -p agentic-gpt-hub`。一次隔离的 Hub HTTP/SSE 冒烟检查使用模拟 Agent 对等端，覆盖了六种确认、替换、回调、超时和迟到回执场景。
 
 此后，针对同一临时 SQLite 数据库执行的真实 Hub 重启保留了两条状态为 `completed` 的 `/v1/runs` 记录和 `sessions[]`；`/v1/info` 则报告 `pendingRequestCount`、`pendingConfirmationCount` 和 `cachedJobCount` 均为零。
+
+`cachedJobCount` 是当时的观测字段；当前 `/v1/info` 使用 `cachedProcessCount`。这里保留历史结果，不作为当前字段清单。
 
 这只证明 Hub 侧的回执/会话清理和保留行为；没有执行真实 Agent 或传输账本重启，也不能证明历史路线图中的所有场景都完成了端到端验证。外部 ntfy 提供方行为仍未验证；本地/mock 回调路径不能作为等价证据。
 
@@ -170,8 +172,10 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 ## 配置重载与重启诊断
 
 实时更新/重启边界适用于 Standalone、Local 和 Hub 连接模式下的 Agent worker，
-并非 Standalone 独有。Agent worker 运行时，对 `policy`、`limits`、`mcpServers`、
+并非 Standalone 独有。Agent worker 运行时，对 `policy`、`limits`、`shell.initFile`、`mcpServers`、
 `toolsets.enabled` 和 `events` 的有效变更会以原子方式应用于后续准入、调用和工具发现。
+
+`shell.initFile` 变更只影响之后接纳的 Process；已接纳 Process 保留准入时的配置快照。
 
 `events` 配置变更影响后续 process/skill-install 准入；已准入的 process 和安装任务保留准入时的配置快照。
 关闭 Tmux 或 Browser 工具集后，下次启动不会自动准备对应资源。运行期间重新启用 Tmux
@@ -296,7 +300,7 @@ test ! -e "$HUB_DB-shm" || cp -a "$HUB_DB-shm" "$BACKUP_DIR/hub.sqlite3-shm"
 
 Hub SQLite 会在 `user_version=1` 执行事务式 schema 迁移。在迁移或压缩已完成结果的保留数据前，Hub 会在数据库旁创建私有一致性快照，文件名为 `.pre-migration.bak` 或 `.pre-retention.bak`。进行任何手动操作前，都应保留当前数据库及匹配的 `-wal`/`-shm` 文件。优先只回滚二进制，同时继续使用最新数据库；只有在比较 run 身份并保留较新数据库作为证据后，才可有意将旧快照用于数据恢复。恢复快照无法撤回已经发送给 Agent 的命令，也无法撤销外部副作用。
 
-Agent 进程历史持久存储在 `~/.agentic_gpt/state/process.sqlite3` 中，并遵循该存储自己的保留规则。没有迁移既有 Process 历史时，该存储会全新创建；旧 `jobs.sqlite3` 保持原样，不导入新 Process 数据库，也不能通过新的进程生命周期访问。既有 Process 数据库的布局转换使用前述独立迁移脚本。
+Agent 进程历史持久存储在 `~/.agentic_gpt/state/process.sqlite3` 中，并遵循该存储自己的保留规则。没有迁移既有 Process 历史时，该存储会全新创建；旧 `jobs.sqlite3` 保持原样，不导入新 Process 数据库，也不能通过新的进程生命周期访问。需要保留旧布局中的 Process 数据时，按[私有状态布局](#私有状态布局)所述备份并使用匹配的版本化资料处理；当前仓库不提供布局转换脚本，启动也不会自动转换。
 
 Agent 配置写入会在 `backups/` 下保留有界私有备份，并使用 setup journal 替换 secret 引用。如果 journal 中的哈希或文件类型不对应任何预期的变更前/变更后状态，启动会 fail closed 并报告恢复冲突。停止 Agent，保留 journal 和当前文件，并从经过验证的副本解决冲突；不要删除 journal、强行选择一侧，也不要在诊断信息中暴露 secret 内容。
 

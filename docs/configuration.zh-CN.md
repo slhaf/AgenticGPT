@@ -45,12 +45,12 @@ agentic-gpt config show
 可用 namespace 为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`room`。
 逻辑上的 `room` namespace 包含 Room bootstrap（`bootstrap` 与 `bootstrap.read`）以及全部
 `room.*` 工具。选择只会过滤既有的 Normal/Room advertised names，不会暴露 dispatch-only alias。
-使用以下精确命令固定选择：
+使用以下命令固定选择；将 `<namespace>` 替换为上列 namespace 名称：
 
 ```bash
 agentic-gpt config toolset ls
-agentic-gpt config toolset enable <namespace>
-agentic-gpt config toolset disable <namespace>
+agentic-gpt config toolset enable '<namespace>'
+agentic-gpt config toolset disable '<namespace>'
 ```
 `ls` 会列出全部 namespace、当前启用/禁用状态及其所含工具的简短说明。`enable` 和
 `disable` 成功后会明确输出被修改的 namespace 与结果状态。
@@ -89,7 +89,7 @@ agentic-gpt config init --mode local --profile normal --non-interactive
 agentic-gpt config init \
   --mode standalone \
   --profile room \
-  --tunnel-id tunnel_<assigned-id> \
+  --tunnel-id 'tunnel_<assigned-id>' \
   --tunnel-api-key file:"$HOME/.agentic_gpt/secrets/tunnel-api-key" \
   --non-interactive
 ```
@@ -165,6 +165,8 @@ Optional settings 还提供以下编辑入口：
 
 ## 优先采用 Standalone 的配置
 
+将 `tunnel_<assigned-id>` 替换为分配给这台机器的 Tunnel ID。
+
 ```bash
 agentic-gpt config init
 agentic-gpt config set agentId laptop
@@ -178,7 +180,7 @@ printf '\n'
 printf '%s' "$AGENTIC_TUNNEL_API_KEY" > "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 unset AGENTIC_TUNNEL_API_KEY
 
-agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
+agentic-gpt config set tunnel.tunnelId 'tunnel_<assigned-id>'
 agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.client.autoDownload true
 agentic-gpt run
@@ -187,7 +189,7 @@ agentic-gpt run
 将 `profile` 设为 `room` 会选择启用所有 namespace 的 Room preset（例如
 `agentic-gpt config set profile room`）；如果存在 `toolsets.enabled`，则以它为准。
 
-私有持久状态不绑定 `agentId`。更改连接身份不会切换事件、进程历史或 Skill 激活/安装状态；需要独立持久状态的实例应使用独立 `HOME`。启动不会迁移旧目录；旧部署升级前按[私有状态布局迁移](operations.md#私有状态布局迁移)执行独立脚本。
+私有持久状态不绑定 `agentId`。更改连接身份不会切换事件、进程历史或 Skill 激活/安装状态；需要独立持久状态的实例应使用独立 `HOME`。启动不会迁移旧目录，当前仓库也不提供通用迁移脚本；旧部署数据的备份与升级边界见[私有状态布局](operations.md#私有状态布局)。
 
 ## 顶层字段
 
@@ -209,7 +211,7 @@ agentic-gpt run
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
-| `browser` | 可选的高级 Browser runtime 覆盖；普通 runtime discovery/provisioning 默认仍自动进行。 |
+| `browser` | 可选的高级 Browser runtime 覆盖；Browser runtime 自动 discovery 受 Browser 工具集开关控制；managed runtime 自动 provisioning 需显式启用 `browser.managed.autoProvision`，默认 `false`。 |
 | `hub` | `enabled` 在 Standalone/Local 启用确认用的 Hub 辅助连接，默认 `false`；Hub 模式仍始终使用命令连接。Standalone 的上报由 `tunnel.hubReporting.enabled` 独立控制。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
 | `events` | 持久事件收件箱中 `low` 严重级别事件的保留时长，以及内部事件严重级别覆盖。 |
@@ -432,7 +434,7 @@ Browser 是否启用不由 runtime 配置决定，`toolsets.enabled` 仍具有�
 - `docsRoot` 与 `trustedCodePaths` 由内部派生，不是配置字段。
 - 本设置不管理 installer、downloader 或 runtime cache。
 
-可直接作为路径组件的 `agentId` 会原样映射为私有状态目录名；历史上较宽松的 Hub identity 仍然兼容，但会使用稳定 hash 目录 key，而不会直接成为文件系统路径组件。
+Local/Standalone 的 Unix MCP 路径位于 `~/.agentic_gpt/runtime/agent/<agentId>/`，Standalone supervisor 的运行时目录位于 `~/.agentic_gpt/runtime/tunnel/<agentId>/`。这些是按连接身份分隔的 runtime 路径；事件、Process 和 Skill 私有持久状态仍共享 `~/.agentic_gpt/state/`，不会随 `agentId` 切换。
 
 未知顶层字段会在 load/write round trip 中保留。`limits` 等严格嵌套对象会拒绝已经删除的 v0.8 字段。
 

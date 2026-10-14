@@ -369,7 +369,7 @@ Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `boot
 [`configuration.md`](configuration.md)。规范的 skill block 位于顶层 `skills`。仅当顶层 `skills` 缺失时才读取旧版 `room.skills` block；
 若两者同时存在，则顶层值优先，后续配置写入会序列化为规范的顶层 block。
 
-最小 Standalone 配置使用 secret reference，而不是 secret 值：
+以下仅展示 `tunnel` 配置片段，使用 secret reference 而不是 secret 值。将其合并到已有 Config v2 中；完整配置还必须提供 `mode`、`profile` 和 `toolsets`，见[配置说明](configuration.md)。此片段不能单独作为配置文件使用：
 
 ```json
 {
@@ -422,9 +422,9 @@ Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `boot
 
 存储中的旧 receipt 证据仍保留，用于历史/去重边界，但不会退休后重新执行。
 
-当前的多文件变更边界见 file 合同矩阵：一份完整的 apply-patch 请求会先暂存和验证，然后才进行可选确认及提交。
+当前的多文件变更边界见[工具合同矩阵](tool-contract-matrix.md)：一份完整的 apply-patch 请求先解析目标并统一判定策略、按需确认，获准后才读取源内容、应用补丁、暂存和验证；提交前复核源文件快照。提交开始后不保证跨文件回滚。
 
-Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`limits`、`mcpServers`、`toolsets.enabled` 和 `events`；这些配置会经过完整验证，再原子应用于新的准入、调用和工具发现。
+Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`limits`、`shell.initFile`、`mcpServers`、`toolsets.enabled` 和 `events`；这些配置会经过完整验证，再原子应用于新的准入、调用和工具发现。`shell.initFile` 变更只影响之后接纳的 Process，已接纳 Process 保留准入时的配置快照。
 
 MCP server id 只能使用
 `A-Z`、`a-z`、`0-9`、`.`、`_` 或 `-`，最长 64 字节；`streamable-http` 要求绝对 HTTP(S) URL，可选结构化 Bearer auth；
@@ -456,9 +456,10 @@ OAuth code 和 token。
 不会将其放入 argv、日志、配置摘要、报告、生成的 runtime 文件或备份。文件 reference 末尾可有一个 LF 或 CRLF，读取时会将其移除。
 空值和明文 reference 会导致启动失败。
 
-使用 secret manager 或单独受保护的文件提供 secret。以下示例只配置文件路径，不会把密钥写入 shell history 或 argv：
+使用 secret manager 或单独受保护的文件提供 secret。以下示例只配置文件路径，不会把密钥写入 shell history 或 argv；将 `tunnel_<assigned-id>` 替换为分配给这台机器的 Tunnel ID：
 
 ```bash
+install -d -m 700 "$HOME/.agentic_gpt/secrets"
 touch "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 chmod 600 "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 read -rsp "Tunnel API key: " AGENTIC_TUNNEL_API_KEY
@@ -466,7 +467,7 @@ printf '\n'
 printf '%s' "$AGENTIC_TUNNEL_API_KEY" > "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 unset AGENTIC_TUNNEL_API_KEY
 
-agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
+agentic-gpt config set tunnel.tunnelId 'tunnel_<assigned-id>'
 agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.client.autoDownload true
 ```
