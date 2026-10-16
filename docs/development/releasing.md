@@ -47,6 +47,18 @@ cargo install cross --git https://github.com/cross-rs/cross
 
 脚本对 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu` 执行工作区的 release 构建，并将三个二进制复制到各自 `dist/<target>/` 目录：`agentic-gpt`、`agentic-gpt-hub`、`agentic-browser-host`。
 
+ARM Linux 构建机可改用 [`scripts/dist-linux-on-arm.sh`](../../scripts/dist-linux-on-arm.sh)，ARM 目标原生构建，x86_64 目标通过 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) 与 Zig 交叉编译；产物名称和 `dist/<target>/` 布局相同。先准备工具和当前 Rust 工具链的标准库：
+
+```bash
+uv venv target/zigbuild-tools
+uv pip install --python target/zigbuild-tools/bin/python cargo-zigbuild
+source target/zigbuild-tools/bin/activate
+rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+./scripts/dist-linux-on-arm.sh
+```
+
+`CARGO_TARGET_DIR` 可调整构建缓存目录，发行产物仍写入仓库的 `dist/<target>/`。
+
 此命令会编译并写入或覆盖本地 `dist/` 产物，但不会创建 tag 或发布 GitHub Release。
 
 [`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述三个二进制，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布两个压缩包与校验和文件，并使用标签对应的 `docs/release-notes-<tag>.md` 作为 Release 正文。
