@@ -37,17 +37,53 @@ pub(crate) fn validate_command_pattern(pattern: &str) -> Result<()> {
         .map_err(|error| anyhow!(error))
 }
 
-fn decide(policy: &PolicyConfig, matches: impl Fn(&str) -> bool) -> PolicyDecision {
+#[derive(Clone, Debug)]
+pub(crate) struct PolicyEvaluation {
+    pub(crate) decision: PolicyDecision,
+    pub(crate) rules: Vec<String>,
+    pub(crate) incomplete: bool,
+}
+
+impl PolicyEvaluation {
+    pub(crate) fn new(decision: PolicyDecision) -> Self {
+        Self {
+            decision,
+            rules: Vec::new(),
+            incomplete: false,
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.decision = self.decision.max(other.decision);
+        self.incomplete |= other.incomplete;
+        for rule in other.rules {
+            if !self.rules.contains(&rule) {
+                self.rules.push(rule);
+            }
+        }
+    }
+}
+
+fn decide(policy: &PolicyConfig, matches: impl Fn(&str) -> bool) -> PolicyEvaluation {
     for (action, patterns) in [
         (PolicyDecision::Deny, &policy.deny),
         (PolicyDecision::Confirm, &policy.confirm),
         (PolicyDecision::Allow, &policy.allow),
     ] {
-        if patterns.iter().any(|pattern| matches(pattern)) {
-            return action;
+        let matched: Vec<_> = patterns.iter().filter(|pattern| matches(pattern)).collect();
+        if !matched.is_empty() {
+            let mut evaluation = PolicyEvaluation::new(action);
+            if action == PolicyDecision::Confirm {
+                for pattern in matched {
+                    if !evaluation.rules.contains(pattern) {
+                        evaluation.rules.push(pattern.clone());
+                    }
+                }
+            }
+            return evaluation;
         }
     }
-    policy.default_action
+    PolicyEvaluation::new(policy.default_action)
 }
 
 pub(crate) fn command_policy_decision(
@@ -55,17 +91,25 @@ pub(crate) fn command_policy_decision(
     program: &str,
     args: &[String],
 ) -> PolicyDecision {
+    command_policy_evaluation(config, program, args).decision
+}
+
+pub(crate) fn command_policy_evaluation(
+    config: &Config,
+    program: &str,
+    args: &[String],
+) -> PolicyEvaluation {
     if !config.policy.enabled {
-        return PolicyDecision::Allow;
+        return PolicyEvaluation::new(PolicyDecision::Allow);
     }
     decide(&config.policy.command, |pattern| {
         patterns::command_matches(pattern, program, args)
     })
 }
 
-pub(crate) fn shell_policy_decision(config: &Config, command: &str) -> PolicyDecision {
+pub(crate) fn shell_policy_evaluation(config: &Config, command: &str) -> PolicyEvaluation {
     if !config.policy.enabled {
-        return PolicyDecision::Allow;
+        return PolicyEvaluation::new(PolicyDecision::Allow);
     }
     let extraction = shell_parser::extract_literal_commands(command);
     // The sole wildcard applies even when no literal invocation can be recovered.
@@ -77,16 +121,16 @@ pub(crate) fn shell_policy_decision(config: &Config, command: &str) -> PolicyDec
         .iter()
         .any(|pattern| pattern.trim() == "*")
     {
-        return PolicyDecision::Deny;
+        return PolicyEvaluation::new(PolicyDecision::Deny);
     }
-    let mut decision = PolicyDecision::Allow;
+    let mut evaluation = PolicyEvaluation::new(PolicyDecision::Allow);
     for invocation in &extraction.commands {
-        let invocation_decision =
-            command_policy_decision(config, &invocation.program, &invocation.args);
-        if invocation_decision == PolicyDecision::Deny {
-            return PolicyDecision::Deny;
+        let invocation_evaluation =
+            command_policy_evaluation(config, &invocation.program, &invocation.args);
+        if invocation_evaluation.decision == PolicyDecision::Deny {
+            return invocation_evaluation;
         }
-        decision = decision.max(invocation_decision);
+        evaluation.merge(invocation_evaluation);
     }
     if !extraction.complete
         || extraction.commands.is_empty()
@@ -101,13 +145,13 @@ pub(crate) fn shell_policy_decision(config: &Config, command: &str) -> PolicyDec
             .allow
             .iter()
             .any(|pattern| pattern.trim() == "*");
-        decision = decision.max(if explicitly_global {
-            global
-        } else {
-            global.max(PolicyDecision::Confirm)
-        });
+        evaluation.merge(global);
+        evaluation.incomplete = true;
+        if !explicitly_global {
+            evaluation.decision = evaluation.decision.max(PolicyDecision::Confirm);
+        }
     }
-    decision
+    evaluation
 }
 
 pub(crate) fn path_policy_decision(

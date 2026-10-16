@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::audit::{write_audit, AuditRecord};
 use crate::config::Config;
 use crate::operation::{RequestContext, RequestIngress};
-use crate::policy::{command_policy_decision, PolicyDecision};
+use crate::policy::{command_policy_decision, command_policy_evaluation, PolicyDecision};
 use crate::state::AppState;
 use crate::{confirmation, exec};
 
@@ -115,7 +115,6 @@ pub(crate) async fn paste_text(
 ) -> Value {
     let started = Instant::now();
     let target = request.target.clone();
-    let need_confirm = true;
     let submit = request.submit;
     let request_source = context.source();
     let result = paste_text_inner(state, request).await;
@@ -126,7 +125,7 @@ pub(crate) async fn paste_text(
         vec![target.clone(), format!("submit={submit}")],
         Some(target),
         None,
-        need_confirm,
+        true,
         "Confirm",
         &request_source,
         &result,
@@ -166,6 +165,15 @@ async fn paste_text_inner(state: &AppState, request: TmuxPasteTextRequest) -> Va
             format!("submit={}", request.submit),
             request.text.clone(),
         ],
+        &format!(
+            "{}{}",
+            if crate::config::confirmation_language_is_zh(&config) {
+                "tmux 写入需要确认："
+            } else {
+                "tmux input requires confirmation: "
+            },
+            confirmation::short_confirmation_text(&request.text, 30)
+        ),
     )
     .await
     {
@@ -278,7 +286,8 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
         program: request.program.clone(),
         args: request.args.clone(),
     };
-    let mut decision = command_policy_decision(&config, &request.program, &request.args);
+    let evaluation = command_policy_evaluation(&config, &request.program, &request.args);
+    let mut decision = evaluation.decision;
     let mut cd_target = None;
     let path_decision = if request.program == "cd" {
         match cd_target_arg(&request.args).and_then(|target| {
@@ -335,6 +344,11 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
         decision,
         "tmux.exec",
         &preview,
+        &confirmation::automatic_command_reason(
+            &config,
+            &evaluation,
+            &crate::utils::command_preview(&request.program, &request.args),
+        ),
     )
     .await
     {
@@ -493,6 +507,7 @@ pub(crate) async fn create_session(
         decision,
         "tmux.createSession",
         &[name.clone(), resolved.display().to_string()],
+        "tmux 操作需要确认",
     )
     .await
     {
@@ -640,6 +655,7 @@ pub(crate) async fn close_session(
             PolicyDecision::Allow,
             "tmux.closeSession",
             std::slice::from_ref(&name),
+            "tmux 操作需要确认",
         )
         .await
         {
@@ -798,24 +814,33 @@ async fn authorize_tmux(
     decision: PolicyDecision,
     operation: &str,
     args: &[String],
+    automatic_reason: &str,
 ) -> Result<bool, TmuxError> {
     if let Some(a) = acquisition {
         a.validate_scope(false)
             .map_err(|r| TmuxError::new("tmux_invalid_acquisition", &r))?;
     }
-    confirmation::authorize_operation(state, config, acquisition, decision, operation, args)
-        .await
-        .map(|a| a.approved)
-        .map_err(|r| {
-            TmuxError::new(
-                if r == "policy_denied" {
-                    "policy_denied"
-                } else {
-                    "confirmation_denied"
-                },
-                &r,
-            )
-        })
+    confirmation::authorize_operation(
+        state,
+        config,
+        acquisition,
+        decision,
+        operation,
+        args,
+        automatic_reason,
+    )
+    .await
+    .map(|a| a.approved)
+    .map_err(|r| {
+        TmuxError::new(
+            if r == "policy_denied" {
+                "policy_denied"
+            } else {
+                "confirmation_denied"
+            },
+            &r,
+        )
+    })
 }
 
 async fn tmux_output<I, S>(args: I) -> Result<String, TmuxError>

@@ -1537,6 +1537,7 @@ mod reporting_tests {
                     crate::policy::PolicyDecision::Confirm,
                     "true",
                     &[],
+                    "请求运行 true",
                 );
                 let (approval, response) = tokio::join!(confirmation, receive_confirmation);
                 response?;

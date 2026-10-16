@@ -25,13 +25,14 @@ pub(crate) fn freedesktop_notification_channel(config: &Config) -> Option<Notifi
 
 pub(crate) fn detect_freedesktop_notification_support() -> (bool, bool) {
     zbus::blocking::connection::Builder::session()
-        .and_then(probe_freedesktop_notification_support)
+        .and_then(probe_freedesktop_notification_capabilities)
+        .map(|caps| (true, caps.iter().any(|cap| cap == "actions")))
         .unwrap_or((false, false))
 }
 
-fn probe_freedesktop_notification_support(
+fn probe_freedesktop_notification_capabilities(
     builder: zbus::blocking::connection::Builder<'_>,
-) -> zbus::Result<(bool, bool)> {
+) -> zbus::Result<Vec<String>> {
     let connection = builder.method_timeout(NOTIFICATION_PROBE_TIMEOUT).build()?;
     // GetNameOwner does not activate a desktop service. Address the unique owner
     // so a disappearing service cannot trigger activation during GetCapabilities.
@@ -55,19 +56,27 @@ fn probe_freedesktop_notification_support(
         )?
         .body()
         .deserialize()?;
-    Ok((
-        true,
-        capabilities
-            .iter()
-            .any(|capability| capability == "actions"),
-    ))
+    Ok(capabilities)
+}
+
+pub(crate) async fn freedesktop_confirmation_support() -> (bool, bool) {
+    tokio::task::spawn_blocking(|| {
+        zbus::blocking::connection::Builder::session()
+            .and_then(probe_freedesktop_notification_capabilities)
+            .map(|caps| {
+                (
+                    caps.iter().any(|cap| cap == "actions"),
+                    caps.iter().any(|cap| cap == "body-markup"),
+                )
+            })
+            .unwrap_or((false, false))
+    })
+    .await
+    .unwrap_or((false, false))
 }
 
 pub(crate) async fn freedesktop_supports_actions() -> bool {
-    tokio::task::spawn_blocking(detect_freedesktop_notification_support)
-        .await
-        .map(|(_, supports_actions)| supports_actions)
-        .unwrap_or(false)
+    freedesktop_confirmation_support().await.0
 }
 
 pub(crate) async fn deliver_freedesktop_notification(
@@ -145,7 +154,8 @@ mod tests {
             let address = self.address.clone();
             tokio::task::spawn_blocking(move || {
                 zbus::blocking::connection::Builder::address(address.as_str())
-                    .and_then(probe_freedesktop_notification_support)
+                    .and_then(probe_freedesktop_notification_capabilities)
+                    .map(|caps| (true, caps.iter().any(|cap| cap == "actions")))
                     .unwrap_or((false, false))
             })
             .await

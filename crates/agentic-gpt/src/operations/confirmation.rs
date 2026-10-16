@@ -15,8 +15,8 @@ use crate::{
     hub,
     state::AppState,
     utils::{
-        command_preview, log_info, log_warn, mcp_tool_command_preview, risk_level,
-        risky_file_mutation, truncate_chars, CONFIRM_TIMEOUT_SECS,
+        command_preview, log_info, log_warn, mcp_tool_command_preview, risk_level, truncate_chars,
+        CONFIRM_TIMEOUT_SECS,
     },
 };
 
@@ -42,6 +42,94 @@ pub(crate) struct OperationAuthorization {
     pub(crate) result: Option<String>,
 }
 
+pub(crate) struct ConfirmationContent {
+    title: String,
+    body: String,
+}
+
+/// Bounds the displayed text, including the ellipsis, after folding whitespace.
+pub(crate) fn short_confirmation_text(value: &str, limit: usize) -> String {
+    let single_line = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if single_line.chars().count() <= limit {
+        return single_line;
+    }
+    single_line
+        .chars()
+        .take(limit.saturating_sub(1))
+        .chain(std::iter::once('…'))
+        .collect()
+}
+
+pub(crate) fn automatic_command_reason(
+    config: &Config,
+    evaluation: &crate::policy::PolicyEvaluation,
+    command: &str,
+) -> String {
+    let zh = confirmation_language_is_zh(config);
+    let body = if !evaluation.rules.is_empty() {
+        format!(
+            "{}{}",
+            if zh {
+                "确认规则："
+            } else {
+                "Confirmation rule: "
+            },
+            evaluation.rules.join("; ")
+        )
+    } else {
+        let label = match (zh, evaluation.incomplete) {
+            (true, true) => "无法自动判定：",
+            (true, false) => "默认策略确认：",
+            (false, true) => "Cannot determine automatically: ",
+            (false, false) => "Default policy confirmation: ",
+        };
+        format!("{label}{}", short_confirmation_text(command, 30))
+    };
+    short_confirmation_text(&body, 100)
+}
+
+fn confirmation_content(
+    config: &Config,
+    acquisition: Option<&agentic_gpt_protocol::AcquireConfirmation>,
+    operation: &str,
+    automatic_reason: &str,
+) -> ConfirmationContent {
+    let suffix = match (confirmation_language_is_zh(config), operation) {
+        (true, "tmux.pasteText") => " 请求写入 tmux",
+        (false, "tmux.pasteText") => " requests tmux input",
+        (true, value) if value.starts_with("file.") => " 请求访问",
+        (false, value) if value.starts_with("file.") => " requests file access",
+        (true, value) if value.starts_with("tmux.") && value != "tmux.exec" => " 请求操作 tmux",
+        (false, value) if value.starts_with("tmux.") && value != "tmux.exec" => {
+            " requests tmux operation"
+        }
+        (true, _) => " 请求运行",
+        (false, _) => " requests execution",
+    };
+    let identity = if config.display_name.trim().is_empty() {
+        &config.agent_id
+    } else {
+        &config.display_name
+    };
+    ConfirmationContent {
+        title: format!(
+            "{}{suffix}",
+            short_confirmation_text(identity, 40 - suffix.chars().count())
+        ),
+        body: acquisition
+            .map(|a| a.reason.trim().to_string())
+            .unwrap_or_else(|| short_confirmation_text(automatic_reason, 100)),
+    }
+}
+
+// Desktop notification bodies may interpret markup; user text is always literal.
+fn escape_notification_body(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn authorize_operation(
     state: &AppState,
@@ -50,6 +138,7 @@ pub(crate) async fn authorize_operation(
     decision: crate::policy::PolicyDecision,
     program: &str,
     args: &[String],
+    automatic_reason: &str,
 ) -> Result<OperationAuthorization, String> {
     authorize_operation_cancellable(
         state,
@@ -58,6 +147,7 @@ pub(crate) async fn authorize_operation(
         decision,
         program,
         args,
+        automatic_reason,
         Arc::new(AtomicBool::new(false)),
     )
     .await
@@ -71,6 +161,7 @@ pub(crate) async fn authorize_operation_cancellable(
     decision: crate::policy::PolicyDecision,
     program: &str,
     args: &[String],
+    automatic_reason: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Result<OperationAuthorization, String> {
     use crate::policy::PolicyDecision;
@@ -83,6 +174,7 @@ pub(crate) async fn authorize_operation_cancellable(
     let method = acquisition
         .and_then(|a| a.method.as_ref())
         .map(|m| m.as_str());
+    let content = confirmation_content(config, acquisition, program, automatic_reason);
     let mut attempted = None;
     if acquisition.is_some() {
         let result = request_confirmation_cancellable(
@@ -91,6 +183,7 @@ pub(crate) async fn authorize_operation_cancellable(
             method,
             program,
             args,
+            &content,
             cancelled.clone(),
         )
         .await;
@@ -127,6 +220,7 @@ pub(crate) async fn authorize_operation_cancellable(
                 None,
                 program,
                 args,
+                &content,
                 cancelled.clone(),
             )
             .await;
@@ -154,20 +248,20 @@ pub(crate) async fn request_confirmation_cancellable(
     confirm_method: Option<&str>,
     program: &str,
     args: &[String],
+    content: &ConfirmationContent,
     cancel_requested: Arc<AtomicBool>,
 ) -> String {
     for channel in confirmation_channels(config, confirm_method) {
         let result = match channel {
             ConfirmationChannel::Freedesktop => {
-                request_freedesktop_confirmation(config, program, args, cancel_requested.clone())
-                    .await
+                request_freedesktop_confirmation(config, content, cancel_requested.clone()).await
             }
             ConfirmationChannel::Ntfy => {
                 request_hub_confirmation_cancellable(
                     state,
-                    config,
                     program,
                     args,
+                    content,
                     cancel_requested.clone(),
                 )
                 .await
@@ -182,42 +276,22 @@ pub(crate) async fn request_confirmation_cancellable(
 
 async fn request_freedesktop_confirmation(
     config: &Config,
-    program: &str,
-    args: &[String],
+    content: &ConfirmationContent,
     cancelled: Arc<AtomicBool>,
 ) -> String {
-    let supports_actions = crate::notify::freedesktop_supports_actions().await;
+    let (supports_actions, supports_markup) =
+        crate::notify::freedesktop_confirmation_support().await;
     if !supports_actions {
         return "provider_unavailable".to_string();
     }
     let zh = confirmation_language_is_zh(config);
-    let warning = if !(config.policy.enabled && config.policy.bubblewrap)
-        && risky_file_mutation(program)
-    {
-        if zh {
-            "\n警告：bubblewrap 未启用；该文件变更命令对宿主机的可见范围更大。"
-        } else {
-            "\nWARNING: bubblewrap is disabled; this file mutation command has broader host visibility."
-        }
+    let body = if supports_markup {
+        escape_notification_body(&content.body)
     } else {
-        ""
+        content.body.clone()
     };
-    let body = format!(
-        "{}{}{}",
-        command_preview(program, args),
-        warning,
-        if zh {
-            "\n是否允许本次执行？"
-        } else {
-            "\nAllow once?"
-        }
-    );
     let provider = notify_rust::Notification::new()
-        .summary(if zh {
-            "Agentic GPT 确认"
-        } else {
-            "Agentic GPT confirmation"
-        })
+        .summary(&content.title)
         .body(&body)
         .action("allow_once", if zh { "允许本次" } else { "Allow once" })
         .action("deny", if zh { "拒绝" } else { "Deny" })
@@ -262,28 +336,19 @@ async fn request_freedesktop_confirmation(
 
 async fn request_hub_confirmation_cancellable(
     state: &AppState,
-    config: &Config,
     program: &str,
     args: &[String],
+    content: &ConfirmationContent,
     cancel_requested: Arc<AtomicBool>,
 ) -> String {
     let preview = command_preview(program, args);
-    // The Hub's notification surface displays at most 1000 characters. Never
-    // obtain authority from a preview that omits part of the operation/scope.
-    if preview.chars().count() > 1000 {
-        log_warn("confirmation preview exceeds notification display limit".to_string());
-        return "provider_unavailable".to_string();
-    }
     let payload = ConfirmationPayload {
         program: program.to_string(),
         args: args.to_vec(),
         command_preview: preview,
         risk_level: risk_level(program),
-        reason: if confirmation_language_is_zh(config) {
-            format!("请求批准本次操作及所示访问范围：{program}")
-        } else {
-            format!("Approve this operation and its displayed access scope: {program}")
-        },
+        reason: content.body.clone(),
+        notification_title: Some(content.title.clone()),
         kind: None,
         server_id: None,
         tool_name: None,
@@ -473,6 +538,7 @@ async fn request_mcp_batch_confirmation_cancellable(
                     command_preview: preview.to_string(),
                     risk_level: "MEDIUM".to_string(),
                     reason: "MCP batch requires one aggregate confirmation".to_string(),
+                    notification_title: None,
                     kind: Some(if temporary_server.is_some() {
                         "mcpBatchSingleServer".to_string()
                     } else {
@@ -688,6 +754,7 @@ async fn request_hub_mcp_confirmation_cancellable(
         command_preview: mcp_tool_command_preview(server_id, tool_name, arguments),
         risk_level: "MEDIUM".to_string(),
         reason: "MCP tool call requires confirmation".to_string(),
+        notification_title: None,
         kind: Some("mcpTool".to_string()),
         server_id: Some(server_id.to_string()),
         tool_name: Some(tool_name.to_string()),

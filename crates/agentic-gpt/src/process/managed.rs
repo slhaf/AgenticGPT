@@ -35,7 +35,7 @@ use crate::{
     audit::{write_audit, AuditRecord},
     config::Config,
     confirmation, exec,
-    policy::{command_policy_decision, PolicyDecision},
+    policy::PolicyDecision,
     skills::{package_sha256, SkillLease},
     state::AppState,
     utils::command_preview,
@@ -1624,6 +1624,9 @@ pub(crate) async fn start_process_batch(
     let wait_seconds = request.effective_wait_seconds();
     let batch_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
     let group = validated_group(request.group.as_deref())?;
+    if let Some(a) = &request.acquire_confirmation {
+        a.validate_scope(true)?;
+    }
     if request.elements.is_empty() {
         let response = ProcessBatchResponse {
             batch_id,
@@ -1647,13 +1650,19 @@ pub(crate) async fn start_process_batch(
         response_budget,
     )?;
     let mut config = Arc::new(state.config.read().await.clone());
-    if let Some(a) = &request.acquire_confirmation {
-        a.validate_scope(true)?;
-    }
     let mut prepared = Vec::with_capacity(request.elements.len());
+    let mut command_evaluation = crate::policy::PolicyEvaluation::new(PolicyDecision::Allow);
+    let original_commands = request
+        .elements
+        .iter()
+        .map(|element| element.command.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     for (index, element) in request.elements.into_iter().enumerate() {
         let cwd = element.cwd.clone().or_else(|| request.cwd.clone());
-        let decision = crate::policy::shell_policy_decision(&config, &element.command);
+        let evaluation = crate::policy::shell_policy_evaluation(&config, &element.command);
+        let decision = evaluation.decision;
+        command_evaluation.merge(evaluation);
         let resolved_working_directory =
             exec::resolve_working_directory(&exec::permissive_paths(&config), cwd.as_deref())?;
         let execution = exec::ExecutionSpec::Shell {
@@ -1710,6 +1719,7 @@ pub(crate) async fn start_process_batch(
         decision,
         "process.batch",
         &preview,
+        &confirmation::automatic_command_reason(&config, &command_evaluation, &original_commands),
     )
     .await?;
     for (element, identity) in prepared.iter().zip(scope_identities) {
@@ -2459,12 +2469,19 @@ fn process_runtime(skill_lease: Option<SkillLease>) -> ManagedProcessRuntime {
 }
 
 fn execution_policy_decision(config: &Config, execution: &exec::ExecutionSpec) -> PolicyDecision {
+    execution_policy_evaluation(config, execution).decision
+}
+
+fn execution_policy_evaluation(
+    config: &Config,
+    execution: &exec::ExecutionSpec,
+) -> crate::policy::PolicyEvaluation {
     match execution {
         exec::ExecutionSpec::Shell { command } => {
-            crate::policy::shell_policy_decision(config, command)
+            crate::policy::shell_policy_evaluation(config, command)
         }
         exec::ExecutionSpec::Argv { program, args } => {
-            command_policy_decision(config, program, args)
+            crate::policy::command_policy_evaluation(config, program, args)
         }
     }
 }
@@ -2483,10 +2500,17 @@ async fn run_async_process(
     resolved_working_directory: Option<PathBuf>,
     prepared_confirmation_result: Option<String>,
 ) {
+    let command_evaluation = execution_policy_evaluation(&config, &request.execution);
+    let original_command = match &request.execution {
+        exec::ExecutionSpec::Shell { command } => command.clone(),
+        exec::ExecutionSpec::Argv { program, args } => crate::utils::command_preview(program, args),
+    };
+    let automatic_reason =
+        confirmation::automatic_command_reason(&config, &command_evaluation, &original_command);
     let (working_directory, decision) = if let Some(prepared) = prepared {
         prepared
     } else {
-        let decision = execution_policy_decision(&config, &request.execution);
+        let decision = command_evaluation.decision;
         set_policy_decision(&state, &process_id, format!("{decision:?}")).await;
         let working_directory = match resolved_working_directory {
             Some(directory) => directory,
@@ -2562,6 +2586,7 @@ async fn run_async_process(
             decision,
             "process.exec",
             &preview,
+            &automatic_reason,
             cancel_requested.clone(),
         )
         .await
@@ -4853,31 +4878,62 @@ mod tests {
                 self.0.abort();
             }
         }
-        for (decision, response, expected, should_write) in [
+        for (decision, response, expected, should_write, mode) in [
             (
                 PolicyDecision::Deny,
                 "allow_once",
                 ProcessState::Completed,
                 true,
+                "explicit",
             ),
-            (PolicyDecision::Allow, "deny", ProcessState::Rejected, false),
+            (
+                PolicyDecision::Allow,
+                "deny",
+                ProcessState::Rejected,
+                false,
+                "explicit",
+            ),
             (
                 PolicyDecision::Allow,
                 "timeout",
                 ProcessState::Completed,
                 true,
+                "explicit",
             ),
             (
                 PolicyDecision::Confirm,
                 "timeout",
                 ProcessState::Rejected,
                 false,
+                "explicit",
             ),
             (
                 PolicyDecision::Deny,
                 "provider_unavailable",
                 ProcessState::Rejected,
                 false,
+                "explicit",
+            ),
+            (
+                PolicyDecision::Confirm,
+                "allow_once",
+                ProcessState::Completed,
+                true,
+                "default",
+            ),
+            (
+                PolicyDecision::Allow,
+                "allow_once",
+                ProcessState::Completed,
+                true,
+                "rule",
+            ),
+            (
+                PolicyDecision::Allow,
+                "allow_once",
+                ProcessState::Completed,
+                true,
+                "incomplete",
             ),
         ] {
             let (state, workspace) = test_state(1).await;
@@ -4887,6 +4943,9 @@ mod tests {
                     default_action: decision,
                     ..Default::default()
                 };
+                if mode == "rule" {
+                    config.policy.command.confirm = vec!["printf **".into()];
+                }
                 config.policy.path = crate::config::PathPolicyConfig::default();
                 config.policy.path.default_action = if decision == PolicyDecision::Deny {
                     crate::config::PathDefaultAction::Deny
@@ -4897,12 +4956,23 @@ mod tests {
                     vec![crate::config::ConfirmationChannel::Ntfy];
             }
             let marker = workspace.join("effect.txt");
-            let mut request = exec_request(&format!("touch {}", marker.display()), &workspace);
-            request.wait_seconds = Some(3);
-            request.acquire_confirmation = Some(
-                serde_json::from_value(serde_json::json!({"reason": "请求批准本次测试操作。"}))
-                    .unwrap(),
+            let command = format!(
+                "printf '{}'; {}touch {}",
+                "x".repeat(1400),
+                if mode == "incomplete" {
+                    "printf '%s' \"$PATH\"; "
+                } else {
+                    ""
+                },
+                marker.display()
             );
+            let mut request = exec_request(&command, &workspace);
+            request.wait_seconds = Some(3);
+            let reason = format!("请求批准 {mode} 场景的测试操作。 ");
+            if mode == "explicit" {
+                request.acquire_confirmation =
+                    Some(serde_json::from_value(serde_json::json!({"reason": reason})).unwrap());
+            }
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
             *state.hub_sender.lock().await = Some(sender);
             let count = Arc::new(AtomicUsize::new(0));
@@ -4919,6 +4989,16 @@ mod tests {
                     {
                         assert!(!marker_before.exists(), "process ran before approval");
                         assert!(payload.command_preview.contains("touch"));
+                        assert!(payload.command_preview.chars().count() > 1000);
+                        assert!(payload.notification_title.is_some());
+                        assert!(payload.reason.chars().count() <= 100);
+                        if mode == "explicit" {
+                            assert_eq!(payload.reason, reason.trim());
+                        } else if mode == "rule" {
+                            assert!(payload.reason.contains("printf **"));
+                        } else {
+                            assert!(payload.reason.ends_with('…'));
+                        }
                         responder_count.fetch_add(1, Ordering::SeqCst);
                         if let Some(sender) = responder_state
                             .pending_confirmations

@@ -69,6 +69,7 @@ fn generation_confirmation(request_id: &str, request_agent_id: &str) -> AgentMes
         agent_id: request_agent_id.to_string(),
         timeout_seconds: 5,
         payload: ConfirmationPayload {
+            notification_title: None,
             program: "generation-probe".to_string(),
             args: Vec::new(),
             command_preview: "generation probe".to_string(),

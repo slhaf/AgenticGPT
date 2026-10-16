@@ -499,10 +499,18 @@ async fn publish_ntfy(
     let ntfy = &remote.ntfy;
     let server_url = ntfy.server_url.trim_end_matches('/');
     let callback_base = ntfy.callback_base_url.trim_end_matches('/');
-    let message = format!(
-        "Agent {agent_id} wants to run:\n{command_preview}\n\nReason: {}\nRisk: {}",
-        payload.reason, payload.risk_level
-    );
+    let title = payload
+        .notification_title
+        .as_deref()
+        .unwrap_or("AgenticGPT confirmation");
+    let message = if payload.notification_title.is_some() {
+        payload.reason.clone()
+    } else {
+        format!(
+            "Agent {agent_id} wants to run:\n{command_preview}\n\nReason: {}\nRisk: {}",
+            payload.reason, payload.risk_level
+        )
+    };
     let actions = ntfy_confirmation_actions(
         callback_base,
         confirmation_id,
@@ -511,7 +519,7 @@ async fn publish_ntfy(
     );
     let body = json!({
         "topic": ntfy.topic,
-        "title": "AgenticGPT confirmation",
+        "title": title,
         "message": message,
         "priority": 5,
         "tags": ["warning"],

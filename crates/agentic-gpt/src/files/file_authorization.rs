@@ -65,6 +65,7 @@ pub(super) async fn authorize_file_targets(
         decision,
         operation,
         &preview,
+        "文件访问需要确认",
     )
     .await
     .map_err(confirmation_error)?;

@@ -460,7 +460,7 @@ pub(super) struct TmuxPasteTextArgs {
     pub(super) submit: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "可选单次确认请求；提供对象即主动请求且必须成功，reason 必填；省略对象时按配置执行。"
+        description = "可选主动确认请求，reason 必填；基础决策为 Confirm，省略对象也会自动确认，未获准不写入。"
     )]
     pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
 }
