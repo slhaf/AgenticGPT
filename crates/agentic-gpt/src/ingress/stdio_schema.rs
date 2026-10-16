@@ -14,9 +14,9 @@ use crate::{
 const PATCH_SCHEMA_DESCRIPTION: &str =
     "以 *** Begin Patch 开始、*** End Patch 结束；支持新增、删除、更新和移动文件。";
 
-fn acquire_confirmation_schema(allow_scope: bool, default: bool) -> Value {
+fn acquire_confirmation_schema(allow_scope: bool) -> Value {
     let mut properties = json!({
-        "acquire":{"type":"boolean","default":default,"description":if default { "是否主动请求确认；此操作要求主动确认成功，拒绝、超时或提供方不可用时不执行。" } else { "是否主动请求确认；获准可单次覆盖策略拒绝；明确拒绝中止，超时/过期/不可用回退配置策略，仅 Allow 可继续。" }},
+        "reason":{"type":"string","minLength":1,"maxLength":100,"pattern":"\\S","description":"向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。"},
         "method":{"type":"string","enum":["ntfy","freedesktop"],"description":"可选确认提供方；省略沿用配置。"},
     });
     if allow_scope {
@@ -24,11 +24,11 @@ fn acquire_confirmation_schema(allow_scope: bool, default: bool) -> Value {
         properties["write"] = json!({"type":"array", "items":{"type":"string"}, "default":[]});
     }
     json!({
-        "type":"object", "additionalProperties":false,
+        "type":"object", "additionalProperties":false, "required":["reason"],
         "description": if allow_scope {
-            "可选单次确认。read/write 临时路径范围仅适用于本次命令，必须同时 acquire=true；不改变持久配置。"
+            "提供对象即主动请求单次确认；reason 必填。read/write 临时路径范围仅适用于本次命令，不改变持久配置。"
         } else {
-            "可选单次确认。仅接受 acquire/method，不接受 read/write 字段；确认仅作用于本次操作，不改变持久配置。"
+            "提供对象即主动请求单次确认；reason 必填，仅接受 reason/method，不接受 read/write 字段；不改变持久配置。"
         },
         "properties": properties
     })
@@ -278,10 +278,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         }
         "browser.list" => {}
         "file.read" => {
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(false, false),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(false));
             add("path", string("策略允许的文件/目录路径。"));
             add("metadata", boolean("返回文件信息；缺省 false。"));
             add("startLine", number("文本起始行（含，>0）。"));
@@ -300,10 +297,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             );
         }
         "file.search" => {
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(false, false),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(false));
             add("path", string("搜索根路径。"));
             add("query", string("非空匹配文本。"));
             add(
@@ -424,10 +418,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
 
         "file.edit" => {
             add("patch", string(PATCH_SCHEMA_DESCRIPTION));
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(false, false),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(false));
         }
         "mcp.list" => add(
             "serverId",
@@ -444,10 +435,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "description": "可选分组键；trim 后精确匹配。",
                 }),
             );
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(true, false),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(true));
             add(
                 "cwd",
                 string("可选工作目录；省略使用 Agent 工作区根目录，在可信 Bash 初始化后应用。"),
@@ -469,10 +457,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     }, "required": ["command"], "additionalProperties": false}
                 }),
             );
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(true, false),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(true));
             add(
                 "group",
                 json!({
@@ -573,10 +558,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             );
             add("name", string("create/close 的 session 名。"));
             add("cwd", string("create 的工作目录。"));
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(false, false),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(false));
         }
         "tmux.panes" => {
             add(
@@ -599,19 +581,13 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             add("target", string("非 shell pane/TUI；shell pane 拒绝。"));
             add("text", string("写入 pane 的文本。"));
             add("submit", boolean("是否追加 Enter；缺省 false。"));
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(false, true),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(false));
         }
         "tmux.exec" => {
             add("target", string("存活且非 copy mode 的 shell pane。"));
             add("program", string("shell 程序名/builtin。"));
             add("args", strings("program 参数数组。"));
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(false, false),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(false));
             add(
                 "waitMs",
                 number("等待 pane 输出的毫秒数；缺省 300、最多 5000；不代表命令完成。"),
@@ -621,17 +597,11 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         "tmux.createSession" => {
             add("name", string("要创建或复用的 session 名。"));
             add("cwd", string("session 工作目录；受路径策略约束。"));
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(false, false),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(false));
         }
         "tmux.closeSession" => {
             add("name", string("要关闭的 session 名。"));
-            add(
-                "acquireConfirmation",
-                acquire_confirmation_schema(false, false),
-            );
+            add("acquireConfirmation", acquire_confirmation_schema(false));
         }
         "mcp.listServers" => add("agentId", string("目标 Agent ID。")),
         "mcp.listTools" => add("serverId", string("目标 Agent 的 server ID。")),
@@ -996,10 +966,10 @@ fn tool_description(name: &str) -> String {
         "tmux.listPanes" => "列出 agentId 指定 Agent 的 tmux panes，可选 session 限定范围；返回 panes 元数据。只读；无效 session 或远端错误返回 error。".to_string(),
         "tmux.panes" => "本地 pane 合并入口：list 可选 session，capture 需 target、可选 lines；分别返回 panes 或有界 capture 文本。只观察持久终端状态，不提交命令；目标错误返回 error。".to_string(),
         "tmux.capturePane" => "抓取 agentId 指定 Agent 的一个 pane 历史；返回 capture 文本，lines 缺省 160 并受服务端上限约束。只读；无效 target 或 tmux 错误返回 error。".to_string(),
-        "tmux.pasteText" => "向非 shell pane/TUI 写入 text；shell pane 会拒绝并应改用 tmux.exec。submit=true 会追加 Enter，可能触发界面动作；成功返回 status=completed。acquireConfirmation.acquire 缺省 true，确认拒绝或写入失败返回 error。".to_string(),
+        "tmux.pasteText" => "向非 shell pane/TUI 写入 text；shell pane 会拒绝并应改用 tmux.exec。submit=true 会追加 Enter，可能触发界面动作；成功返回 status=completed。基础策略要求确认；省略 acquireConfirmation 时自动请求，提供对象时使用 reason 主动请求；未获准或写入失败返回 error。".to_string(),
         "tmux.exec" => "把结构化 program/args 提交到本地 shell pane；返回 submitted 及可选输出快照/warning，不代表命令已完成或成功。策略可拒绝/要求确认；命令会在 pane 中真实执行。".to_string(),
         "tmux.createSession" => "在策略允许的 cwd 创建或复用 agentId 指定 Agent 的持久 tmux session；返回 session、cwd、created。目录或 tmux 错误返回 error；创建后 session 持续存在。".to_string(),
-        "tmux.closeSession" => "关闭 agentId 指定 Agent 的持久 session，会结束其中的 pane/任务；acquireConfirmation.acquire 缺省 false。返回关闭结果或确认/执行错误；仅在确需终止时调用。".to_string(),
+        "tmux.closeSession" => "关闭 agentId 指定 Agent 的持久 session，会结束其中的 pane/任务；省略 acquireConfirmation 不主动请求确认，提供对象即主动请求。返回关闭结果或确认/执行错误；仅在确需终止时调用。".to_string(),
         "mcp.listServers" => "列出已配置的下游 MCP servers，可选 agentId 指定目标；返回 id、enabled、transport 和 url 摘要。只读发现；目标或远端错误返回 error。".to_string(),
         "mcp.listTools" => "用 agentId 与 serverId 查询下游 MCP server 暴露的工具定义；返回其原始 tools/schema，便于选择 toolName 和构造 arguments。连接、配置或远端错误返回 error；只读。".to_string(),
         "mcp.list" => "本地合并发现入口：省略 serverId 列出已配置服务器，提供时连接该 server 并列出 tools；返回 servers 或原始工具定义。配置/连接错误返回 error；只读。".to_string(),

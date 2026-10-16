@@ -1630,10 +1630,7 @@ pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
             let audit_status = write_patch_audits(
                 &config,
                 &response,
-                request
-                    .acquire_confirmation
-                    .as_ref()
-                    .is_some_and(|a| a.effective_acquire(false)),
+                request.acquire_confirmation.is_some(),
                 started.elapsed().as_millis(),
             );
             let mut value = slim_edit_response(&response);
@@ -1644,10 +1641,7 @@ pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
             let audit_status = write_patch_failure_audit(
                 &config,
                 &error.code,
-                request
-                    .acquire_confirmation
-                    .as_ref()
-                    .is_some_and(|a| a.effective_acquire(false)),
+                request.acquire_confirmation.is_some(),
                 started.elapsed().as_millis(),
             );
             let mut value = error.value();

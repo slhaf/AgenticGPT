@@ -115,11 +115,7 @@ pub(crate) async fn paste_text(
 ) -> Value {
     let started = Instant::now();
     let target = request.target.clone();
-    let need_confirm = request
-        .acquire_confirmation
-        .as_ref()
-        .map(|a| a.effective_acquire(true))
-        .unwrap_or(true);
+    let need_confirm = true;
     let submit = request.submit;
     let request_source = context.source();
     let result = paste_text_inner(state, request).await;
@@ -131,7 +127,7 @@ pub(crate) async fn paste_text(
         Some(target),
         None,
         need_confirm,
-        if need_confirm { "Confirm" } else { "Allow" },
+        "Confirm",
         &request_source,
         &result,
         started,
@@ -163,15 +159,13 @@ async fn paste_text_inner(state: &AppState, request: TmuxPasteTextRequest) -> Va
         state,
         &config,
         request.acquire_confirmation.as_ref(),
-        true,
-        PolicyDecision::Allow,
+        PolicyDecision::Confirm,
         "tmux.pasteText",
         &[
             request.target.clone(),
             format!("submit={}", request.submit),
             request.text.clone(),
         ],
-        true,
     )
     .await
     {
@@ -209,11 +203,7 @@ pub(crate) async fn exec(
     let program = request.program.clone();
     let args = request.args.clone();
     let target = request.target.clone();
-    let need_confirm = request
-        .acquire_confirmation
-        .as_ref()
-        .map(|a| a.effective_acquire(false))
-        .unwrap_or(false);
+    let need_confirm = request.acquire_confirmation.is_some();
     let request_source = context.source();
     let config = state.config.read().await.clone();
     let decision = command_policy_decision(&config, &program, &args);
@@ -342,11 +332,9 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
         state,
         &config,
         request.acquire_confirmation.as_ref(),
-        false,
         decision,
         "tmux.exec",
         &preview,
-        false,
     )
     .await
     {
@@ -502,11 +490,9 @@ pub(crate) async fn create_session(
         state,
         &config,
         request.acquire_confirmation.as_ref(),
-        false,
         decision,
         "tmux.createSession",
         &[name.clone(), resolved.display().to_string()],
-        false,
     )
     .await
     {
@@ -642,11 +628,7 @@ pub(crate) async fn close_session(
 ) -> Value {
     let started = Instant::now();
     let name = request.name.clone();
-    let need_confirm = request
-        .acquire_confirmation
-        .as_ref()
-        .map(|a| a.effective_acquire(false))
-        .unwrap_or(false);
+    let need_confirm = request.acquire_confirmation.is_some();
     let request_source = context.source();
     let config = state.config.read().await.clone();
     let result = match validate_close_session(&request) {
@@ -655,11 +637,9 @@ pub(crate) async fn close_session(
             state,
             &config,
             request.acquire_confirmation.as_ref(),
-            false,
             PolicyDecision::Allow,
             "tmux.closeSession",
             std::slice::from_ref(&name),
-            false,
         )
         .await
         {
@@ -815,38 +795,27 @@ async fn authorize_tmux(
     state: &AppState,
     config: &Config,
     acquisition: Option<&agentic_gpt_protocol::AcquireConfirmation>,
-    default: bool,
     decision: PolicyDecision,
     operation: &str,
     args: &[String],
-    strict: bool,
 ) -> Result<bool, TmuxError> {
     if let Some(a) = acquisition {
         a.validate_scope(false)
             .map_err(|r| TmuxError::new("tmux_invalid_acquisition", &r))?;
     }
-    confirmation::authorize_operation(
-        state,
-        config,
-        acquisition,
-        default,
-        decision,
-        operation,
-        args,
-        strict,
-    )
-    .await
-    .map(|a| a.approved)
-    .map_err(|r| {
-        TmuxError::new(
-            if r == "policy_denied" {
-                "policy_denied"
-            } else {
-                "confirmation_denied"
-            },
-            &r,
-        )
-    })
+    confirmation::authorize_operation(state, config, acquisition, decision, operation, args)
+        .await
+        .map(|a| a.approved)
+        .map_err(|r| {
+            TmuxError::new(
+                if r == "policy_denied" {
+                    "policy_denied"
+                } else {
+                    "confirmation_denied"
+                },
+                &r,
+            )
+        })
 }
 
 async fn tmux_output<I, S>(args: I) -> Result<String, TmuxError>

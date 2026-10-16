@@ -1707,11 +1707,9 @@ pub(crate) async fn start_process_batch(
         &state,
         &config,
         request.acquire_confirmation.as_ref(),
-        false,
         decision,
         "process.batch",
         &preview,
-        false,
     )
     .await?;
     for (element, identity) in prepared.iter().zip(scope_identities) {
@@ -2130,11 +2128,7 @@ pub(crate) async fn start_prepared_managed_batch(
             let audit = ManagedAuditContext {
                 config: config.clone(),
                 request_source: spec.request_source.clone(),
-                need_confirm: spec
-                    .request
-                    .acquire_confirmation
-                    .as_ref()
-                    .is_some_and(|a| a.effective_acquire(false)),
+                need_confirm: spec.request.acquire_confirmation.is_some(),
                 policy_decision: format!("{:?}", spec.decision),
                 confirmation_result: spec.confirmation_result.clone(),
                 skill_id: None,
@@ -2253,11 +2247,7 @@ async fn start_managed_process_inner(
                         execution_policy_decision(&config, &request.execution)
                             == PolicyDecision::Deny
                     });
-                !denied
-                    || request
-                        .acquire_confirmation
-                        .as_ref()
-                        .is_some_and(|a| a.effective_acquire(false))
+                !denied || request.acquire_confirmation.is_some()
             })
     } else {
         None
@@ -2270,10 +2260,7 @@ async fn start_managed_process_inner(
     let audit = ManagedAuditContext {
         config: config.clone(),
         request_source: options.request_source,
-        need_confirm: request
-            .acquire_confirmation
-            .as_ref()
-            .is_some_and(|a| a.effective_acquire(false)),
+        need_confirm: request.acquire_confirmation.is_some(),
         policy_decision: prepared
             .as_ref()
             .map(|(_, decision)| format!("{decision:?}"))
@@ -2552,9 +2539,7 @@ async fn run_async_process(
         }
     };
     set_policy_decision(&state, &process_id, format!("{decision:?}")).await;
-    if decision == PolicyDecision::Confirm
-        || acquisition.is_some_and(|a| a.effective_acquire(false))
-    {
+    if decision == PolicyDecision::Confirm || acquisition.is_some() {
         set_process_state(&state, &process_id, ProcessState::WaitingConfirmation).await;
     }
     let identity = match exec::scope_identity(&working_directory, &request.execution, acquisition) {
@@ -2574,11 +2559,9 @@ async fn run_async_process(
             &state,
             &config,
             acquisition,
-            false,
             decision,
             "process.exec",
             &preview,
-            false,
             cancel_requested.clone(),
         )
         .await
@@ -4916,8 +4899,10 @@ mod tests {
             let marker = workspace.join("effect.txt");
             let mut request = exec_request(&format!("touch {}", marker.display()), &workspace);
             request.wait_seconds = Some(3);
-            request.acquire_confirmation =
-                Some(serde_json::from_value(serde_json::json!({"acquire":true})).unwrap());
+            request.acquire_confirmation = Some(
+                serde_json::from_value(serde_json::json!({"reason": "请求批准本次测试操作。"}))
+                    .unwrap(),
+            );
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
             *state.hub_sender.lock().await = Some(sender);
             let count = Arc::new(AtomicUsize::new(0));
@@ -5015,7 +5000,7 @@ mod tests {
         request.wait_seconds = Some(3);
         request.acquire_confirmation = Some(
             serde_json::from_value(
-                serde_json::json!({"acquire":true,"write":[writable.to_string_lossy()]}),
+                serde_json::json!({"reason": "请求批准本次测试操作。","write":[writable.to_string_lossy()]}),
             )
             .unwrap(),
         );
@@ -5138,7 +5123,7 @@ mod tests {
             request.wait_seconds = Some(3);
             if scope == "read" || scope == "write" || scope == "root" {
                 request.acquire_confirmation = Some(serde_json::from_value(serde_json::json!({
-                    "acquire": true,
+                    "reason": "请求批准本次测试操作。",
                     "read": if scope == "read" { vec![private.clone()] } else if scope == "root" { vec![PathBuf::from("/usr")] } else { Vec::new() },
                     "write": if scope == "write" { vec![granted_child.clone()] } else if scope == "root" { vec![public.clone()] } else { Vec::new() },
                 })).unwrap());
@@ -5234,8 +5219,10 @@ mod tests {
             "without-confirmation"
         );
         let mut request = exec_request("printf must-not-run > second", &workspace);
-        request.acquire_confirmation =
-            Some(serde_json::from_value(serde_json::json!({"acquire":true})).unwrap());
+        request.acquire_confirmation = Some(
+            serde_json::from_value(serde_json::json!({"reason": "请求批准本次测试操作。"}))
+                .unwrap(),
+        );
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         *state.hub_sender.lock().await = Some(sender);
         let responder_state = state.clone();

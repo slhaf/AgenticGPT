@@ -2921,8 +2921,7 @@ def run_hub_event_gate(
     def start_event_process(name: str) -> str:
         response, started = hub_json(
             hub_port, hub_key, "POST", "/v1/process/exec",
-            {"agentId": normal_id, "command": shlex.join([str(programs[name])]),
-             "acquireConfirmation": {"acquire": False}, "waitSeconds": 0},
+            {"agentId": normal_id, "command": shlex.join([str(programs[name])]), "waitSeconds": 0},
             f"Hub real {name} event producer",
         )
         if response.status != 200 or started.get("state") not in ("starting", "running"):
@@ -3529,7 +3528,6 @@ def run_hub_late_response_gate(
             "command": shlex.join(["/usr/bin/sleep", "1"]),
             "cwd": str(agent_workspace),
             "group": "parity-late-event",
-            "acquireConfirmation": {"acquire": False},
             "waitSeconds": 30,
         },
         "Hub real delayed process.exec",
@@ -3939,7 +3937,6 @@ def run_hub_feedback_delta_recovery_gate(
                         {"command": shlex.join(["/usr/bin/printf", "feedback-child-A"])},
                         {"command": shlex.join(["/usr/bin/printf", "feedback-child-B"])},
                     ],
-                    "acquireConfirmation": {"acquire": False},
                     "waitSeconds": 30,
                 },
                 f"{scenario} delayed actual process.batch",
@@ -4204,7 +4201,6 @@ def run_hub_agent_crash_recovery_gate(
                     "agentId": agent_id,
                     "command": shlex.join(["/usr/bin/sleep", "1"]),
                     "group": group,
-                    "acquireConfirmation": {"acquire": False},
                     "waitSeconds": 30,
                 },
                 "Hub Agent crash after persisted process completion",
@@ -5434,7 +5430,6 @@ def process_request(port: int, api_key: str, agent_id: str, command: str, group:
         "agentId": agent_id,
         "command": command,
         "group": group,
-        "acquireConfirmation": {"acquire": False},
     }
     if cwd is not None:
         payload["cwd"] = cwd
@@ -5891,7 +5886,6 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                         "agentId": normal_id,
                         "command": f"/usr/bin/pwd; {shlex.join(['/usr/bin/printf', PROCESS_MARKERS[1]])}",
                         "cwd": str(normal_workspace),
-                        "acquireConfirmation": {"acquire": False},
                         "waitSeconds": 5,
                     },
                 },
@@ -5992,7 +5986,6 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                             "/bin/sh", "-c", PROCESS_MCP_PAGINATION_COMMAND,
                             "sh", PROCESS_OVERFLOW_MARKER,
                         ]),
-                        "acquireConfirmation": {"acquire": False},
                         "waitSeconds": 5,
                     },
                 },
@@ -6330,8 +6323,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 hub_port, hub_key, full_session, 6, "tools/call",
                 {"name": "process.exec", "arguments": {
                     "agentId": normal_id,
-                    "command": shlex.join(["/usr/bin/echo", "must-be-denied"]),
-                    "acquireConfirmation": {"acquire": False}, "waitSeconds": 5,
+                    "command": shlex.join(["/usr/bin/echo", "must-be-denied"]), "waitSeconds": 5,
                 }},
                 "Hub Full policy denied process",
             ),
@@ -6394,7 +6386,6 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "command": f"/usr/bin/pwd; {shlex.join(['/usr/bin/printf', PROCESS_MARKERS[2]])}",
             "cwd": str(normal_workspace),
             "group": "parity-completed",
-            "acquireConfirmation": {"acquire": False},
             "waitSeconds": 5,
         }
         validate_instance(document, schemas, "ProcessExecRequest", completed_request, "Hub HTTP process.exec request")
@@ -6406,7 +6397,6 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "program": "/usr/bin/printf",
             "args": [PROCESS_MARKERS[2]],
             "group": "parity-legacy-exec",
-            "acquireConfirmation": {"acquire": False},
             "waitSeconds": 5,
         }
         assert_rejected(
@@ -6466,7 +6456,6 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                     "agentId": normal_id,
                     "program": "/usr/bin/true",
                     "args": [],
-                    "acquireConfirmation": {"acquire": False},
                     "waitSeconds": 5,
                 },
             },
@@ -6588,7 +6577,6 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                     "command": f"/usr/bin/pwd; {shlex.join(['/usr/bin/printf', PROCESS_MARKERS[4]])}",
                 },
             ],
-            "acquireConfirmation": {"acquire": False},
             "waitSeconds": 5,
         }
         validate_instance(document, schemas, "ProcessBatchExecRequest", batch_payload, "Hub HTTP process.batch request")
@@ -6607,7 +6595,6 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 },
                 {"program": "/usr/bin/pwd", "args": []},
             ],
-            "acquireConfirmation": {"acquire": False},
             "waitSeconds": 5,
         }
         assert_rejected(

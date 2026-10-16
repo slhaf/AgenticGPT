@@ -62,11 +62,9 @@ pub(super) async fn authorize_file_targets(
         state,
         config,
         acquisition,
-        false,
         decision,
         operation,
         &preview,
-        false,
     )
     .await
     .map_err(confirmation_error)?;
@@ -122,7 +120,7 @@ pub(super) async fn authorize_read_requests(
             .map_err(|r| FileError::new("file_invalid_acquisition", &r))?;
     }
     let unrestricted = exec::permissive_paths(config);
-    let proactive = acquisition.is_some_and(|a| a.effective_acquire(false));
+    let proactive = acquisition.is_some();
     let mut targets = Vec::new();
     let mut roots = Vec::new();
     for request in requests {

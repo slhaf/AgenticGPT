@@ -1534,11 +1534,9 @@ mod reporting_tests {
                     &state,
                     &config,
                     None,
-                    true,
-                    crate::policy::PolicyDecision::Allow,
+                    crate::policy::PolicyDecision::Confirm,
                     "true",
                     &[],
-                    true,
                 );
                 let (approval, response) = tokio::join!(confirmation, receive_confirmation);
                 response?;

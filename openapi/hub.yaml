@@ -543,7 +543,7 @@ paths:
   /v1/tmux/paste:
     post:
       operationId: tmuxPasteText
-      description: Paste text into a non-shell tmux pane or TUI. Shell panes are rejected and must use tmuxExec. Confirmation defaults to true.
+      description: 向非 shell tmux 窗格或 TUI 粘贴文本；shell 窗格会被拒绝，应改用 tmuxExec。基础决策为 Confirm，省略对象也会自动确认；提供对象时使用 reason 主动请求，未获准不写入。
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -591,7 +591,7 @@ paths:
   /v1/tmux/sessions/close:
     post:
       operationId: tmuxCloseSession
-      description: Close a persistent tmux workspace only when explicitly no longer needed. Confirmation defaults to true.
+      description: 仅在明确不再需要时关闭持久 tmux 工作区。省略 acquireConfirmation 不主动请求确认，提供对象即主动请求。
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -1676,7 +1676,7 @@ components:
           default: false
         acquireConfirmation:
           $ref: "#/components/schemas/AcquireConfirmationNoScope"
-          description: 此操作的 acquire 缺省为 true；省略整个对象也请求确认。
+          description: 提供对象即主动请求确认并要求成功；省略对象时按配置执行。
     TmuxCreateSessionRequest:
       type: object
       required:
@@ -3716,22 +3716,15 @@ components:
     AcquireConfirmation:
       type: object
       additionalProperties: false
-      description: 可选单次确认；获准可覆盖本次命令策略和所请求路径范围，不改变持久配置。明确拒绝中止；超时、过期或不可用回退配置策略，未获准范围不生效。非空 read/write 必须同时 acquire=true。
-      anyOf:
-        - required: [acquire]
-          properties:
-            acquire:
-              const: true
-        - properties:
-            read:
-              maxItems: 0
-            write:
-              maxItems: 0
+      required: [reason]
+      description: 提供对象即主动请求单次确认；获准可覆盖本次命令策略和所请求路径范围，不改变持久配置。明确拒绝中止；超时、过期或不可用回退配置策略，未获准范围不生效。
       properties:
-        acquire:
-          type: boolean
-          default: false
-          description: 是否主动请求确认；省略为 false。
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: '\S'
+          description: 向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。
         method:
           type: string
           enum: [ntfy, freedesktop]
@@ -3751,11 +3744,15 @@ components:
     AcquireConfirmationNoScope:
       type: object
       additionalProperties: false
-      description: 可选单次确认；tmux.pasteText 缺省主动请求并要求确认严格成功，其他 tmux 操作缺省不主动请求。明确拒绝中止；非严格主动确认超时、过期或不可用时回退配置策略。仅接受 acquire/method，不接受 read/write 字段。
+      required: [reason]
+      description: 提供对象即主动请求单次确认。tmux.pasteText 的基础决策为 Confirm，省略对象也自动确认，未获准不写入。其他操作省略对象时按策略执行；主动确认明确拒绝中止，超时、过期或不可用时回退配置策略。仅接受 reason/method，不接受 read/write 字段。
       properties:
-        acquire:
-          type: boolean
-          description: 是否主动请求确认；缺省值由具体操作决定。
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: '\S'
+          description: 向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。
         method:
           type: string
           enum: [ntfy, freedesktop]

@@ -47,21 +47,17 @@ pub(crate) async fn authorize_operation(
     state: &AppState,
     config: &Config,
     acquisition: Option<&agentic_gpt_protocol::AcquireConfirmation>,
-    default_acquire: bool,
     decision: crate::policy::PolicyDecision,
     program: &str,
     args: &[String],
-    strict: bool,
 ) -> Result<OperationAuthorization, String> {
     authorize_operation_cancellable(
         state,
         config,
         acquisition,
-        default_acquire,
         decision,
         program,
         args,
-        strict,
         Arc::new(AtomicBool::new(false)),
     )
     .await
@@ -72,25 +68,23 @@ pub(crate) async fn authorize_operation_cancellable(
     state: &AppState,
     config: &Config,
     acquisition: Option<&agentic_gpt_protocol::AcquireConfirmation>,
-    default_acquire: bool,
     decision: crate::policy::PolicyDecision,
     program: &str,
     args: &[String],
-    strict: bool,
     cancelled: Arc<AtomicBool>,
 ) -> Result<OperationAuthorization, String> {
     use crate::policy::PolicyDecision;
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    let acquire = acquisition
-        .map(|a| a.effective_acquire(default_acquire))
-        .unwrap_or(default_acquire);
+    if let Some(acquisition) = acquisition {
+        acquisition.validate()?;
+    }
     let method = acquisition
         .and_then(|a| a.method.as_ref())
         .map(|m| m.as_str());
     let mut attempted = None;
-    if acquire {
+    if acquisition.is_some() {
         let result = request_confirmation_cancellable(
             state,
             config,
@@ -109,12 +103,10 @@ pub(crate) async fn authorize_operation_cancellable(
                 result: Some(result),
             });
         }
-        if strict
-            || !matches!(
-                result.as_str(),
-                "timeout" | "expired" | "provider_unavailable"
-            )
-        {
+        if !matches!(
+            result.as_str(),
+            "timeout" | "expired" | "provider_unavailable"
+        ) {
             return Err(result);
         }
         attempted = Some(result);

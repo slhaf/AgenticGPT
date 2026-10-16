@@ -1218,7 +1218,7 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
         ),
     ] {
         for field in ["read", "write"] {
-            arguments["acquireConfirmation"] = json!({field: []});
+            arguments["acquireConfirmation"] = json!({"reason":"请求批准本次测试操作。",field: []});
             let error = server
                 .call(
                     CallToolRequestParams::new(tool)
@@ -2030,7 +2030,7 @@ async fn managed_batch_uses_one_confirmation_for_all_elements() -> anyhow::Resul
             "process.batch",
             json!({
                 "elements": [{"command": "true"}, {"command": "true"}],
-                "acquireConfirmation": {"acquire": true},
+                "acquireConfirmation": {"reason": "请求批准本次测试操作。"},
                 "waitSeconds": 5
             }),
         )
@@ -2083,7 +2083,7 @@ async fn denied_process_batch_creates_no_processes() -> anyhow::Result<()> {
             "process.batch",
             json!({
                 "elements": [{"command": "true"}, {"command": "true"}],
-                "acquireConfirmation": {"acquire": true},
+                "acquireConfirmation": {"reason": "请求批准本次测试操作。"},
                 "waitSeconds": 5
             }),
         )
@@ -2252,7 +2252,7 @@ where
         "file.edit",
         json!({
             "patch": patch,
-            "acquireConfirmation": {"acquire": true}
+            "acquireConfirmation": {"reason": "请求批准本次测试操作。"}
         }),
         decision,
         before_reply,
@@ -2356,7 +2356,7 @@ async fn file_search_explicit_confirmation_preserves_hidden_and_ignored_selectio
 
     let (expanded, count) = file_operation_with_hub_confirmation(&server, "file.search", json!({
         "path": ".", "query": "needle", "include": ["*.txt"], "hidden": true, "respectGitignore": false,
-        "acquireConfirmation": {"acquire": true}
+        "acquireConfirmation": {"reason": "请求批准本次测试操作。"}
     }), "allow_once", || Ok(())).await?;
     assert_eq!(count, 1);
     let matches = expanded["matches"]
@@ -3197,7 +3197,7 @@ async fn file_edit_add_creates_nested_parents_after_whole_patch_preflight() -> a
     let confirmation_rejected = server
         .dispatch(
             "file.edit",
-            json!({"patch":"*** Begin Patch\n*** Add File: confirmation/nested/new.txt\n+new\n*** End Patch","acquireConfirmation": {"acquire": true}}),
+            json!({"patch":"*** Begin Patch\n*** Add File: confirmation/nested/new.txt\n+new\n*** End Patch","acquireConfirmation": {"reason": "请求批准本次测试操作。"}}),
         )
         .await?;
     assert_eq!(confirmation_rejected["error"]["code"], "path_denied");
@@ -3422,7 +3422,7 @@ async fn file_edit_apply_patch_context_mismatch_and_confirmation_do_not_write() 
         .clear();
     server.state.config.write().await.policy.path.deny = vec![workspace.join("good.txt")];
     let denied = server
-            .dispatch("file.edit", json!({"patch":"*** Begin Patch\n*** Update File: good.txt\n@@\n-good\n+confirmed\n*** End Patch","acquireConfirmation": {"acquire": true}}))
+            .dispatch("file.edit", json!({"patch":"*** Begin Patch\n*** Update File: good.txt\n@@\n-good\n+confirmed\n*** End Patch","acquireConfirmation": {"reason": "请求批准本次测试操作。"}}))
             .await?;
     assert_eq!(denied["error"]["code"], "path_denied");
     assert_eq!(

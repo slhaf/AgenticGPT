@@ -12,6 +12,18 @@ use super::{
     default_room_wait_seconds, default_standard_wait_seconds,
 };
 
+fn deserialize_confirmation_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let confirmation = AcquireConfirmation {
+        reason: String::deserialize(deserializer)?,
+        ..AcquireConfirmation::default()
+    };
+    confirmation.validate().map_err(serde::de::Error::custom)?;
+    Ok(confirmation.reason)
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum AcquireConfirmationMethodArgs {
@@ -31,30 +43,28 @@ impl From<AcquireConfirmationMethodArgs> for AcquireConfirmationMethod {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct AcquireConfirmationArgs {
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_confirmation_reason")]
     #[schemars(
-        description = "是否主动请求确认；省略为 false。获准可单次覆盖拒绝；明确拒绝中止，超时／过期／不可用回退配置策略，未获准路径范围不生效。"
+        length(min = 1, max = 100),
+        regex(pattern = r"\S"),
+        description = "向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。"
     )]
-    acquire: Option<bool>,
+    reason: String,
     #[serde(default)]
     #[schemars(description = "确认提供方；省略沿用 Agent 配置。")]
     method: Option<AcquireConfirmationMethodArgs>,
     #[serde(default)]
-    #[schemars(
-        description = "本次命令的临时读取路径范围；必须同时 acquire=true。只在本次命令执行期间生效。"
-    )]
+    #[schemars(description = "本次命令的临时读取路径范围；只在本次命令执行期间生效。")]
     read: Vec<String>,
     #[serde(default)]
-    #[schemars(
-        description = "本次命令的临时写入路径范围；必须同时 acquire=true。只在本次命令执行期间生效。"
-    )]
+    #[schemars(description = "本次命令的临时写入路径范围；只在本次命令执行期间生效。")]
     write: Vec<String>,
 }
 
 impl From<AcquireConfirmationArgs> for AcquireConfirmation {
     fn from(value: AcquireConfirmationArgs) -> Self {
         Self {
-            acquire: value.acquire,
+            reason: value.reason,
             method: value.method.map(Into::into),
             read: value.read,
             write: value.write,
@@ -65,11 +75,13 @@ impl From<AcquireConfirmationArgs> for AcquireConfirmation {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct AcquireConfirmationNoScopeArgs {
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_confirmation_reason")]
     #[schemars(
-        description = "是否主动请求确认；默认值由操作决定。获准可单次覆盖策略，不改配置。tmux.pasteText 要求主动确认严格成功；其他操作在主动确认超时／过期／不可用时回退配置，明确拒绝中止。"
+        length(min = 1, max = 100),
+        regex(pattern = r"\S"),
+        description = "向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。"
     )]
-    acquire: Option<bool>,
+    reason: String,
     #[serde(default)]
     #[schemars(description = "确认提供方；省略沿用 Agent 配置。")]
     method: Option<AcquireConfirmationMethodArgs>,
@@ -78,7 +90,7 @@ pub(super) struct AcquireConfirmationNoScopeArgs {
 impl From<AcquireConfirmationNoScopeArgs> for AcquireConfirmation {
     fn from(value: AcquireConfirmationNoScopeArgs) -> Self {
         Self {
-            acquire: value.acquire,
+            reason: value.reason,
             method: value.method.map(Into::into),
             ..Self::default()
         }
@@ -229,7 +241,7 @@ pub(super) struct ProcessExecArgs {
     pub(super) command: String,
     #[serde(default)]
     #[schemars(
-        description = "可选单次确认请求；省略或 acquire 省略时不主动请求确认。策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
+        description = "可选单次确认请求；提供对象即主动请求，reason 必填。省略对象时不主动请求确认，策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
     )]
     pub(super) acquire_confirmation: Option<AcquireConfirmationArgs>,
     #[serde(default)]
@@ -262,7 +274,7 @@ pub(super) struct ProcessBatchArgs {
     pub(super) elements: Vec<ProcessBatchElementArgs>,
     #[serde(default)]
     #[schemars(
-        description = "可选单次确认请求；省略或 acquire 省略时不主动请求确认。策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
+        description = "可选单次确认请求；提供对象即主动请求，reason 必填。省略对象时不主动请求确认，策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
     )]
     pub(super) acquire_confirmation: Option<AcquireConfirmationArgs>,
     #[serde(default)]
@@ -448,7 +460,7 @@ pub(super) struct TmuxPasteTextArgs {
     pub(super) submit: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "可选单次确认请求；省略或 acquire 省略时主动请求确认，显式 acquire=false 跳过主动确认。"
+        description = "可选单次确认请求；提供对象即主动请求且必须成功，reason 必填；省略对象时按配置执行。"
     )]
     pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
 }
@@ -473,7 +485,7 @@ pub(super) struct TmuxExecArgs {
     pub(super) args: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "可选单次确认请求；省略或 acquire 省略时不主动请求确认。策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
+        description = "可选单次确认请求；提供对象即主动请求，reason 必填。省略对象时不主动请求确认，策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
     )]
     pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
     #[serde(default)]
@@ -500,7 +512,9 @@ pub(super) struct TmuxCreateSessionArgs {
     )]
     pub(super) cwd: String,
     #[serde(default)]
-    #[schemars(description = "可选单次确认请求；省略不主动请求；不接受 read/write 字段。")]
+    #[schemars(
+        description = "可选单次确认请求；提供对象即主动请求，reason 必填；省略不主动请求；不接受 read/write 字段。"
+    )]
     pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
 }
 
@@ -513,7 +527,7 @@ pub(super) struct TmuxCloseSessionArgs {
     pub(super) name: String,
     #[serde(default)]
     #[schemars(
-        description = "可选单次确认请求；省略或 acquire 省略时不主动请求确认。策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
+        description = "可选单次确认请求；提供对象即主动请求，reason 必填。省略对象时不主动请求确认，策略仍可要求确认；主动确认可单次覆盖策略拒绝。"
     )]
     pub(super) acquire_confirmation: Option<AcquireConfirmationNoScopeArgs>,
 }
