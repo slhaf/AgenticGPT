@@ -22,7 +22,7 @@ fi
 
 if ! command -v cargo-zigbuild >/dev/null 2>&1; then
   echo "error: cargo-zigbuild and Zig are required for ARM Linux release builds" >&2
-  echo "install them in an active Python environment with: uv pip install cargo-zigbuild" >&2
+  echo "on Arch Linux, install them with: sudo pacman -S --needed cargo-zigbuild zig" >&2
   exit 1
 fi
 

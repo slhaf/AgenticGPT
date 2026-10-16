@@ -47,12 +47,10 @@ cargo install cross --git https://github.com/cross-rs/cross
 
 脚本对 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu` 执行工作区的 release 构建，并将三个二进制复制到各自 `dist/<target>/` 目录：`agentic-gpt`、`agentic-gpt-hub`、`agentic-browser-host`。
 
-ARM Linux 构建机可改用 [`scripts/dist-linux-on-arm.sh`](../../scripts/dist-linux-on-arm.sh)，ARM 目标原生构建，x86_64 目标通过 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) 与 Zig 交叉编译；产物名称和 `dist/<target>/` 布局相同。先准备工具和当前 Rust 工具链的标准库：
+ARM Linux 构建机可改用 [`scripts/dist-linux-on-arm.sh`](../../scripts/dist-linux-on-arm.sh)，ARM 目标原生构建，x86_64 目标通过 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) 与 Zig 交叉编译；产物名称和 `dist/<target>/` 布局相同。Arch Linux 上先安装系统工具和当前 Rust 工具链的标准库：
 
 ```bash
-uv venv target/zigbuild-tools
-uv pip install --python target/zigbuild-tools/bin/python cargo-zigbuild
-source target/zigbuild-tools/bin/activate
+sudo pacman -S --needed cargo-zigbuild zig
 rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 ./scripts/dist-linux-on-arm.sh
 ```
