@@ -600,22 +600,36 @@ CLI 参数传入，路径列表只接受具体根。旧的 `pathPolicy`、`sandb
 
 ### 单次主动确认
 
-Process、文件及 tmux 请求使用可选 `acquireConfirmation` 对象：`acquire` 控制主动确认，`method` 仅接受 `ntfy` 或 `freedesktop`，省略沿用配置。
-省略对象或 `acquire` 时通常为 false；`tmux.pasteText` 为 true。策略自身要求的确认仍然生效。
+Process、文件及 tmux 请求使用可选 `acquireConfirmation` 对象；传入对象即主动请求确认，不传时按策略判定。对象的 `reason` 必填，原文不超过 100 个 Unicode 字符，去除首尾空白后必须非空；用自由的请求语气说明本次操作的目的和影响。可选 `method` 仅接受 `ntfy` 或 `freedesktop`，省略沿用配置。
 
-`acquire=true` 的结果如下：
+主动确认的结果如下：
 
-- 获准后可覆盖本次操作的命令／路径拒绝，不修改持久策略。
-- 明确拒绝会中止操作。
-- 主动确认超时、过期或提供方不可用时，回退配置策略：Allow 可继续，Confirm 或 Deny
-  不执行；未获准的临时路径范围不会生效。
-- `tmux.pasteText` 的主动确认要求严格成功，不做此回退。
+- `allow_once` 可覆盖本次操作的命令／路径拒绝，不修改持久策略。
+- 明确拒绝或取消会中止操作。
+- 超时、过期或提供方不可用时，回退配置策略：Allow 可继续，Confirm 或 Deny 不执行；Confirm 复用本次失败结果，不重复提示，未获准的临时路径范围不会生效。
 
-仅 `process.exec` 和 `process.batch` 接受非空 `read`／`write` 路径数组，且必须显式同时设置 `acquire=true`。
-这些路径是本次命令／批次的临时权限与沙箱挂载范围，结束后失效；文件和 tmux 仅接受 acquire/method，不接受 read/write 字段（包括空数组）。
-文件读取／搜索批次只在顶层接受一个 `acquireConfirmation`；主动获准的搜索覆盖请求根目录子树，仍受扫描和输出限制。
-普通搜索会跳过未获授权的拒绝路径；include/exclude、hidden、gitignore 条件同样用于确认预扫描和实际搜索。此对象不改变下游 MCP 的审批、临时允许或 wire 决策负载。
-ntfy 操作预览最多 1000 字符；无法完整展示的操作按渠道不可用处理，再走上述回退，不以截断预览获取范围授权。
+仅 `process.exec` 和 `process.batch` 接受可选 `read`／`write` 路径数组。这些路径是本次命令／批次的临时权限与沙箱挂载范围，获准后生效，结束后失效；文件和 tmux 不接受 read/write 字段（包括空数组）。文件读取／搜索批次只在顶层接受一个 `acquireConfirmation`；主动获准的搜索覆盖请求根目录子树，仍受扫描和输出限制。
+普通搜索会跳过未获授权的拒绝路径；include/exclude、hidden、gitignore 条件同样用于确认预扫描和实际搜索。主动批准不跳过工具集准入、资源容量和文件完整性等独立检查。
+
+`tmux.pasteText` 的基础决策为 Confirm：即使不传确认对象，也会自动请求确认，未获准不会写入窗格。它不再使用默认主动确认或专用严格开关；标题为 `<设备显示名> 请求写入 tmux`，自动正文给出简短原因和输入文本预览。
+
+普通运行、文件和 tmux 确认在 ntfy 与 freedesktop 共用简短标题和正文。主动确认正文只显示调用方提供的 `reason`；自动确认命中 confirm 规则时只显示有界的规则内容；默认策略或无法静态分析时，显示固定原因和原始内容预览。预览合并空白后最多 30 个 Unicode 字符，超长时显示前 29 个字符加“…”；执行链继续持有完整请求和实际授权范围，通知不承担完整请求展示。原有操作预览超过 1000 字符即将渠道视为不可用的限制已移除。下游 MCP 的 server/tool 专用审批、临时 server 授权按钮及 wire 决策负载保持原有语义。
+
+#### 调用方升级
+
+这是不兼容的请求契约变更，Agent 和 Hub 必须同步升级。删除 `acquireConfirmation.acquire`，不提供旧字段兼容层；需要主动确认时传入含 `reason` 的对象，不需要主动确认时删除整个对象。旧 `acquire=false` 应改为省略对象，旧 `acquire=true` 应改为填写原因；空对象不再有效。Process 原有 `read`／`write` 临时范围保留，无需额外开关。
+
+例如，Process 主动请求可使用以下对象；这只是请求中的确认字段：
+
+```json
+{
+  "acquireConfirmation": {
+    "reason": "请允许运行项目构建并写入构建产物。",
+    "method": "ntfy",
+    "write": ["/path/to/workspace/target"]
+  }
+}
+```
 
 ### Bash 命令与 Shell 初始化文件
 

@@ -104,19 +104,15 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 
 Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirmation` 对象：
 
-- 旧 `needConfirm`／`confirmMethod` 字段及未知对象字段会被拒绝。
-- `acquire` 省略通常为 false，`tmux.pasteText` 为 true。
-- `method` 仅接受 ntfy/freedesktop，省略时沿用配置。
-- 主动获准确认可单次覆盖命令和路径策略的拒绝；明确拒绝会中止操作。
-- 超时、过期或提供方不可用时回退配置策略，只有配置 Allow 可继续，临时路径范围不生效。
-- `tmux.pasteText` 的主动确认要求严格成功。
-- 仅 Process exec/batch 接受非空 read/write 路径数组，且必须显式 `acquire=true`；文件与 tmux
-  拒绝 read/write 字段，包括空数组。
+- 传入对象即主动请求确认；`reason` 必填，原文不超过 100 个 Unicode 字符，去除首尾空白后非空，用请求语气说明目的和影响。
+- 可选 `method` 仅接受 ntfy/freedesktop，省略时沿用配置。
+- 旧 `acquire`、`needConfirm`／`confirmMethod` 字段及未知对象字段会被拒绝。
+- `allow_once` 可单次覆盖命令和路径策略的拒绝；明确拒绝或取消会中止操作。
+- 超时、过期或提供方不可用时回退配置策略，只有配置 Allow 可继续，临时路径范围不生效；Confirm 复用本次失败结果，不重复提示。
+- 未传对象按策略判定；`tmux.pasteText` 的基础决策为 Confirm，无对象也自动确认，未获准不会写入。
+- 仅 Process exec/batch 接受可选 read/write 临时路径数组；文件与 tmux 拒绝 read/write 字段，包括空数组。
 
-文件 read/search/edit 的本地 MCP 入口也使用该对象，读取／搜索批次只接受顶层对象。此升级
-不改变下游 MCP 的审批与 wire 决策合同。
-
-ntfy 确认通知的操作预览最多显示 1000 字符。通用操作若无法完整展示命令及访问范围，会将该渠道判为不可用；不会以截断预览获得完整范围的许可。随后按上述确认失败回退规则处理，paste 的强制批准仍终止。
+文件 read/search/edit 的本地 MCP 入口也使用该对象，读取／搜索批次只接受顶层对象。主动确认不跳过工具集、容量和文件完整性等独立检查。Agent 与 Hub 须同步升级；具体迁移示例、通知展示边界见[单次主动确认](configuration.zh-CN.md#单次主动确认)。下游 MCP 的 server/tool 专用审批与临时 server 授权按钮保持原有语义。
 
 当配置要求 Confirm 且确认通道不可用时：
 

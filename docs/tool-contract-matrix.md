@@ -20,10 +20,8 @@ Standalone 公布的接口面有 Normal 和 Room 两种预设。Normal 预设启
 
 Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路径策略、审计和 Process 注册表。Standalone 调用不接受仅 Hub 支持的 `agentId` 字段；所有受影响请求均拒绝旧 `needConfirm`／`confirmMethod` 字段。
 
-`acquireConfirmation` 是单次确认对象，含可选 acquire/method/read/write；method 仅接受 ntfy/freedesktop。
-acquire 缺省 false，tmux.pasteText 缺省 true；主动确认获准可单次覆盖操作及路径拒绝。明确拒绝中止；主动确认超时／过期／不可用回退配置，仅 Allow 可继续；tmux.pasteText 要求主动确认严格成功。
-仅 process.exec/batch 接受非空 read/write 临时路径范围，且必须显式 acquire=true；文件与 tmux 不接受 read/write 字段（包括空数组）。
-file.read/search 的批次对象只放在顶层，普通搜索跳过未授权的拒绝路径，主动确认覆盖请求根目录子树；范围与扫描／输出上限仍生效。
+`acquireConfirmation` 传入即主动请求确认，必填 `reason` 原文最多 100 个 Unicode 字符，去除首尾空白后非空；可选 method 仅接受 ntfy/freedesktop。旧 acquire 字段被拒绝，不传对象按策略判定。主动确认获准可单次覆盖命令及路径拒绝；明确拒绝或取消中止；超时／过期／不可用回退配置，仅 Allow 可继续，Confirm 不重复请求。tmux.pasteText 基础决策为 Confirm，无对象也自动确认，未获准不写入。
+仅 process.exec/batch 接受可选 read/write 临时路径范围，无需 acquire 开关；文件与 tmux 不接受 read/write 字段（包括空数组）。file.read/search 的批次对象只放在顶层，普通搜索跳过未授权的拒绝路径，主动确认覆盖请求根目录子树；范围与扫描／输出上限仍生效。主动确认不跳过独立准入、容量和完整性检查。Agent/Hub 须同步升级，通知展示与迁移见[单次主动确认](configuration.zh-CN.md#单次主动确认)。
 
 模型通过实时 `tools/list` 中的中文工具和参数说明选择操作、构造输入并识别结果与风险；工具名称、输入结构和执行行为不因文案改变。进程执行、下游 MCP 调用及 tmux 命令/文本输入可能产生删除或覆盖等副作用，因此不能标为仅追加的非破坏性操作。`skills.setActive` 写入激活状态，不是只读；停用操作移除该状态。相关 `readOnlyHint` / `destructiveHint` 据此标记，但仍不替代运行时策略、授权或确认。
 
@@ -60,7 +58,7 @@ file.read/search 的批次对象只放在顶层，普通搜索跳过未授权的
 | `tmux.sessions` | 列出/创建/关闭持久会话；不提交命令。 | `action`；create/close 需要与 action 对应的 name/cwd；close 可能需要确认。 | 尽可能复用默认会话；cwd 受策略检查。 | close 具有破坏性；会返回类型化会话/策略/确认错误。 | Normal + Room；Hub Full 使用拆分后的 tmux 名称。 |
 | `tmux.panes` | 列出/捕获窗格；不提交输入。 | `action`；capture 必须指定目标；list 可按会话筛选。 | 捕获历史默认 160 行，且有界。 | 与 action 不兼容的字段会被拒绝，不会忽略。 | Normal + Room；Hub Full 使用拆分后的 tmux 名称。 |
 | `tmux.exec` | 向 shell 窗格提交结构化命令；不声称命令已经执行完成。 | `target`、`program`；可选 args/wait/capture/confirmation。 | 提交后的等待/历史均有界。 | shell/策略/确认错误；检查窗格或 Process 结果以确认完成状态。 | Normal + Room；Hub Full 的 `tmux.exec` 对应相同契约。 |
-| `tmux.pasteText` | 将文本粘贴到非 shell 窗格/TUI；不执行 shell 命令。 | `target`、`text`；可选 `submit`、confirmation。 | 文本/历史均有界。 | 拒绝 shell 窗格；其他情况下窗格状态不变。 | Normal + Room；Hub Full 对应相同契约。 |
+| `tmux.pasteText` | 将文本粘贴到非 shell 窗格/TUI；不执行 shell 命令。 | `target`、`text`；可选 `submit`、`acquireConfirmation`。 | 文本/历史均有界。 | 拒绝 shell 窗格；基础决策为 Confirm，未获准不写入窗格。 | Normal + Room；Hub Full 对应相同契约。 |
 | `bootstrap` | 读取 Room 引导入口/指南清单；不通用读取文件或创建文件。 | 无字段。 | 指南摘要和包 revision 有界。 | 包缺失/无效时返回类型化错误/警告；只读、可安全重试。 | 仅 Standalone Room；Hub Full 提供 `bootstrap` 和 `room.bootstrap` 路由。 |
 | `bootstrap.read` | 读取一份经过验证的引导指南；不读取任意路径。 | `id`。 | 有界 Markdown/frontmatter。 | 未知/无效/重复指南返回 `guide_not_found`；只读。 | 仅 Standalone Room；Hub Full 提供 `bootstrap.read` 和 `room.bootstrap.read`。 |
 | `room.diary.active` | 读取活动的 Daily、Weekly 和 Monthly Room 日记文档；不修改内容。 | 空 JSON 对象。 | 返回三层有界 Markdown 结果；每层报告经过验证的路径、可用性和可选类型化问题。 | 按层报告文档缺失、不可读或 UTF-8 无效；只读、可安全重试。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |

@@ -4,3 +4,4 @@ HEAD cc56842，与v0.10.0实现相同。长命令原始故障为confirmation.rs�
 当前策略只有三态无来源；两个通知通道分开拼正文；AcquireConfirmation有普通和NoScope镜像，Hub Apps MCP/OpenAPI亦有镜像。
 阶段1已移除default_acquire/strict，所有普通确认由对象存在触发；tmux.pasteText以基础Confirm保证未获准不写入。reason在DTO反序列化及owner校验，NoScope与Hub参数同步。现有链路测试只迁移输入，scope拒绝用例补reason以继续保护原scope边界，避免因缺reason而假通过。
 阶段2：新增PolicyEvaluation保留规则与incomplete来源，判定优先级不变。普通确认Agent生成共用title/body，Hub通过notification_title选择仅reason的新布局，MCP留旧布局。桌面根据body-markup能力选择转义，防止纯文本服务显示实体转义符。批次和空请求入口验证保留授权语义。
+验证边界：真实二进制+本地假ntfy/私有D-Bus/tmux已验证通知发送、按钮回调、批准前无副作用和批准后执行。未连接真实手机或桌面通知UI，未部署生产实例；production tunnel executable传输也不作为本次本地验证结论。

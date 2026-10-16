@@ -365,7 +365,7 @@ agentic-gpt local call mcp.batch \
 - `SafeConfigSummary`、`/v1/info` 等安全概要不会返回 Tunnel、Hub、Agent 或 ntfy 凭据值；报告和审计负载也不应包含这些值。部分受支持的 CLI 配置选项（例如 `agentic-gpt config init --agent-secret`）可以从 argv 接收凭据值；以明文传入时，本地进程检查和 shell 历史可能会暴露它。可用时优先采用该设置支持的隐藏交互输入；仅在相应设置支持时使用受保护的 `file:`/`env:` 引用（见[配置说明](configuration.md)）。不要假定所有设置都有通用安全的命令行格式，也不要在命令示例或 argv 中放入真实凭据。
 - OpenAPI 只公开 GPT Actions 端点；OAuth 和确认回调不在其中。
 - 安全概要只包含计数/粗粒度模式，不包含密钥或完整私有路径列表。
-- Agent 本地拒绝确认或确认决策超时后，操作即为最终拒绝；这与 Hub/HTTP/MCP 等待者超时不同。
+- Agent 本地确认被明确拒绝或取消后中止操作；主动确认超时、过期或渠道不可用时按配置策略回退，仅 Allow 可继续，Confirm 不重复请求。这与 Hub/HTTP/MCP 等待者超时不同。
 - 长时间工作使用受管理 Process 和有界等待。
 - 有界的 Hub/HTTP/MCP 等待超时只结束本地等待，不会停止远程 Process。迟到的远程信息仍可能更新运行回执；`not_sent` 仅表示已证实的通道发送失败，且不会重放。
 - Standalone 上报功能为可选项，且仅用于上报；它绝不是隐藏的共享命令依赖。
@@ -376,4 +376,4 @@ agentic-gpt local call mcp.batch \
 当前配置只接受统一的 `policy.enabled`、`policy.command`、`policy.path` 与 `policy.bubblewrap`。旧 `pathPolicy`、`sandbox`、扁平命令 `policy`、`needConfirm`、
 `confirmMethod` 及更早的规则对象不会被自动转换。升级前保留原配置，根据
 [配置说明](configuration.zh-CN.md#命令与路径策略)显式重建具体路径根与命令规则，再通过隔离的
-`HOME` 验证。请求调用方使用 `acquireConfirmation`；下游 MCP 审批合同保持原有语义。
+`HOME` 验证。请求调用方使用含必填 `reason` 的 `acquireConfirmation`，删除旧 `acquire` 字段；不需要主动确认时省略整个对象。Agent 与 Hub 须同步升级，详见[调用方升级](configuration.zh-CN.md#调用方升级)。下游 MCP 审批合同保持原有语义。
