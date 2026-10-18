@@ -294,7 +294,13 @@ pub(crate) async fn request_room(
     let pending = state.dispatch.pending.lock().await;
     request_target(state, target, admission, pending, command, timeout_secs)
         .await
-        .map_err(crate::room::control::RoomRouteError::Dispatch)
+        .map_err(|error| {
+            if error.status == axum::http::StatusCode::CONFLICT {
+                crate::room::control::RoomRouteError::StateConflict
+            } else {
+                crate::room::control::RoomRouteError::Dispatch(error)
+            }
+        })
 }
 
 async fn request_target<'a>(
