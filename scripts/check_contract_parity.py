@@ -4707,7 +4707,7 @@ def run_hub_agent_crash_recovery_gate(
         "/v1/events",
         "get",
         "Hub offline event.list",
-        expected_status=504,
+        expected_status=503,
     )
     reports.append("PASS Hub offline event.list error schema omits the optional event panel")
     reports.append(
