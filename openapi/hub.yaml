@@ -941,7 +941,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "422":
           description: JSON body extraction failed before Room dispatch.
           content:
@@ -949,13 +949,13 @@ paths:
               schema:
                 type: string
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/diary/read:
     post:
       operationId: roomDiaryRead
@@ -983,7 +983,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "422":
           description: JSON body extraction failed before Room dispatch.
           content:
@@ -991,13 +991,13 @@ paths:
               schema:
                 type: string
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/notebook/recent:
     post:
       operationId: roomNotebookRecent
@@ -1025,7 +1025,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "422":
           description: JSON body extraction failed before Room dispatch.
           content:
@@ -1033,13 +1033,13 @@ paths:
               schema:
                 type: string
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/notebook/search:
     post:
       operationId: roomNotebookSearch
@@ -1067,7 +1067,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "422":
           description: JSON body extraction failed before Room dispatch.
           content:
@@ -1075,13 +1075,13 @@ paths:
               schema:
                 type: string
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/notebook/read:
     post:
       operationId: roomNotebookRead
@@ -1109,7 +1109,7 @@ paths:
         "404":
           $ref: "#/components/responses/RoomAgentError"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "422":
           description: JSON body extraction failed before Room dispatch.
           content:
@@ -1117,13 +1117,13 @@ paths:
               schema:
                 type: string
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/state/list:
     post:
       operationId: roomStateList
@@ -1151,7 +1151,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "422":
           description: JSON body extraction failed before Room dispatch.
           content:
@@ -1159,13 +1159,13 @@ paths:
               schema:
                 type: string
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/state/read:
     post:
       operationId: roomStateRead
@@ -1193,7 +1193,7 @@ paths:
         "404":
           $ref: "#/components/responses/RoomAgentError"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "422":
           description: JSON body extraction failed before Room dispatch.
           content:
@@ -1201,13 +1201,13 @@ paths:
               schema:
                 type: string
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/maintenance/status:
     post:
       operationId: roomMaintenanceStatus
@@ -1235,7 +1235,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "422":
           description: JSON body extraction failed before Room dispatch.
           content:
@@ -1243,13 +1243,13 @@ paths:
               schema:
                 type: string
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/maintenance/submit:
     post:
       operationId: roomMaintenanceSubmit
@@ -1277,7 +1277,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "422":
           description: JSON body extraction failed before Room dispatch.
           content:
@@ -1285,13 +1285,13 @@ paths:
               schema:
                 type: string
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/bootstrap:
     post:
       operationId: roomBootstrap
@@ -1313,15 +1313,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/bootstrap/read:
     post:
       operationId: roomBootstrapRead
@@ -1349,15 +1349,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/list:
     post:
       operationId: roomSkillsList
@@ -1377,15 +1377,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/read:
     post:
       operationId: roomSkillsRead
@@ -1411,15 +1411,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/search:
     post:
       operationId: roomSkillsSearch
@@ -1445,15 +1445,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/active:
     post:
       operationId: roomSkillsActive
@@ -1473,15 +1473,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/activate:
     post:
       operationId: roomSkillsActivate
@@ -1507,15 +1507,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/deactivate:
     post:
       operationId: roomSkillsDeactivate
@@ -1541,15 +1541,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/install:
     post:
       operationId: roomSkillsInstall
@@ -1577,15 +1577,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/install/get:
     post:
       operationId: roomSkillsInstallGet
@@ -1611,15 +1611,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/install/cancel:
     post:
       operationId: roomSkillsInstallCancel
@@ -1645,15 +1645,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/room/skills/run:
     post:
       operationId: roomSkillsRun
@@ -1681,15 +1681,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RoomAgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/RoomAgentError"
         "502":
-          $ref: "#/components/responses/BadGateway"
+          $ref: "#/components/responses/RoomAgentError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/RoomAgentError"
         "504":
-          $ref: "#/components/responses/GatewayTimeout"
+          $ref: "#/components/responses/RoomAgentError"
   /v1/runs/{runId}:
     get:
       operationId: getRun
