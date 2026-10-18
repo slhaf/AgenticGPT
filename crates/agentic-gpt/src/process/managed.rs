@@ -3618,7 +3618,6 @@ pub(crate) async fn list_processes_page(
     let mut history_request = request.clone();
     history_request.limit = Some(ProcessListRequest::MAX_LIMIT);
     let mut history_cursor = request.cursor.clone();
-    let mut history_failed = false;
     loop {
         history_request.cursor = history_cursor.clone();
         match state.process_history.list(&history_request) {
@@ -3631,14 +3630,8 @@ pub(crate) async fn list_processes_page(
                 }
                 history_cursor = next_cursor;
             }
-            Err(_) => {
-                history_failed = true;
-                break;
-            }
+            Err(error) => return Err(format!("process_history_read_failed: {error}")),
         }
-    }
-    if history_failed {
-        persisted.clear();
     }
 
     let mut processes = merge_process_infos(&live, &persisted, &request, cursor.as_ref());
@@ -3683,10 +3676,13 @@ pub(crate) async fn list_processes(
     state: &AppState,
     request: ProcessListRequest,
 ) -> Vec<ProcessInfo> {
-    list_processes_page(state, request)
-        .await
-        .map(|page| page.processes)
-        .unwrap_or_default()
+    match list_processes_page(state, request).await {
+        Ok(page) => page.processes,
+        Err(error) => {
+            log_warn(format!("process list unavailable: {error}"));
+            Vec::new()
+        }
+    }
 }
 
 fn merge_process_infos(
@@ -3756,7 +3752,8 @@ pub(crate) async fn get_process(
     }
     match state.process_history.get(process_id) {
         Ok(Some(record)) if record.info.state.is_terminal() => Ok(record.info),
-        _ => Err(missing_process_reason(state, process_id)),
+        Err(error) => Err(format!("process_history_read_failed: {error}")),
+        Ok(_) => Err(missing_process_reason(state, process_id)),
     }
 }
 pub(crate) async fn get_process_detail(
@@ -3785,7 +3782,8 @@ pub(crate) async fn get_process_detail(
                 result_preview: None,
             }))
         }
-        _ => Err(missing_process_reason(state, process_id)),
+        Err(error) => Err(format!("process_history_read_failed: {error}")),
+        Ok(_) => Err(missing_process_reason(state, process_id)),
     }
 }
 
@@ -3990,7 +3988,8 @@ async fn get_process_read_summary(
     drop(processes);
     match state.process_history.read_summary(process_id) {
         Ok(Some(summary)) if summary.state.is_terminal() => Ok(summary),
-        _ => Err(missing_process_reason(state, process_id)),
+        Err(error) => Err(format!("process_history_read_failed: {error}")),
+        Ok(_) => Err(missing_process_reason(state, process_id)),
     }
 }
 
@@ -4064,7 +4063,8 @@ async fn get_process_observation(
                     output,
                 })
             }
-            _ => Err(missing_process_reason(state, process_id)),
+            Err(error) => Err(format!("process_history_read_failed: {error}")),
+            Ok(_) => Err(missing_process_reason(state, process_id)),
         };
     }
     match state.process_history.status_record(process_id) {
@@ -4079,7 +4079,8 @@ async fn get_process_observation(
                 output: None,
             })
         }
-        _ => Err(missing_process_reason(state, process_id)),
+        Err(error) => Err(format!("process_history_read_failed: {error}")),
+        Ok(_) => Err(missing_process_reason(state, process_id)),
     }
 }
 fn decode_output_cursor(encoded: &str, process_id: &str) -> Result<ProcessCursor, String> {

@@ -4,7 +4,11 @@ fn confirmation_error(reason: String) -> FileError {
     let code = match reason.as_str() {
         "provider_unavailable" => "file_confirmation_unavailable",
         "policy_denied" => "path_denied",
-        _ => "file_confirmation_denied",
+        "deny" => "file_confirmation_denied",
+        "timeout" | "expired" => "file_confirmation_timeout",
+        "cancelled" => "file_confirmation_cancelled",
+        "callback_token_invalid" => "file_confirmation_callback_invalid",
+        _ => "file_confirmation_failed",
     };
     FileError::new(
         code,

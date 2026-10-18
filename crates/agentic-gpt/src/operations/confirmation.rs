@@ -398,7 +398,8 @@ async fn request_hub_confirmation_payload_cancellable(
             result = timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx) => {
                 match result {
                     Ok(Ok(decision)) => decision,
-                    _ => "timeout".to_string(),
+                    Ok(Err(_)) => "provider_unavailable".to_string(),
+                    Err(_) => "timeout".to_string(),
                 }
             }
             _ = wait_for_cancellation(cancel_requested) => "cancelled".to_string(),
@@ -406,7 +407,8 @@ async fn request_hub_confirmation_payload_cancellable(
     } else {
         match timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx).await {
             Ok(Ok(decision)) => decision,
-            _ => "timeout".to_string(),
+            Ok(Err(_)) => "provider_unavailable".to_string(),
+            Err(_) => "timeout".to_string(),
         }
     };
     state.pending_confirmations.lock().await.remove(&request_id);
@@ -584,17 +586,32 @@ async fn request_freedesktop_mcp_batch_confirmation(
     }
     match notification.show() {
         Ok(handle) => {
-            let action = tokio::task::spawn_blocking(move || {
-                let mut selected = "timeout".to_string();
-                handle.wait_for_action(|action| selected = action.to_string());
-                selected
-            })
-            .await
-            .unwrap_or_else(|_| "timeout".to_string());
+            let mut action = "provider_unavailable".to_string();
+            let waited = timeout(
+                Duration::from_secs(CONFIRM_TIMEOUT_SECS),
+                handle.wait_for_action_async(|response| {
+                    action = match response {
+                        notify_rust::ActionResponse::Custom(value) => value.to_string(),
+                        notify_rust::ActionResponse::Closed(notify_rust::CloseReason::Expired) => {
+                            "timeout".to_string()
+                        }
+                        notify_rust::ActionResponse::Closed(
+                            notify_rust::CloseReason::Dismissed,
+                        ) => "deny".to_string(),
+                        _ => "provider_unavailable".to_string(),
+                    };
+                }),
+            )
+            .await;
+            let _ = timeout(Duration::from_secs(2), handle.close_async()).await;
+            if waited.is_err() {
+                return "timeout".to_string();
+            }
             match action.as_str() {
                 "allow_once" => action,
                 "allow_mcp_server_15m" | "allow_mcp_server_30m" if allow_temporary_server => action,
-                _ => "deny".to_string(),
+                "deny" | "timeout" | "provider_unavailable" => action,
+                _ => "provider_unavailable".to_string(),
             }
         }
         Err(_) => "provider_unavailable".to_string(),
@@ -714,16 +731,31 @@ async fn request_freedesktop_mcp_confirmation(
         .show();
     match provider {
         Ok(handle) => {
-            let action = tokio::task::spawn_blocking(move || {
-                let mut selected = "timeout".to_string();
-                handle.wait_for_action(|action| selected = action.to_string());
-                selected
-            })
-            .await
-            .unwrap_or_else(|_| "timeout".to_string());
+            let mut action = "provider_unavailable".to_string();
+            let waited = timeout(
+                Duration::from_secs(CONFIRM_TIMEOUT_SECS),
+                handle.wait_for_action_async(|response| {
+                    action = match response {
+                        notify_rust::ActionResponse::Custom(value) => value.to_string(),
+                        notify_rust::ActionResponse::Closed(notify_rust::CloseReason::Expired) => {
+                            "timeout".to_string()
+                        }
+                        notify_rust::ActionResponse::Closed(
+                            notify_rust::CloseReason::Dismissed,
+                        ) => "deny".to_string(),
+                        _ => "provider_unavailable".to_string(),
+                    };
+                }),
+            )
+            .await;
+            let _ = timeout(Duration::from_secs(2), handle.close_async()).await;
+            if waited.is_err() {
+                return "timeout".to_string();
+            }
             match action.as_str() {
                 "allow_once" | "allow_mcp_server_15m" | "allow_mcp_server_30m" => action,
-                _ => "deny".to_string(),
+                "deny" | "timeout" | "provider_unavailable" => action,
+                _ => "provider_unavailable".to_string(),
             }
         }
         Err(_) => "provider_unavailable".to_string(),
@@ -777,7 +809,8 @@ async fn request_hub_mcp_confirmation_cancellable(
         result = timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx) => {
             match result {
                 Ok(Ok(decision)) => decision,
-                _ => "timeout".to_string(),
+                Ok(Err(_)) => "provider_unavailable".to_string(),
+                Err(_) => "timeout".to_string(),
             }
         }
         _ = wait_for_cancellation(cancel_requested) => "cancelled".to_string(),
