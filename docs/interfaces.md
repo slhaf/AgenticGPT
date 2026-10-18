@@ -54,6 +54,20 @@ Tmux 与 Browser 工具集关闭时，启动不创建默认 tmux 会话，也不
 
 `agentic-gpt local stdio --config PATH` 为每个 stdio MCP 客户端启动独立进程，并将 MCP 流原样转发到已有 Agent 的 Unix socket。它适用于 Local 和 Standalone，不适用于没有本地 socket 的 Hub 模式；连接仍受同 UID 限制并记录 `local:` 来源。各客户端有独立 MCP session，但共享 Agent 状态与 16 个 Unix 连接总额度。命令示例及生命周期、错误行为见[本地 stdio 桥接说明](standalone-runtime.md#通过-stdio-桥接到已有-agent)。
 
+## 错误原因与执行状态
+
+路径访问仅在操作系统明确返回 `NotFound` 时归为不存在；权限拒绝、非目录和其他检查失败分别报告。文件提交或授权后复查无法完成时返回实际检查错误，只有观察到身份或路径变化才返回冲突／`file_path_changed`；无法检查符号链接不等于发现了符号链接。
+
+命令路径预检允许尚未创建的目标，目标存在性由实际执行判断；`echo`、`printf`、`true`、`false` 的字符串参数不推断为文件访问。包含 `cd`、`pushd`、`popd` 的脚本在启用策略时需要确认，不按初始工作目录推断或隐式授权相对参数路径，绝对路径仍接受路径策略检查。确认不能替代操作系统访问权限或 Bubblewrap 挂载范围；显式 read/write 授权范围仍须指向现有目标。
+
+Hub 派发错误保留原因：`agent_offline`、`agent_not_ready` 对应 HTTP 503，连接／角色变化和 reporting-only 状态对应 409；真正等待下游到期使用 `agent_request_timeout`（504），响应通道异常关闭使用 `agent_response_channel_closed`（502），Hub 内部故障使用 `agent_request_failed`（500）。过程读取保留既有 unavailable／缓存封套，列表的内部故障不降级为缓存成功。Agent 历史读取失败使用 `process_history_read_failed`，不报进程不存在；历史列表不静默返回缺少历史部分的成功结果。
+
+这些响应不证明已发送的操作没有执行或已被取消。尤其是收到 Agent 结果后的反馈持久化失败，调用者应沿原 run/request 身份查询，不直接重发具有副作用的操作。旧运行回执保留原始错误原因，不回填为新代码。
+
+MCP 桌面确认区分明确拒绝、过期和提供方不可用；确认通道异常关闭归提供方不可用。文件操作分别报告 `file_confirmation_denied`、`file_confirmation_timeout`、`file_confirmation_cancelled` 和 `file_confirmation_unavailable`。Hub HTTP JSON-RPC 保留工具的结构化内部错误及数据；请求结构错误与参数错误分别使用 `-32600` 和 `-32602`，不把数据库故障改成参数错误。
+
+安装和初始化错误也保留实际阶段：DNS 故障不归下载策略拒绝，GitHub API 响应错误不归归档无效，维护请求只有明确 `AlreadyExists` 才报槽位占用；密钥目录创建、权限设置、读取和恢复备份读取失败分别报告操作失败。隧道缓存无法检查或读取时报告不可用，不把访问故障当成缓存缺失或内容损坏并自动重下。
+
 ## GPT Actions API 端点
 
 GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
@@ -126,13 +140,11 @@ Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirm
 这九个 Room 端点在 JSON 请求体中使用当前的 camelCase Agent 请求/响应 DTO。
 空请求 DTO 仍须传入 `{}`；没有端点接受 `agentId` 选择器。它们解析并捕获活动
 Room 租约：Room 不存在时返回 `room_not_active`（404），租约不一致/已替换时返回
-`room_state_conflict`（409），Hub 传输等待超时时返回 504 操作超时。Agent 语义错误
-保留现有 Room JSON 错误投影。Full MCP 以当前描述符公布相同的九个名称；
+`room_state_conflict`（409），Hub 派发错误按上述原因返回 500/502/503/504。Agent 输入错误返回 400，资源缺失和冲突分别返回 404/409，内部读取、写入或维护失败返回 500。Full MCP 以当前描述符公布相同的九个名称；
 Coordinator 既不公布也不派发 Room 操作。
 
 JSON 格式错误或缺少必需请求字段时，Axum JSON 提取器会返回 HTTP 422 和
-`text/plain`；Agent 语义验证错误仍以 JSON 错误响应返回，采用本文所述的 400/
-特定 404/409 投影。
+`text/plain`；Agent 语义验证错误仍以 JSON 错误响应返回，采用本文所述的输入、缺失、冲突和内部故障投影。
 
 `/v1/info` 刻意只返回安全元数据：Hub 版本、公共基础 URL、超时设置、远程确认
 状态、Agent 数量以及待处理请求/进程数。不得暴露密钥、确认回调 URL 或私有配置值。
@@ -473,8 +485,7 @@ MCP schema 仍是工具可用性和参数的事实来源。指南说明选择、
   `guide_unreadable`、`guide_non_utf8`、`guide_frontmatter_invalid`、`guide_metadata_invalid`
   和 `guide_duplicate_id`。
 - 包级失败使用 `bootstrap_not_found`、`bootstrap_invalid` 或 `bootstrap_read_failed`。
-- Room 路由还会返回 `room_not_active`、`room_state_conflict`、`room_bootstrap_timeout` 和
-  `room_bootstrap_read_timeout`。
+- Room 路由还会返回 `room_not_active`、`room_state_conflict`，以及上述 Hub 派发错误。
 
 这些操作为只读、可安全重试、非破坏性，且不会触发具有后果的副作用。
 

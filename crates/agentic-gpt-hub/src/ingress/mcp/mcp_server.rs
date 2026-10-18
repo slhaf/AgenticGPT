@@ -663,7 +663,11 @@ impl AgenticMcpServer {
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 2).await {
             Ok(value) => live_process_value(value),
-            Err(reason) if reason.status == axum::http::StatusCode::INTERNAL_SERVER_ERROR => {
+            Err(reason)
+                if reason.status.is_server_error()
+                    && reason.status != axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    && reason.status != axum::http::StatusCode::GATEWAY_TIMEOUT =>
+            {
                 json!({"error": {"code": reason.code, "message": reason}})
             }
             Err(reason) => {
@@ -2412,7 +2416,7 @@ mod tests {
             .unwrap();
         let response = serde_json::to_value(response).unwrap()["structuredContent"].clone();
         assert_eq!(response["status"], "unavailable");
-        assert_eq!(response["error"]["code"], "process_read_unavailable");
+        assert_eq!(response["error"]["code"], "agent_offline");
         assert_eq!(response["cached"]["processId"], "process-1");
         assert_eq!(response["freshness"], "stale");
         assert!(response["observedAt"].is_string());

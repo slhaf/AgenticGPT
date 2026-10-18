@@ -634,7 +634,7 @@ pub(crate) async fn mcp_list_servers_all_agents(
                     "online": true,
                     "servers": [],
                     "error": {
-                        "code": "mcp_list_servers_timeout",
+                        "code": reason.code,
                         "message": reason,
                     },
                 }));

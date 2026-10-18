@@ -430,6 +430,7 @@ pub(super) fn room_value_response(value: Value) -> Response {
         | "room_notebook_not_found"
         | "room_state_entity_not_found"
         | "skill_not_found"
+        | "resource_not_found"
         | "install_not_found"
         | "bootstrap_not_found"
         | "guide_not_found"
