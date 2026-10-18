@@ -2613,11 +2613,15 @@ async fn run_async_process(
             return;
         }
     };
-    if exec::scope_identity(&working_directory, &request.execution, acquisition)
-        .ok()
-        .as_ref()
-        != Some(&identity)
-    {
+    let current_identity =
+        match exec::scope_identity(&working_directory, &request.execution, acquisition) {
+            Ok(identity) => identity,
+            Err(reason) => {
+                finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
+                return;
+            }
+        };
+    if current_identity != identity {
         finish_process(
             &state,
             &process_id,

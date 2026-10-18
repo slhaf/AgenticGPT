@@ -971,10 +971,9 @@ fn working_directory_must_be_existing_writable_directory() {
         exec::resolve_working_directory(&config, Some("file")).unwrap_err(),
         "working_directory_not_directory"
     );
-    assert_eq!(
-        exec::resolve_working_directory(&config, Some("missing")).unwrap_err(),
-        "working_directory_not_found"
-    );
+    assert!(exec::resolve_working_directory(&config, Some("missing"))
+        .unwrap_err()
+        .starts_with("working_directory_not_found:"));
     assert_eq!(
         exec::resolve_working_directory(&config, Some("secret")).unwrap_err(),
         "working_directory_denied"

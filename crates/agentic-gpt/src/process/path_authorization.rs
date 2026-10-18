@@ -83,7 +83,7 @@ pub(crate) fn execution_path_decision(
     let mut decision = crate::policy::path_policy_decision(config, cwd, true)?;
     let permissive = permissive_paths(config);
     let uncertain_cwd = shell_changes_cwd(execution);
-    if uncertain_cwd {
+    if config.policy.enabled && uncertain_cwd {
         decision = decision.max(PolicyDecision::Confirm);
     }
     for (program, args) in literal_commands(execution) {

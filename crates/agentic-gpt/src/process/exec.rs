@@ -469,7 +469,7 @@ pub(crate) fn build_command(
             if exposed {
                 // Creating a missing mask target beneath a host bind would
                 // mutate the host. An unrepresentable deny must fail isolation.
-                if !path_exists_checked(&path)? {
+                if !path_exists_checked(path)? {
                     anyhow::bail!("bubblewrap_deny_path_not_found: {}", path.display());
                 }
                 let readable = approved_read.iter().any(|grant| path.starts_with(grant));
@@ -477,7 +477,7 @@ pub(crate) fn build_command(
             }
         }
         for path in &approved_read {
-            if path_exists_checked(&path)? {
+            if path_exists_checked(path)? {
                 let writable = crate::policy::path_policy_decision(config, path, true)
                     .map_err(anyhow::Error::msg)?
                     == PolicyDecision::Allow;
@@ -492,7 +492,7 @@ pub(crate) fn build_command(
             }
         }
         for path in &approved_write {
-            if path_exists_checked(&path)? {
+            if path_exists_checked(path)? {
                 mounts.insert(path.clone(), "--bind");
             }
         }

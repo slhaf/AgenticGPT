@@ -13,7 +13,7 @@ use crate::{
     mcp, notify,
     operation::{self, AdmissionError, RequestContext},
     operation_result::{
-        slim_mcp_batch_response, slim_mcp_response, slim_process_batch_response,
+        rejection_error, slim_mcp_batch_response, slim_mcp_response, slim_process_batch_response,
         slim_process_cancel_response, slim_process_list_response, slim_process_response,
     },
     process, room_maintenance, room_reads, skills,
@@ -99,7 +99,7 @@ where
             {
                 Ok(response) => slim_process_response(response, snapshots.as_deref_mut()),
                 Err(reason) => Ok(serde_json::json!({
-                    "error": {"code": reason, "message": reason}
+                    "error": rejection_error(&reason)
                 })),
             }
         }
@@ -123,7 +123,7 @@ where
             {
                 Ok(response) => slim_process_batch_response(response, snapshots),
                 Err(reason) => Ok(serde_json::json!({
-                    "error": {"code": reason.clone(), "message": reason}
+                    "error": rejection_error(&reason)
                 })),
             }
         }
@@ -154,7 +154,7 @@ async fn dispatch_authorized_process_read(
     match process::get_process_read(&state, request).await {
         Ok(response) => slim_process_response(response, snapshots),
         Err(reason) => Ok(serde_json::json!({
-            "error": {"code": reason.clone(), "message": reason}
+            "error": rejection_error(&reason)
         })),
     }
 }
@@ -292,7 +292,7 @@ async fn dispatch_inner(
             match process::get_process_list(&state, payload).await {
                 Ok(page) => slim_process_list_response(page),
                 Err(reason) => Ok(serde_json::json!({
-                    "error": { "code": reason.clone(), "message": reason }
+                    "error": rejection_error(&reason)
                 })),
             }
         }
@@ -300,7 +300,7 @@ async fn dispatch_inner(
             match process::cancel_process(&state, &payload.process_id).await {
                 Ok(response) => slim_process_cancel_response(response),
                 Err(reason) => Ok(serde_json::json!({
-                    "error": {"code": reason, "message": reason}
+                    "error": rejection_error(&reason)
                 })),
             }
         }
@@ -523,6 +523,15 @@ pub(crate) fn room_maintenance_error(
     error: impl std::fmt::Display,
 ) -> serde_json::Value {
     let reason = error.to_string();
+    let code = reason
+        .split([':', ';'])
+        .next()
+        .filter(|code| {
+            code.starts_with("room_maintenance_")
+                && code.len() <= 128
+                && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .unwrap_or("room_maintenance_failed");
     let detail = reason.chars().take(384).collect::<String>();
     let message = format!("room maintenance {operation} failed: {detail}")
         .chars()
@@ -530,7 +539,7 @@ pub(crate) fn room_maintenance_error(
         .collect::<String>();
     serde_json::json!({
         "error": {
-            "code": "room_maintenance_failed",
+            "code": code,
             "message": message
         }
     })
@@ -568,8 +577,16 @@ fn map_install_result<T: serde::Serialize>(
 fn skills_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
     let message = error.to_string();
     let code = match message.as_str() {
-        "invalid_id" | "query_required" => "validation_error",
+        "invalid_id"
+        | "query_required"
+        | "invalid_resource_path"
+        | "resource_too_large"
+        | "resource_unavailable"
+        | "not_a_file"
+        | "resource_symlink"
+        | "skill_symlink" => "validation_error",
         "not_found" => "not_found",
+        "resource_not_found" => "resource_not_found",
         _ => default_code,
     };
     serde_json::json!({
