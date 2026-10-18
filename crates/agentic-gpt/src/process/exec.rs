@@ -194,6 +194,28 @@ fn check_path_policy(
     }
 }
 
+fn path_io_failure(prefix: &str, path: &Path, error: std::io::Error) -> String {
+    let suffix = match error.kind() {
+        std::io::ErrorKind::NotFound => "not_found",
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        std::io::ErrorKind::NotADirectory => "not_directory",
+        _ => "inspection_failed",
+    };
+    format!("{prefix}_{suffix}: {}: {error}", path.display())
+}
+
+fn path_exists_checked(path: &Path) -> Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(anyhow::Error::msg(path_io_failure(
+            "bubblewrap_path",
+            path,
+            error,
+        ))),
+    }
+}
+
 fn resolve_argument_path(
     workspace_root: &Path,
     arg: &str,
@@ -205,20 +227,19 @@ fn resolve_argument_path(
     } else {
         workspace_root.join(expanded)
     };
-    if candidate.exists() {
-        return candidate
-            .canonicalize()
-            .map_err(|_| "path_policy_error".to_string());
-    }
-    if matches!(access, PathAccessKind::Read) {
-        return Err("path_not_found".into());
+    match candidate.canonicalize() {
+        Ok(path) => return Ok(path),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && matches!(access, PathAccessKind::Write) => {}
+        Err(error) => return Err(path_io_failure("path", &candidate, error)),
     }
     let parent = candidate
         .parent()
-        .ok_or_else(|| "path_not_found".to_string())?;
+        .ok_or_else(|| "path_invalid: target has no parent".to_string())?;
     let parent = parent
         .canonicalize()
-        .map_err(|_| "path_not_found".to_string())?;
+        .map_err(|error| path_io_failure("path_parent", parent, error))?;
     Ok(candidate
         .file_name()
         .map(|name| parent.join(name))
@@ -361,8 +382,11 @@ pub(crate) fn resolve_working_directory(
     };
     let directory = candidate
         .canonicalize()
-        .map_err(|_| "working_directory_not_found".to_string())?;
-    if !directory.is_dir() {
+        .map_err(|error| path_io_failure("working_directory", &candidate, error))?;
+    if !std::fs::metadata(&directory)
+        .map_err(|error| path_io_failure("working_directory", &directory, error))?
+        .is_dir()
+    {
         return Err("working_directory_not_directory".to_string());
     }
     match crate::policy::path_policy_decision(config, &directory, true)? {
@@ -417,7 +441,7 @@ pub(crate) fn build_command(
         let mut runtime_aliases = Vec::new();
         for path in ["/usr", "/bin", "/lib", "/lib64", "/etc/ssl"] {
             let path = PathBuf::from(path);
-            if path.exists() {
+            if path_exists_checked(&path)? {
                 let resolved = path.canonicalize()?;
                 if resolved != path {
                     runtime_aliases.push((resolved.clone(), path));
@@ -431,12 +455,12 @@ pub(crate) fn build_command(
             }
         }
         for path in normalize(&policy.read_only)? {
-            if path.exists() && !write.iter().any(|w| path.starts_with(w)) {
+            if path_exists_checked(&path)? && !write.iter().any(|w| path.starts_with(w)) {
                 mounts.insert(path, "--ro-bind");
             }
         }
         for path in write {
-            if path.exists() {
+            if path_exists_checked(&path)? {
                 mounts.insert(path, "--bind");
             }
         }
@@ -456,7 +480,7 @@ pub(crate) fn build_command(
             if exposed {
                 // Creating a missing mask target beneath a host bind would
                 // mutate the host. An unrepresentable deny must fail isolation.
-                if !path.exists() {
+                if !path_exists_checked(&path)? {
                     anyhow::bail!("bubblewrap_deny_path_not_found: {}", path.display());
                 }
                 let readable = approved_read.iter().any(|grant| path.starts_with(grant));
@@ -464,7 +488,7 @@ pub(crate) fn build_command(
             }
         }
         for path in &approved_read {
-            if path.exists() {
+            if path_exists_checked(&path)? {
                 let writable = crate::policy::path_policy_decision(config, path, true)
                     .map_err(anyhow::Error::msg)?
                     == PolicyDecision::Allow;
@@ -479,7 +503,7 @@ pub(crate) fn build_command(
             }
         }
         for path in &approved_write {
-            if path.exists() {
+            if path_exists_checked(&path)? {
                 mounts.insert(path.clone(), "--bind");
             }
         }

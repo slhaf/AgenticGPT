@@ -76,7 +76,7 @@ fn execution_scopes(
                 };
                 target.push(
                     path.canonicalize()
-                        .map_err(|_| "scope_path_not_found".to_string())?,
+                        .map_err(|error| path_io_failure("scope_path", &path, error))?,
                 );
             }
         }
@@ -86,7 +86,11 @@ fn execution_scopes(
             if looks_like_path(&arg) {
                 let path = resolve_argument_path(cwd, &arg, classify_program_access(&program))?;
                 // An absent target never grants its existing parent implicitly.
-                if path.exists() {
+                if match std::fs::metadata(&path) {
+                    Ok(_) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(path_io_failure("scope_path", &path, error)),
+                } {
                     if matches!(classify_program_access(&program), PathAccessKind::Read) {
                         read.push(path)
                     } else {
@@ -173,7 +177,7 @@ pub(crate) fn declared_scope_decision(
                 };
                 let path = path
                     .canonicalize()
-                    .map_err(|_| "scope_path_not_found".to_string())?;
+                    .map_err(|error| path_io_failure("scope_path", &path, error))?;
                 decision = decision.max(crate::policy::path_policy_decision(
                     config, &path, writable,
                 )?);
@@ -193,8 +197,8 @@ pub(crate) fn scope_identity(
     read.into_iter()
         .chain(write)
         .map(|path| {
-            let metadata =
-                std::fs::metadata(&path).map_err(|_| "scope_path_not_found".to_string())?;
+            let metadata = std::fs::metadata(&path)
+                .map_err(|error| path_io_failure("scope_path", &path, error))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;

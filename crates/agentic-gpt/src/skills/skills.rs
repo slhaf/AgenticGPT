@@ -416,10 +416,12 @@ fn scan_skills(
     let root = skills_root(config);
     let mut skills = BTreeMap::new();
     skills.insert(BUILTIN_INSTALLER_ID.to_string(), builtin_skill_package()?);
-    if !root.exists() {
-        return Ok(skills);
-    }
-    for entry in fs::read_dir(&root)? {
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(skills),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -620,7 +622,14 @@ fn reject_symlink(path: &Path, error: &str) -> Result<()> {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(anyhow!("{error}")),
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(anyhow!("{error}")),
+        Err(source) => {
+            let code = match source.kind() {
+                std::io::ErrorKind::PermissionDenied => "path_permission_denied",
+                std::io::ErrorKind::NotADirectory => "path_not_directory",
+                _ => "path_inspection_failed",
+            };
+            Err(anyhow!("{code}: {}: {source}", path.display()))
+        }
     }
 }
 
@@ -671,14 +680,17 @@ fn active_contains(active: &ActiveSkillsFile, id: &str) -> bool {
 }
 
 fn read_active_file(config: &Config, path: &Path) -> Result<ActiveSkillsFile> {
-    if !path.exists() {
-        let active = ActiveSkillsFile {
-            active_skills: Vec::new(),
-            disabled_defaults: Vec::new(),
-        };
-        return reconcile_default_activation(config, path, active);
-    }
-    let text = fs::read_to_string(path)?;
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let active = ActiveSkillsFile {
+                active_skills: Vec::new(),
+                disabled_defaults: Vec::new(),
+            };
+            return reconcile_default_activation(config, path, active);
+        }
+        Err(error) => return Err(error.into()),
+    };
     reconcile_default_activation(config, path, serde_json::from_str(&text)?)
 }
 

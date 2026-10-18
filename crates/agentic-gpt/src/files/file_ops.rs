@@ -177,6 +177,56 @@ fn read_bounded(path: &Path, limit: u64) -> std::io::Result<BoundedRead> {
     }
 }
 
+fn path_io_error(error: impl Into<anyhow::Error>, path: &Path, parent: bool) -> FileError {
+    let error = error.into();
+    let code = match error
+        .downcast_ref::<std::io::Error>()
+        .map(std::io::Error::kind)
+    {
+        Some(std::io::ErrorKind::NotFound) if parent => "file_parent_not_found",
+        Some(std::io::ErrorKind::NotFound) => "file_not_found",
+        Some(std::io::ErrorKind::PermissionDenied) => "file_permission_denied",
+        Some(std::io::ErrorKind::NotADirectory) => "file_not_directory",
+        _ => "file_path_unreadable",
+    };
+    FileError::new(
+        code,
+        &format!("could not inspect {}: {error}", path.display()),
+    )
+}
+
+fn path_entry_exists(path: &Path) -> std::result::Result<bool, FileError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(path_io_error(error, path, false)),
+    }
+}
+
+fn validate_parent_directory(path: &Path) -> std::result::Result<(), FileError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| path_io_error(error, path, true))?;
+    if metadata.file_type().is_symlink() {
+        return Err(FileError::new(
+            "file_symlink_rejected",
+            "parent directory is a symlink",
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(FileError::new(
+            "file_not_directory",
+            "parent path is not a directory",
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| path_io_error(error, path, true))?;
+    if canonical != path {
+        return Err(FileError::new(
+            "file_path_changed",
+            "parent directory changed from its planned path",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_path(
     config: &Config,
     input: &str,
@@ -193,24 +243,9 @@ pub(crate) fn resolve_path(
     } else {
         config.workspace_root.join(expanded)
     };
-    let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            FileError::new("file_not_found", "path was not found")
-        } else {
-            FileError::new("file_path_unreadable", "path metadata could not be read")
-        }
-    })?;
-    let resolved = if metadata.file_type().is_symlink() {
-        fs::canonicalize(&candidate).map_err(|_| {
-            FileError::new(
-                "file_symlink_rejected",
-                "symlink target could not be resolved",
-            )
-        })?
-    } else {
-        fs::canonicalize(&candidate)
-            .map_err(|_| FileError::new("file_path_unreadable", "path could not be resolved"))?
-    };
+    fs::symlink_metadata(&candidate).map_err(|error| path_io_error(error, &candidate, false))?;
+    let resolved =
+        fs::canonicalize(&candidate).map_err(|error| path_io_error(error, &candidate, false))?;
     check_policy(config, &resolved, access)?;
     if is_reserved_path(config, &resolved) {
         return Err(FileError::new(
@@ -241,18 +276,22 @@ pub(crate) fn resolve_absent_path(
     } else {
         config.workspace_root.join(expanded)
     };
-    if fs::symlink_metadata(&candidate).is_ok() {
+    if path_entry_exists(&candidate)? {
         return Err(FileError::new(
             "file_already_exists",
             "target already exists",
         ));
     }
     let resolved = exec::canonicalize_existing_or_parent(&candidate)
-        .map_err(|_| FileError::new("file_parent_not_found", "parent directory was not found"))?;
-    if !resolved.parent().is_some_and(Path::is_dir) {
+        .map_err(|error| path_io_error(error, &candidate, true))?;
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| FileError::new("file_path_invalid", "target has no parent"))?;
+    let metadata = fs::metadata(parent).map_err(|error| path_io_error(error, parent, true))?;
+    if !metadata.is_dir() {
         return Err(FileError::new(
-            "file_parent_not_found",
-            "parent directory was not found",
+            "file_not_directory",
+            "parent path is not a directory",
         ));
     }
     check_policy(config, &resolved, Access::Write)?;
@@ -285,15 +324,15 @@ fn resolve_absent_add_path(
     } else {
         config.workspace_root.join(expanded)
     };
-    if fs::symlink_metadata(&candidate).is_ok() {
+    if path_entry_exists(&candidate)? {
         return Err(FileError::new(
             "file_already_exists",
             "target already exists",
         ));
     }
     let projected = exec::canonicalize_existing_or_parent(&candidate)
-        .map_err(|_| FileError::new("file_parent_not_found", "parent directory was not found"))?;
-    if fs::symlink_metadata(&projected).is_ok() {
+        .map_err(|error| path_io_error(error, &candidate, true))?;
+    if path_entry_exists(&projected)? {
         return Err(FileError::new(
             "file_already_exists",
             "target already exists",
@@ -320,10 +359,10 @@ fn resolve_absent_add_path(
         }
     }
     let reprojected = exec::canonicalize_existing_or_parent(&candidate)
-        .map_err(|_| FileError::new("file_parent_not_found", "parent directory was not found"))?;
+        .map_err(|error| path_io_error(error, &candidate, true))?;
     if reprojected != projected {
         return Err(FileError::new(
-            "file_symlink_rejected",
+            "file_path_changed",
             "target path changed during preflight",
         ));
     }
@@ -343,16 +382,8 @@ fn missing_parent_directories(parent: &Path) -> std::result::Result<Vec<PathBuf>
     let mut current = parent.to_path_buf();
     loop {
         match fs::symlink_metadata(&current) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink()
-                    || !metadata.is_dir()
-                    || fs::canonicalize(&current).ok().as_deref() != Some(current.as_path())
-                {
-                    return Err(FileError::new(
-                        "file_symlink_rejected",
-                        "parent path is not a canonical directory",
-                    ));
-                }
+            Ok(_) => {
+                validate_parent_directory(&current)?;
                 break;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -368,12 +399,7 @@ fn missing_parent_directories(parent: &Path) -> std::result::Result<Vec<PathBuf>
                 missing.push(current.clone());
                 current = next.to_path_buf();
             }
-            Err(_) => {
-                return Err(FileError::new(
-                    "file_parent_not_found",
-                    "parent directory was not found",
-                ))
-            }
+            Err(error) => return Err(path_io_error(error, &current, true)),
         }
     }
     missing.reverse();
@@ -421,7 +447,7 @@ pub(crate) fn read_with_images(
     image_budget_bytes: usize,
 ) -> std::result::Result<ReadOutput, FileError> {
     let metadata = fs::metadata(&resolved.path)
-        .map_err(|_| FileError::new("file_not_found", "path was not found"))?;
+        .map_err(|error| path_io_error(error, &resolved.path, false))?;
     let modified_at = metadata
         .modified()
         .ok()
@@ -1720,13 +1746,13 @@ async fn apply_patch_inner(
                 config.workspace_root.join(p)
             };
             exec::canonicalize_existing_or_parent(&p)
-                .map_err(|_| FileError::new("file_path_unreadable", "path could not be resolved"))?
+                .map_err(|error| path_io_error(error, &p, true))?
         } else {
             resolve_path(&unrestricted, &input, Access::Write)?.path
         };
         if actual != expected {
             return Err(FileError::new(
-                "file_symlink_rejected",
+                "file_path_changed",
                 "patch target changed while awaiting approval",
             ));
         }
@@ -2034,8 +2060,8 @@ async fn apply_patch_inner(
 fn load_edit_source(
     source: &ResolvedPath,
 ) -> std::result::Result<(Vec<u8>, String, Option<fs::Permissions>), FileError> {
-    let metadata = fs::metadata(&source.path)
-        .map_err(|_| FileError::new("file_not_found", "source was not found"))?;
+    let metadata =
+        fs::metadata(&source.path).map_err(|error| path_io_error(error, &source.path, false))?;
     if !metadata.is_file() {
         return Err(FileError::new(
             "file_not_regular",
@@ -2281,17 +2307,15 @@ fn revalidate_target(
     existed: bool,
 ) -> std::result::Result<(), FileError> {
     if existed {
-        let current = resolve_path(config, &target.input, Access::Write).map_err(|_| {
-            FileError::new("file_revision_conflict", "source changed before commit")
-        })?;
+        let current = resolve_path(config, &target.input, Access::Write)?;
         if current.path != target.path {
             return Err(FileError::new(
-                "file_symlink_rejected",
+                "file_path_changed",
                 "target path changed before commit",
             ));
         }
     } else {
-        if fs::symlink_metadata(&target.requested).is_ok() {
+        if path_entry_exists(&target.requested)? {
             return Err(FileError::new(
                 "file_already_exists",
                 "target already exists",
@@ -2301,10 +2325,10 @@ fn revalidate_target(
             FileError::new("file_parent_not_found", "target parent was not found")
         })?;
         let canonical_parent = fs::canonicalize(parent)
-            .map_err(|_| FileError::new("file_parent_not_found", "target parent was not found"))?;
+            .map_err(|error| path_io_error(error, &target.requested, true))?;
         if canonical_parent != target.path.parent().unwrap_or(Path::new("")) {
             return Err(FileError::new(
-                "file_symlink_rejected",
+                "file_path_changed",
                 "parent path changed before commit",
             ));
         }
@@ -2317,17 +2341,17 @@ fn revalidate_add_plan(
     target: &ResolvedPath,
     parents_to_create: &[PathBuf],
 ) -> std::result::Result<(), FileError> {
-    if fs::symlink_metadata(&target.requested).is_ok() {
+    if path_entry_exists(&target.requested)? {
         return Err(FileError::new(
             "file_already_exists",
             "target already exists",
         ));
     }
     let projected = exec::canonicalize_existing_or_parent(&target.requested)
-        .map_err(|_| FileError::new("file_parent_not_found", "target parent was not found"))?;
+        .map_err(|error| path_io_error(error, &target.requested, true))?;
     if projected != target.path {
         return Err(FileError::new(
-            "file_symlink_rejected",
+            "file_path_changed",
             "target path changed before parent creation",
         ));
     }
@@ -2343,16 +2367,11 @@ fn revalidate_add_plan(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Ok(_) => {
                 return Err(FileError::new(
-                    "file_symlink_rejected",
+                    "file_path_changed",
                     "a missing parent changed during preflight",
                 ))
             }
-            Err(_) => {
-                return Err(FileError::new(
-                    "file_parent_not_found",
-                    "target parent could not be revalidated",
-                ))
-            }
+            Err(error) => return Err(path_io_error(error, directory, true)),
         }
         check_policy(config, directory, Access::Write)?;
         if is_reserved_path(config, directory) {
@@ -2379,21 +2398,7 @@ fn revalidate_add_parent_directories(
         ));
     }
     for directory in parents_to_create {
-        let metadata = fs::symlink_metadata(directory).map_err(|_| {
-            FileError::new(
-                "file_parent_not_found",
-                "created parent directory is no longer available",
-            )
-        })?;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_dir()
-            || fs::canonicalize(directory).ok().as_deref() != Some(directory.as_path())
-        {
-            return Err(FileError::new(
-                "file_symlink_rejected",
-                "created parent directory changed before commit",
-            ));
-        }
+        validate_parent_directory(directory)?;
         check_policy(config, directory, Access::Write)?;
         if is_reserved_path(config, directory) {
             return Err(FileError::new(
@@ -2435,7 +2440,7 @@ fn create_missing_parent_directories(
         if let Err(error) = fs::create_dir(&directory) {
             cleanup_owned_parent_directories(&mut owned);
             let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
-                "file_symlink_rejected"
+                "file_already_exists"
             } else {
                 "file_write_failed"
             };
@@ -2445,20 +2450,10 @@ fn create_missing_parent_directories(
             ));
         }
         let metadata = match fs::symlink_metadata(&directory) {
-            Ok(metadata)
-                if metadata.is_dir()
-                    && !metadata.file_type().is_symlink()
-                    && fs::canonicalize(&directory).ok().as_deref()
-                        == Some(directory.as_path()) =>
-            {
-                metadata
-            }
-            _ => {
+            Ok(metadata) => metadata,
+            Err(error) => {
                 cleanup_owned_parent_directories(&mut owned);
-                return Err(FileError::new(
-                    "file_symlink_rejected",
-                    "created parent directory did not resolve to its planned path",
-                ));
+                return Err(path_io_error(error, &directory, true));
             }
         };
         owned.push(owned_parent_directory(&directory, &metadata));
@@ -2493,21 +2488,7 @@ fn validate_created_parent_directory(
     config: &Config,
     directory: &Path,
 ) -> std::result::Result<(), FileError> {
-    let metadata = fs::symlink_metadata(directory).map_err(|_| {
-        FileError::new(
-            "file_parent_not_found",
-            "created parent directory could not be verified",
-        )
-    })?;
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || fs::canonicalize(directory).ok().as_deref() != Some(directory)
-    {
-        return Err(FileError::new(
-            "file_symlink_rejected",
-            "created parent directory changed before commit",
-        ));
-    }
+    validate_parent_directory(directory)?;
     check_policy(config, directory, Access::Write)?;
     if is_reserved_path(config, directory) {
         return Err(FileError::new(
