@@ -66,6 +66,7 @@ struct CachePaths {
 enum CacheState {
     Missing,
     Invalid,
+    Unavailable(String),
     Repair {
         archive: Vec<u8>,
         executable: Vec<u8>,
@@ -107,7 +108,8 @@ pub(crate) async fn resolve(config: &Config) -> Result<ResolvedTunnelClient> {
 fn resolve_executable(path: &Path, expected_sha256: Option<&str>) -> Result<ResolvedTunnelClient> {
     let configured_path = expand_path(path)?;
     let actual_sha256 = verify_executable(&configured_path, expected_sha256)?;
-    let path = fs::canonicalize(&configured_path).map_err(|_| anyhow!("executable_not_found"))?;
+    let path = fs::canonicalize(&configured_path)
+        .map_err(|error| executable_path_error(error, "executable_resolve_failed"))?;
     Ok(ResolvedTunnelClient {
         path,
         version: "override".to_owned(),
@@ -126,6 +128,9 @@ async fn resolve_managed(
     let paths = cache_paths(&cache_root, spec)?;
 
     let initial_state = cache_state(&paths, &spec.archive_sha256);
+    if let CacheState::Unavailable(error) = &initial_state {
+        return Err(anyhow!("{error}"));
+    }
     if let CacheState::Valid(path) = &initial_state {
         return resolved(spec, path.clone());
     }
@@ -145,6 +150,7 @@ async fn resolve_managed(
             return resolved(spec, path);
         }
         CacheState::Missing | CacheState::Invalid => {}
+        CacheState::Unavailable(error) => return Err(anyhow!("{error}")),
     }
 
     let download_dir = cache_root.join(".downloads");
@@ -252,15 +258,30 @@ fn cache_paths(cache_root: &Path, spec: &ArtifactSpec) -> Result<CachePaths> {
 }
 
 fn cache_state(paths: &CachePaths, expected_archive_sha256: &str) -> CacheState {
-    let Ok(final_meta) = fs::symlink_metadata(&paths.final_dir) else {
-        return CacheState::Missing;
+    let final_meta = match fs::symlink_metadata(&paths.final_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return CacheState::Missing,
+        Err(error) => {
+            return CacheState::Unavailable(format!("cache_artifact_metadata_failed: {error}"));
+        }
     };
     if final_meta.file_type().is_symlink() || !final_meta.is_dir() {
         return CacheState::Invalid;
     }
 
-    let Ok(archive) = read_bounded_file(&paths.archive, MAX_ARCHIVE_BYTES) else {
-        return CacheState::Invalid;
+    let archive = match read_bounded_file(&paths.archive, MAX_ARCHIVE_BYTES) {
+        Ok(archive) => archive,
+        Err(error) => {
+            let message = error.to_string();
+            return if matches!(
+                message.split(':').next(),
+                Some("cache_artifact_missing" | "cache_artifact_invalid" | "archive_size_limit")
+            ) {
+                CacheState::Invalid
+            } else {
+                CacheState::Unavailable(message)
+            };
+        }
     };
     if sha256_bytes(&archive) != expected_archive_sha256 {
         return CacheState::Invalid;
@@ -269,11 +290,17 @@ fn cache_state(paths: &CachePaths, expected_archive_sha256: &str) -> CacheState 
         return CacheState::Invalid;
     };
 
-    let Ok(executable_meta) = fs::symlink_metadata(&paths.executable) else {
-        return CacheState::Repair {
-            archive,
-            executable,
-        };
+    let executable_meta = match fs::symlink_metadata(&paths.executable) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CacheState::Repair {
+                archive,
+                executable,
+            };
+        }
+        Err(error) => {
+            return CacheState::Unavailable(format!("cache_artifact_metadata_failed: {error}"));
+        }
     };
     if executable_meta.file_type().is_symlink()
         || !executable_meta.is_file()
@@ -284,11 +311,17 @@ fn cache_state(paths: &CachePaths, expected_archive_sha256: &str) -> CacheState 
             executable,
         };
     }
-    let Ok(cached_executable) = fs::read(&paths.executable) else {
-        return CacheState::Repair {
-            archive,
-            executable,
-        };
+    let cached_executable = match fs::read(&paths.executable) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CacheState::Repair {
+                archive,
+                executable,
+            };
+        }
+        Err(error) => {
+            return CacheState::Unavailable(format!("cache_artifact_read_failed: {error}"));
+        }
     };
     if cached_executable != executable {
         return CacheState::Repair {
@@ -541,13 +574,15 @@ fn stale_lock(path: &Path) -> bool {
 
 fn validate_download_url(url: &str, allow_http: bool) -> Result<reqwest::Url> {
     let parsed = reqwest::Url::parse(url).map_err(|_| anyhow!("download_url_invalid"))?;
-    if !url_scheme_allowed(&parsed, allow_http)
-        || parsed.host().is_none()
+    if !url_scheme_allowed(&parsed, allow_http) {
+        return Err(anyhow!("download_url_requires_https"));
+    }
+    if parsed.host().is_none()
         || parsed.username() != ""
         || parsed.password().is_some()
         || parsed.fragment().is_some()
     {
-        return Err(anyhow!("download_url_requires_https"));
+        return Err(anyhow!("download_url_invalid"));
     }
     Ok(parsed)
 }
@@ -557,7 +592,8 @@ fn url_scheme_allowed(url: &reqwest::Url, allow_http: bool) -> bool {
 }
 
 fn verify_executable(path: &Path, expected_sha256: Option<&str>) -> Result<String> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| anyhow!("executable_not_found"))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| executable_path_error(error, "executable_metadata_failed"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(anyhow!("executable_not_regular"));
     }
@@ -572,6 +608,14 @@ fn verify_executable(path: &Path, expected_sha256: Option<&str>) -> Result<Strin
         }
     }
     Ok(actual_sha256)
+}
+
+fn executable_path_error(error: std::io::Error, fallback: &str) -> anyhow::Error {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        anyhow!("executable_not_found")
+    } else {
+        anyhow!("{fallback}: {error}")
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -593,14 +637,20 @@ fn verify_archive_hash(archive: &[u8], expected_sha256: &str) -> Result<()> {
 }
 
 fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| anyhow!("cache_artifact_missing"))?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow!("cache_artifact_missing")
+        } else {
+            anyhow!("cache_artifact_metadata_failed: {error}")
+        }
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(anyhow!("cache_artifact_invalid"));
     }
     if metadata.len() > limit {
         return Err(anyhow!("archive_size_limit"));
     }
-    fs::read(path).map_err(|_| anyhow!("cache_artifact_invalid"))
+    fs::read(path).map_err(|error| anyhow!("cache_artifact_read_failed: {error}"))
 }
 
 fn normalize_sha256(value: &str) -> Result<String> {

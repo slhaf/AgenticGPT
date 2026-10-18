@@ -248,8 +248,8 @@ pub(crate) fn recover_pending_setup_locked(config_path: &Path) -> Result<()> {
                 if path_hash(backup)?.as_deref() != Some(old_hash.as_str()) {
                     return Err(anyhow!("config_init_recovery_conflict"));
                 }
-                let bytes =
-                    fs::read(backup).map_err(|_| anyhow!("config_init_recovery_conflict"))?;
+                let bytes = fs::read(backup)
+                    .map_err(|error| anyhow!("config_init_recovery_read_failed: {error}"))?;
                 atomically_write_secret(
                     &journal.secret_path,
                     &bytes,
@@ -319,9 +319,10 @@ pub(crate) fn commit_wizard_outcome(
     if let Some(tunnel) = build.config.tunnel.as_mut() {
         tunnel.api_key = format!("file:{}", target.display());
     }
-    fs::create_dir_all(&parent).map_err(|_| anyhow!("config_init_secret_parent_invalid"))?;
+    fs::create_dir_all(&parent)
+        .map_err(|error| anyhow!("config_init_secret_parent_create_failed: {error}"))?;
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
-        .map_err(|_| anyhow!("config_init_secret_parent_invalid"))?;
+        .map_err(|error| anyhow!("config_init_secret_parent_permissions_failed: {error}"))?;
 
     let config_bytes = sparse_config_json(&build.config, false)?.into_bytes();
     let old_config_hash = match fs::read(config_path) {
@@ -506,10 +507,14 @@ fn validate_and_capture_secret_target(path: &Path) -> Result<(PathBuf, PathBuf, 
             }
         })
         .ok_or_else(|| anyhow!("config_init_secret_path_invalid"))?;
-    if let Ok(metadata) = fs::symlink_metadata(&parent) {
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(anyhow!("config_init_secret_path_invalid"));
+    match fs::symlink_metadata(&parent) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(anyhow!("config_init_secret_path_invalid"));
+            }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(anyhow!("config_init_secret_metadata_failed: {error}")),
     }
 
     let prior = match fs::symlink_metadata(&target) {
@@ -517,15 +522,15 @@ fn validate_and_capture_secret_target(path: &Path) -> Result<(PathBuf, PathBuf, 
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err(anyhow!("config_init_secret_path_invalid"));
             }
-            let bytes =
-                fs::read(&target).map_err(|_| anyhow!("config_init_secret_path_invalid"))?;
+            let bytes = fs::read(&target)
+                .map_err(|error| anyhow!("config_init_secret_read_failed: {error}"))?;
             PriorSecretState::Existing {
                 bytes,
                 mode: metadata.permissions().mode() & 0o7777,
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => PriorSecretState::Absent,
-        Err(_) => return Err(anyhow!("config_init_secret_path_invalid")),
+        Err(error) => return Err(anyhow!("config_init_secret_metadata_failed: {error}")),
     };
 
     Ok((target, parent, prior))

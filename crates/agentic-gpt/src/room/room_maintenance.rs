@@ -336,7 +336,13 @@ fn write_request(root: &Path, item: &PreparedItem) -> Result<String> {
         .write(true)
         .create_new(true)
         .open(&path)
-        .map_err(|_| anyhow!("room_maintenance_slot_occupied"))?;
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow!("room_maintenance_slot_occupied")
+            } else {
+                anyhow!("room_maintenance_request_create_failed: {error}")
+            }
+        })?;
     if file.write_all(&payload).is_err() {
         drop(file);
         let _ = fs::remove_file(&path);

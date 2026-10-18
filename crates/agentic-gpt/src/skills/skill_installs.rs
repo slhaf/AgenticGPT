@@ -1396,10 +1396,15 @@ async fn github_get_json(client: &Client, url: &str) -> Result<Value> {
     if !response.status().is_success() {
         return Err(anyhow!("download_http:{}", response.status().as_u16()));
     }
-    response
-        .json()
-        .await
-        .map_err(|_| anyhow!("archive_invalid"))
+    response.json().await.map_err(|error| {
+        if error.is_decode() {
+            anyhow!("download_response_invalid")
+        } else if error.is_timeout() {
+            anyhow!("download_timeout")
+        } else {
+            anyhow!("download_failed")
+        }
+    })
 }
 
 async fn download_url(config: &crate::config::Config, url: &str) -> Result<Vec<u8>> {
@@ -1486,9 +1491,12 @@ async fn validate_public_url(config: &crate::config::Config, url: &Url) -> Resul
         .ok_or_else(|| anyhow!("download_blocked"))?;
     let addresses = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|_| anyhow!("download_blocked"))?
+        .map_err(|_| anyhow!("download_dns_failed"))?
         .collect::<Vec<_>>();
-    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
+    if addresses.is_empty() {
+        return Err(anyhow!("download_dns_failed"));
+    }
+    if addresses.iter().any(|address| !is_public_ip(address.ip())) {
         return Err(anyhow!("download_blocked"));
     }
     Ok(())
@@ -1911,6 +1919,8 @@ fn install_error_code(message: &str) -> String {
         | "ref_not_found"
         | "download_blocked"
         | "download_failed"
+        | "download_dns_failed"
+        | "download_response_invalid"
         | "download_timeout"
         | "digest_mismatch"
         | "archive_invalid"
