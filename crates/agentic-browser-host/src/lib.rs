@@ -50,7 +50,8 @@ fn read_exact_or_eof(reader: &mut (impl Read + ?Sized), buffer: &mut [u8]) -> io
     let mut filled = 0;
     while filled < buffer.len() {
         match reader.read(&mut buffer[filled..]) {
-            Ok(0) => return Ok(false),
+            Ok(0) if filled == 0 => return Ok(false),
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
             Ok(count) => filled += count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
@@ -72,7 +73,7 @@ pub fn read_frame(reader: &mut (impl Read + ?Sized)) -> Result<Option<Value>, Fr
 
     let mut payload = vec![0_u8; size as usize];
     if !read_exact_or_eof(reader, &mut payload)? {
-        return Ok(None);
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
     }
 
     Ok(Some(serde_json::from_slice(&payload)?))
