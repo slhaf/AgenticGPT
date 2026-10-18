@@ -23,7 +23,7 @@ async fn start_response_owner_request(
 ) -> (
     HubState,
     mpsc::UnboundedReceiver<OutboundAgentMessage>,
-    tokio::task::JoinHandle<std::result::Result<Value, String>>,
+    tokio::task::JoinHandle<std::result::Result<Value, RequestError>>,
     HubCommandEnvelope,
 ) {
     start_response_owner_request_with_timeout(request_id, 5).await
@@ -35,7 +35,7 @@ async fn start_response_owner_request_with_timeout(
 ) -> (
     HubState,
     mpsc::UnboundedReceiver<OutboundAgentMessage>,
-    tokio::task::JoinHandle<std::result::Result<Value, String>>,
+    tokio::task::JoinHandle<std::result::Result<Value, RequestError>>,
     HubCommandEnvelope,
 ) {
     let state = test_state();
@@ -334,8 +334,8 @@ async fn response_owner_timeout_preserves_other_run_and_accepts_late_result() {
 
     let short_error = short_caller.await.unwrap().unwrap_err();
     assert_eq!(
-        short_error,
-        format!("process_exec_timeout; runId={}", short_envelope.run_id)
+        short_error.to_string(),
+        format!("agent_request_timeout; runId={}", short_envelope.run_id)
     );
     assert!(!long_caller.is_finished());
 
@@ -563,7 +563,7 @@ async fn wp1_send_failure_marks_not_sent_and_excludes_replay() {
     };
 
     let result = request_agent(&state, "agent", command, 1).await;
-    assert_eq!(result.unwrap_err(), "agent_offline");
+    assert_eq!(result.unwrap_err().to_string(), "agent_offline");
 
     let run_id: String = state
         .db
@@ -1083,4 +1083,95 @@ async fn event_sources_validation_conflict_is_http_409_for_unknown_source() {
     )
     .await;
     assert_eq!(sql_failure.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn process_http_preserves_offline_dispatch_failure() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("authorization", "Bearer test-api-key".parse().unwrap());
+    let response = crate::routes::process_exec(
+        State(state),
+        headers,
+        axum::Json(ProcessExecRequest {
+            agent_id: "agent".to_string(),
+            group: None,
+            command: "printf 'ok'".to_string(),
+            acquire_confirmation: None,
+            cwd: None,
+            wait_seconds: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "agent_offline");
+}
+
+#[tokio::test]
+async fn process_http_preserves_dispatch_receipt_storage_failure() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut outbound = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE agent_runs")
+        .unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("authorization", "Bearer test-api-key".parse().unwrap());
+    let response = crate::routes::process_exec(
+        State(state.clone()),
+        headers,
+        axum::Json(ProcessExecRequest {
+            agent_id: "agent".to_string(),
+            group: None,
+            command: "printf 'ok'".to_string(),
+            acquire_confirmation: None,
+            cwd: None,
+            wait_seconds: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "agent_request_failed");
+    assert!(matches!(
+        outbound.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert_eq!(state.dispatch.pending_count().await, 0);
+}
+
+#[tokio::test]
+async fn mcp_http_preserves_database_error_category() {
+    let state = test_state();
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE agents")
+        .unwrap();
+    let response = crate::mcp_server::transport::mcp_post(
+        State(state),
+        axum::Json(json!({
+            "jsonrpc": "2.0",
+            "id": "db-failure",
+            "method": "tools/call",
+            "params": { "name": "hub.info", "arguments": {} }
+        })),
+    )
+    .await;
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["id"], "db-failure");
+    assert_eq!(value["error"]["code"], -32603);
+    assert_eq!(value["error"]["data"]["code"], "db_error");
 }
