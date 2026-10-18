@@ -9,6 +9,38 @@ pub(crate) fn permissive_paths(config: &Config) -> Config {
     config
 }
 
+fn arguments_are_literal_text(program: &str) -> bool {
+    matches!(program, "echo" | "printf" | "true" | "false")
+}
+
+fn shell_changes_cwd(execution: &ExecutionSpec) -> bool {
+    match execution {
+        ExecutionSpec::Argv { .. } => false,
+        ExecutionSpec::Shell { command } => {
+            crate::policy::shell_parser::extract_literal_commands(command)
+                .commands
+                .iter()
+                .any(|command| matches!(command.program.as_str(), "cd" | "pushd" | "popd"))
+        }
+    }
+}
+
+fn inferred_path_args(program: &str, args: &[String], uncertain_cwd: bool) -> Vec<String> {
+    if arguments_are_literal_text(program) {
+        return Vec::new();
+    }
+    args.iter()
+        .filter(|arg| {
+            looks_like_path(arg)
+                && (!uncertain_cwd
+                    || arg.starts_with('/')
+                    || arg.as_str() == "~"
+                    || arg.starts_with("~/"))
+        })
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn argument_path_decision(
     config: &Config,
     cwd: &Path,
@@ -16,9 +48,9 @@ pub(crate) fn argument_path_decision(
     args: &[String],
 ) -> std::result::Result<PolicyDecision, String> {
     let mut decision = PolicyDecision::Allow;
-    for arg in args {
-        if looks_like_path(arg) {
-            let path = resolve_argument_path(cwd, arg, classify_program_access(program))?;
+    for arg in inferred_path_args(program, args, false) {
+        if looks_like_path(&arg) {
+            let path = resolve_argument_path(cwd, &arg)?;
             decision = decision.max(crate::policy::path_policy_decision(
                 config,
                 &path,
@@ -50,7 +82,12 @@ pub(crate) fn execution_path_decision(
 ) -> std::result::Result<PolicyDecision, String> {
     let mut decision = crate::policy::path_policy_decision(config, cwd, true)?;
     let permissive = permissive_paths(config);
+    let uncertain_cwd = shell_changes_cwd(execution);
+    if uncertain_cwd {
+        decision = decision.max(PolicyDecision::Confirm);
+    }
     for (program, args) in literal_commands(execution) {
+        let args = inferred_path_args(&program, &args, uncertain_cwd);
         preflight(&permissive, cwd, &program, &args)?;
         decision = decision.max(argument_path_decision(config, cwd, &program, &args)?);
     }
@@ -81,10 +118,11 @@ fn execution_scopes(
             }
         }
     }
+    let uncertain_cwd = shell_changes_cwd(execution);
     for (program, args) in literal_commands(execution) {
-        for arg in args {
+        for arg in inferred_path_args(&program, &args, uncertain_cwd) {
             if looks_like_path(&arg) {
-                let path = resolve_argument_path(cwd, &arg, classify_program_access(&program))?;
+                let path = resolve_argument_path(cwd, &arg)?;
                 // An absent target never grants its existing parent implicitly.
                 if match std::fs::metadata(&path) {
                     Ok(_) => true,
@@ -122,7 +160,15 @@ pub(crate) fn approval_preview(
                 format!("risk: {}", crate::utils::risk_level(program))
             }
         },
-        format!("cwd: {}", cwd.display()),
+        format!(
+            "cwd: {}{}",
+            cwd.display(),
+            if shell_changes_cwd(execution) {
+                "; shell changes directory: relative argument paths are unresolved and are not implicitly granted"
+            } else {
+                ""
+            }
+        ),
         format!(
             "read: {}",
             read.iter()

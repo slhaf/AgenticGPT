@@ -216,34 +216,23 @@ fn path_exists_checked(path: &Path) -> Result<bool> {
     }
 }
 
-fn resolve_argument_path(
-    workspace_root: &Path,
-    arg: &str,
-    access: PathAccessKind,
-) -> std::result::Result<PathBuf, String> {
+fn resolve_argument_path(workspace_root: &Path, arg: &str) -> std::result::Result<PathBuf, String> {
     let expanded = expand_path(arg).map_err(|_| "path_policy_error".to_string())?;
     let candidate = if expanded.is_absolute() {
         expanded
     } else {
         workspace_root.join(expanded)
     };
-    match candidate.canonicalize() {
-        Ok(path) => return Ok(path),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                && matches!(access, PathAccessKind::Write) => {}
-        Err(error) => return Err(path_io_failure("path", &candidate, error)),
-    }
-    let parent = candidate
-        .parent()
-        .ok_or_else(|| "path_invalid: target has no parent".to_string())?;
-    let parent = parent
-        .canonicalize()
-        .map_err(|error| path_io_failure("path_parent", parent, error))?;
-    Ok(candidate
-        .file_name()
-        .map(|name| parent.join(name))
-        .unwrap_or(parent))
+    canonicalize_existing_or_parent(&candidate).map_err(|error| {
+        match error.downcast_ref::<std::io::Error>() {
+            Some(io) => path_io_failure(
+                "path",
+                &candidate,
+                std::io::Error::new(io.kind(), io.to_string()),
+            ),
+            None => format!("path_inspection_failed: {}: {error}", candidate.display()),
+        }
+    })
 }
 
 #[derive(Debug)]

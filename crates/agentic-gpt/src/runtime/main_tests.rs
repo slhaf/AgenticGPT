@@ -999,8 +999,11 @@ fn relative_path_arguments_are_resolved_from_working_directory() {
 
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.policy.path =
-        test_path_policy(vec![config.workspace_root.clone()], Vec::new(), Vec::new());
+    config.policy.path = test_path_policy(
+        vec![config.workspace_root.clone()],
+        Vec::new(),
+        vec![config.workspace_root.join("target.txt")],
+    );
 
     assert_eq!(
         exec::preflight(
@@ -1010,7 +1013,7 @@ fn relative_path_arguments_are_resolved_from_working_directory() {
             &["./target.txt".to_string()]
         )
         .unwrap_err(),
-        "path_not_found"
+        "path_denied"
     );
     assert!(exec::preflight(&config, &subdir, "cat", &["./target.txt".to_string()]).is_ok());
 }
