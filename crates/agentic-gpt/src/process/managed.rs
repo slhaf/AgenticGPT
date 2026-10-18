@@ -3679,7 +3679,7 @@ pub(crate) async fn list_processes(
     match list_processes_page(state, request).await {
         Ok(page) => page.processes,
         Err(error) => {
-            log_warn(format!("process list unavailable: {error}"));
+            crate::utils::log_warn(format!("process list unavailable: {error}"));
             Vec::new()
         }
     }

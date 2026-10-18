@@ -16,6 +16,14 @@ fn confirmation_error(reason: String) -> FileError {
     )
 }
 
+fn authorization_metadata(path: &Path) -> std::result::Result<Option<fs::Metadata>, FileError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(path_io_error(error, path, false)),
+    }
+}
+
 pub(super) async fn authorize_file_targets(
     state: &AppState,
     config: &Config,
@@ -29,24 +37,24 @@ pub(super) async fn authorize_file_targets(
     }
     let mut decision = PolicyDecision::Allow;
     let mut preview = Vec::new();
-    let ancestors = targets
-        .iter()
-        .filter(|(p, _)| !p.exists())
-        .filter_map(|(p, _)| {
-            p.ancestors()
-                .skip(1)
-                .find(|a| a.exists())
-                .map(Path::to_path_buf)
-        })
-        .collect::<Vec<_>>();
-    let ancestor_identities = ancestors
-        .iter()
-        .map(|p| fs::metadata(p).ok().map(|m| identity(&m)))
-        .collect::<Vec<_>>();
     let identities = targets
         .iter()
-        .map(|(p, _)| std::fs::metadata(p).ok().map(|m| identity(&m)))
-        .collect::<Vec<_>>();
+        .map(|(path, _)| authorization_metadata(path).map(|m| m.as_ref().map(identity)))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut ancestors = Vec::new();
+    let mut ancestor_identities = Vec::new();
+    for ((path, _), before) in targets.iter().zip(&identities) {
+        if before.is_some() {
+            continue;
+        }
+        for ancestor in path.ancestors().skip(1) {
+            if let Some(metadata) = authorization_metadata(ancestor)? {
+                ancestors.push(ancestor.to_path_buf());
+                ancestor_identities.push(identity(&metadata));
+                break;
+            }
+        }
+    }
     for (path, access) in targets {
         decision = decision.max(
             crate::policy::path_policy_decision(config, path, *access == Access::Write)
@@ -74,17 +82,17 @@ pub(super) async fn authorize_file_targets(
     .await
     .map_err(confirmation_error)?;
     for ((path, _), before) in targets.iter().zip(identities) {
-        if std::fs::metadata(path).ok().map(|m| identity(&m)) != before {
+        if authorization_metadata(path)?.as_ref().map(identity) != before {
             return Err(FileError::new(
-                "file_revision_conflict",
+                "file_path_changed",
                 "target identity changed while awaiting approval",
             ));
         }
     }
     for (path, before) in ancestors.iter().zip(ancestor_identities) {
-        if fs::metadata(path).ok().map(|m| identity(&m)) != before {
+        if authorization_metadata(path)?.as_ref().map(identity) != Some(before) {
             return Err(FileError::new(
-                "file_revision_conflict",
+                "file_path_changed",
                 "target ancestor changed while awaiting approval",
             ));
         }
@@ -161,7 +169,7 @@ pub(super) async fn authorize_read_requests(
     for (input, path) in roots {
         if resolve_path(&unrestricted, &input, Access::Read)?.path != path {
             return Err(FileError::new(
-                "file_symlink_rejected",
+                "file_path_changed",
                 "request target changed while awaiting approval",
             ));
         }
