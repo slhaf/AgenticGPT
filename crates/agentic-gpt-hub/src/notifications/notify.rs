@@ -144,7 +144,7 @@ pub(crate) async fn notification_channels(state: &HubState) -> Result<Vec<Notifi
         agent_id: None,
     });
 
-    let android_reason = match android_endpoint_state(state) {
+    let android_reason = match android_endpoint_state(state)? {
         AndroidEndpointState::NotConnected => "android_endpoint_not_connected",
         AndroidEndpointState::DeliveryNotImplemented => "android_delivery_not_implemented",
     };
@@ -210,7 +210,7 @@ pub(crate) async fn send_user_notification(
                 }
                 Err(reason) => Err(NotifyRouteError::DeliveryFailed {
                     channel_key: request.channel_key,
-                    reason,
+                    reason: reason.to_string(),
                 }),
             }
         }
@@ -235,7 +235,9 @@ pub(crate) async fn send_user_notification(
             })
         }
         NotifyChannelKey::AndroidNotice | NotifyChannelKey::AndroidAlarm => {
-            let reason = match android_endpoint_state(state) {
+            let reason = match android_endpoint_state(state)
+                .map_err(|error| NotifyRouteError::Db(error.to_string()))?
+            {
                 AndroidEndpointState::NotConnected => "android_endpoint_not_connected",
                 AndroidEndpointState::DeliveryNotImplemented => "android_delivery_not_implemented",
             };
@@ -301,12 +303,12 @@ pub(crate) async fn publish_ntfy_notification(
     }
 }
 
-pub(crate) fn android_endpoint_state(state: &HubState) -> AndroidEndpointState {
-    if android_endpoint_exists(state).unwrap_or(false) {
+pub(crate) fn android_endpoint_state(state: &HubState) -> Result<AndroidEndpointState> {
+    Ok(if android_endpoint_exists(state)? {
         AndroidEndpointState::DeliveryNotImplemented
     } else {
         AndroidEndpointState::NotConnected
-    }
+    })
 }
 
 struct NtfyChannelState {

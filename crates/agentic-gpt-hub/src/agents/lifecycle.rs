@@ -547,8 +547,8 @@ pub(super) async fn resolve_room_target<'a>(
         return Err(room::control::RoomRouteError::StateConflict);
     }
     if !connection.hello_received {
-        return Err(room::control::RoomRouteError::Timeout(
-            "agent_not_ready".to_string(),
+        return Err(room::control::RoomRouteError::Dispatch(
+            super::dispatch::RequestError::admission("agent_not_ready".to_string()),
         ));
     }
     let target = DispatchTarget {

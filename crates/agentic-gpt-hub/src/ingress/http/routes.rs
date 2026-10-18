@@ -179,13 +179,13 @@ struct ErrorDetail {
 fn unavailable_process_value(
     process_id: &str,
     code: &'static str,
-    reason: String,
+    reason: impl ToString,
     snapshot: Option<&crate::state::ProcessCacheSnapshot>,
 ) -> serde_json::Value {
     let mut body = json!({
         "processId": process_id,
         "status": "unavailable",
-        "error": { "code": code, "message": reason },
+        "error": { "code": code, "message": reason.to_string() },
         "freshness": "unknown"
     });
     if let Some(snapshot) = snapshot {
@@ -270,7 +270,7 @@ pub(crate) async fn process_exec(
     };
     match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
         Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "process_exec_timeout", reason),
+        Err(reason) => api_error(reason.status, reason.code, reason),
     }
 }
 
@@ -291,7 +291,7 @@ pub(crate) async fn process_batch(
     };
     match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
         Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "process_batch_timeout", reason),
+        Err(reason) => api_error(reason.status, reason.code, reason),
     }
 }
 
@@ -325,6 +325,7 @@ pub(crate) async fn list_processes(
     };
     match request_agent(&state, &query.agent_id, command, 2).await {
         Ok(value) => Json(live_process_value(value)).into_response(),
+        Err(reason) if reason.status.is_server_error() && reason.status != StatusCode::SERVICE_UNAVAILABLE && reason.status != StatusCode::GATEWAY_TIMEOUT => api_error(reason.status, reason.code, reason),
         Err(reason) if payload.cursor.is_some() => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
@@ -379,7 +380,7 @@ pub(crate) async fn list_events(
     };
     match request_agent(&state, &query.agent_id, command, REQUEST_TIMEOUT_SECS).await {
         Ok(value) => process_success_response(value),
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "event_list_timeout", reason),
+        Err(reason) => api_error(reason.status, reason.code, reason),
     }
 }
 
@@ -405,7 +406,7 @@ pub(crate) async fn get_event(
     };
     match request_agent(&state, &query.agent_id, command, REQUEST_TIMEOUT_SECS).await {
         Ok(value) => process_success_response(value),
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "event_get_timeout", reason),
+        Err(reason) => api_error(reason.status, reason.code, reason),
     }
 }
 
@@ -430,7 +431,7 @@ pub(crate) async fn mark_events(
     };
     match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
         Ok(value) => process_success_response(value),
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "event_mark_timeout", reason),
+        Err(reason) => api_error(reason.status, reason.code, reason),
     }
 }
 
@@ -461,10 +462,10 @@ pub(crate) async fn get_process_read(
     match request_agent(&state, &query.agent_id, command, timeout_seconds).await {
         Ok(value) => process_success_response(value),
         Err(reason) => (
-            StatusCode::SERVICE_UNAVAILABLE,
+            reason.status,
             Json(unavailable_process_value(
                 &process_id,
-                "process_read_unavailable",
+                reason.code,
                 reason,
                 cached_process(&state, &query.agent_id, &process_id)
                     .await
@@ -555,12 +556,12 @@ pub(crate) async fn cancel_process(
     match request_agent(&state, &query.agent_id, command, 5).await {
         Ok(value) => Json(value).into_response(),
         Err(reason) => (
-            StatusCode::BAD_GATEWAY,
+            reason.status,
             Json(json!({
                 "processId": process_id,
                 "status": "unavailable",
                 "error": {
-                    "code": "process_cancel_unavailable",
+                    "code": reason.code,
                     "message": reason
                 },
                 "freshness": "unknown"
@@ -762,7 +763,7 @@ async fn tmux_request(
 ) -> Response {
     match request_agent(state, agent_id, command, timeout_seconds).await {
         Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "tmux_request_timeout", reason),
+        Err(reason) => api_error(reason.status, reason.code, reason),
     }
 }
 
@@ -784,11 +785,7 @@ pub(crate) async fn mcp_list_servers(
         };
         return match request_agent(&state, agent_id, command, REQUEST_TIMEOUT_SECS).await {
             Ok(value) => Json(value).into_response(),
-            Err(reason) => api_error(
-                StatusCode::GATEWAY_TIMEOUT,
-                "mcp_list_servers_timeout",
-                reason,
-            ),
+            Err(reason) => api_error(reason.status, reason.code, reason),
         };
     }
 
@@ -815,11 +812,7 @@ pub(crate) async fn mcp_list_tools(
     };
     match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
         Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(
-            StatusCode::GATEWAY_TIMEOUT,
-            "mcp_list_tools_timeout",
-            reason,
-        ),
+        Err(reason) => api_error(reason.status, reason.code, reason),
     }
 }
 
@@ -841,7 +834,7 @@ pub(crate) async fn mcp_call_tool(
     let request_timeout = payload.effective_wait_seconds() + 2;
     match request_agent(&state, &payload.agent_id, command, request_timeout).await {
         Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "mcp_call_tool_timeout", reason),
+        Err(reason) => api_error(reason.status, reason.code, reason),
     }
 }
 
@@ -863,7 +856,7 @@ pub(crate) async fn mcp_batch(
     let request_timeout = payload.effective_wait_seconds() + 2;
     match request_agent(&state, &payload.agent_id, command, request_timeout).await {
         Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "mcp_batch_timeout", reason),
+        Err(reason) => api_error(reason.status, reason.code, reason),
     }
 }
 

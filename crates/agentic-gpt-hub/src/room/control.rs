@@ -14,7 +14,7 @@ pub(crate) struct ActiveRoomConnection {
 pub(crate) enum RoomRouteError {
     NotActive,
     StateConflict,
-    Timeout(String),
+    Dispatch(crate::agents::dispatch::RequestError),
 }
 
 pub(crate) async fn request_active_room(

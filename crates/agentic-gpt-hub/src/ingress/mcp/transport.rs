@@ -4,6 +4,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::ErrorData;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -31,7 +32,7 @@ pub(crate) async fn mcp_get(State(state): State<HubState>) -> Response {
 pub(crate) async fn mcp_post(State(state): State<HubState>, Json(rpc): Json<Value>) -> Response {
     let request = match serde_json::from_value::<JsonRpcRequest>(rpc) {
         Ok(request) => request,
-        Err(error) => return rpc_error(None, -32700, format!("Invalid JSON-RPC request: {error}")),
+        Err(error) => return rpc_error(None, -32600, format!("Invalid JSON-RPC request: {error}")),
     };
     let id = request.id.clone();
     let server = AgenticMcpServer::new(state);
@@ -56,7 +57,10 @@ pub(crate) async fn mcp_post(State(state): State<HubState>, Json(rpc): Json<Valu
         "tools/call" => {
             match call_app_tool(&server, request.params.unwrap_or_else(|| json!({}))).await {
                 Ok(result) => rpc_result(id, result),
-                Err(error) => rpc_error(id, -32602, error),
+                Err(error) => Json(
+                    json!({ "jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "error": error }),
+                )
+                .into_response(),
             }
         }
         _ => rpc_error(id, -32601, "Method not found"),
@@ -66,19 +70,25 @@ pub(crate) async fn mcp_post(State(state): State<HubState>, Json(rpc): Json<Valu
 pub(super) async fn call_app_tool(
     server: &AgenticMcpServer,
     params: Value,
-) -> Result<Value, String> {
+) -> Result<Value, ErrorData> {
     let object = params
         .as_object()
-        .ok_or_else(|| "tools/call params must be an object".to_string())?;
+        .ok_or_else(|| ErrorData::invalid_params("tools/call params must be an object", None))?;
     let name = object
         .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(|| "tools/call params.name is required".to_string())?;
+        .ok_or_else(|| ErrorData::invalid_params("tools/call params.name is required", None))?;
     if !server.allows_tool(name) {
         if !server.profile_allows_tool(name) {
-            return Err(format!("tool_unavailable_for_profile: {name}"));
+            return Err(ErrorData::invalid_params(
+                format!("tool_unavailable_for_profile: {name}"),
+                None,
+            ));
         }
-        return Err(format!("Unknown tool: {name}"));
+        return Err(ErrorData::invalid_params(
+            format!("Unknown tool: {name}"),
+            None,
+        ));
     }
     let arguments = object
         .get("arguments")
@@ -275,14 +285,20 @@ pub(super) async fn call_app_tool(
                 .await
         }
         "skills.run" => server.skills_run(Parameters(decode_args(arguments)?)).await,
-        _ => return Err(format!("Unknown tool: {name}")),
-    }
-    .map_err(|error| error.to_string())?;
-    serde_json::to_value(result).map_err(|error| error.to_string())
+        _ => {
+            return Err(ErrorData::invalid_params(
+                format!("Unknown tool: {name}"),
+                None,
+            ))
+        }
+    }?;
+    serde_json::to_value(result).map_err(|error| ErrorData::internal_error(error.to_string(), None))
 }
 
-fn decode_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, String> {
-    serde_json::from_value(value).map_err(|error| format!("Invalid tool arguments: {error}"))
+fn decode_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, ErrorData> {
+    serde_json::from_value(value).map_err(|error| {
+        ErrorData::invalid_params(format!("Invalid tool arguments: {error}"), None)
+    })
 }
 pub(super) fn app_tool_descriptors(server: &AgenticMcpServer) -> Vec<Value> {
     server

@@ -335,12 +335,12 @@ async fn unavailable_process_value(
     agent_id: &str,
     process_id: &str,
     code: &'static str,
-    reason: String,
+    reason: impl ToString,
 ) -> Value {
     let mut value = json!({
         "processId": process_id,
         "status": "unavailable",
-        "error": { "code": code, "message": reason },
+        "error": { "code": code, "message": reason.to_string() },
         "freshness": "unknown"
     });
     if let Some(cached) = cached_process_summary(state, agent_id, process_id).await {
@@ -511,7 +511,7 @@ impl AgenticMcpServer {
         let value = request_agent(&self.state, &params.agent_id, command, REQUEST_TIMEOUT_SECS)
             .await
             .unwrap_or_else(
-                |reason| json!({ "error": { "code": "event_list_timeout", "message": reason } }),
+                |reason| json!({ "error": { "code": reason.code, "message": reason } }),
             );
         Ok(result_from_value(value))
     }
@@ -537,7 +537,7 @@ impl AgenticMcpServer {
         let value = request_agent(&self.state, &params.agent_id, command, REQUEST_TIMEOUT_SECS)
             .await
             .unwrap_or_else(
-                |reason| json!({ "error": { "code": "event_get_timeout", "message": reason } }),
+                |reason| json!({ "error": { "code": reason.code, "message": reason } }),
             );
         Ok(result_from_value(value))
     }
@@ -563,7 +563,7 @@ impl AgenticMcpServer {
         let value = request_agent(&self.state, &params.agent_id, command, REQUEST_TIMEOUT_SECS)
             .await
             .unwrap_or_else(
-                |reason| json!({ "error": { "code": "event_mark_timeout", "message": reason } }),
+                |reason| json!({ "error": { "code": reason.code, "message": reason } }),
             );
         Ok(result_from_value(value))
     }
@@ -594,9 +594,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(
-            |reason| json!({ "error": { "code": "process_exec_timeout", "message": reason } }),
-        );
+        .unwrap_or_else(|reason| json!({ "error": { "code": reason.code, "message": reason } }));
         Ok(result_from_value(value))
     }
 
@@ -636,9 +634,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(
-            |reason| json!({ "error": { "code": "process_batch_timeout", "message": reason } }),
-        );
+        .unwrap_or_else(|reason| json!({ "error": { "code": reason.code, "message": reason } }));
         Ok(result_from_value(value))
     }
 
@@ -667,9 +663,17 @@ impl AgenticMcpServer {
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 2).await {
             Ok(value) => live_process_value(value),
+            Err(reason) if reason.status == axum::http::StatusCode::INTERNAL_SERVER_ERROR => {
+                json!({"error": {"code": reason.code, "message": reason}})
+            }
             Err(reason) => {
-                snapshot_process_list_filtered(&self.state, &params.agent_id, &payload, &reason)
-                    .await
+                snapshot_process_list_filtered(
+                    &self.state,
+                    &params.agent_id,
+                    &payload,
+                    &reason.to_string(),
+                )
+                .await
             }
         };
         Ok(result_from_value(value))
@@ -677,7 +681,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.read",
-        description = "已有 agentId/processId 时读取执行状态、增量输出或下游 MCP 结果，适合跟进 process.exec、process.batch、skills.run 或 mcp.callTool；不知道进程 ID 时先用 process.list。不启动或取消工作。view=status 只返回元数据并等待执行终态/期限；auto 优先返回未读产物，否则有界等待。返回 agentId/processId/kind/state/captureStatus 及可用 output/mcpResult。执行终态与 output.eof 不能互相推断；hasMore 仅表示当前有未读输出，gap 表示已丢失字节，captureStatus=incomplete 时不要无限等 EOF。command/skill 可用 cursor 续读；status 或 kind=mcp 不接受输出 cursor。mcpResult.value 为完整 CallToolResult；pending 不是失败，deferred 可提高 maxBytes 领取，not_retained 不可恢复。waitSeconds 到期不取消；Agent 不可达时返回 process_read_unavailable 及可能的 Hub 缓存元数据，缓存不含产物且不是实时结果。"
+        description = "已有 agentId/processId 时读取执行状态、增量输出或下游 MCP 结果，适合跟进 process.exec、process.batch、skills.run 或 mcp.callTool；不知道进程 ID 时先用 process.list。不启动或取消工作。view=status 只返回元数据并等待执行终态/期限；auto 优先返回未读产物，否则有界等待。返回 agentId/processId/kind/state/captureStatus 及可用 output/mcpResult。执行终态与 output.eof 不能互相推断；hasMore 仅表示当前有未读输出，gap 表示已丢失字节，captureStatus=incomplete 时不要无限等 EOF。command/skill 可用 cursor 续读；status 或 kind=mcp 不接受输出 cursor。mcpResult.value 为完整 CallToolResult；pending 不是失败，deferred 可提高 maxBytes 领取，not_retained 不可恢复。waitSeconds 到期不取消；Agent 不可达时返回具体派发错误码及可能的 Hub 缓存元数据，缓存不含产物且不是实时结果。"
     )]
     async fn process_read(
         &self,
@@ -699,7 +703,7 @@ impl AgenticMcpServer {
                         &self.state,
                         &params.agent_id,
                         &params.process_id,
-                        "process_read_unavailable",
+                        reason.code,
                         reason,
                     )
                     .await
@@ -710,7 +714,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.cancel",
-        description = "需要停止排队中或已启动的工作时，向指定 Agent 请求取消 processId；返回 state/cancelOutcome/terminationEvidence 和可选 error，可附独立 events 面板。依据 Agent 返回的证据判断是否已观察到停止，不把请求已接收当作副作用已停止。本地命令/skill 取消针对受管理进程组，不保证脱组后代停止；MCP 向下游请求取消，不保证远端副作用停止。Agent 不可达时返回 process_cancel_unavailable 及可能的 Hub 缓存元数据，缓存不是停止证据。"
+        description = "需要停止排队中或已启动的工作时，向指定 Agent 请求取消 processId；返回 state/cancelOutcome/terminationEvidence 和可选 error，可附独立 events 面板。依据 Agent 返回的证据判断是否已观察到停止，不把请求已接收当作副作用已停止。本地命令/skill 取消针对受管理进程组，不保证脱组后代停止；MCP 向下游请求取消，不保证远端副作用停止。Agent 不可达时返回具体派发错误码及可能的 Hub 缓存元数据，缓存不是停止证据。"
     )]
     async fn process_cancel(
         &self,
@@ -731,7 +735,7 @@ impl AgenticMcpServer {
                     &self.state,
                     &params.agent_id,
                     &params.process_id,
-                    "process_cancel_unavailable",
+                    reason.code,
                     reason,
                 )
                 .await
@@ -755,7 +759,7 @@ impl AgenticMcpServer {
         };
         let value = request_agent(&self.state, &params.agent_id, command, 5)
             .await
-            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+            .map_err(|reason| mcp_internal_error(reason.code, reason.to_string()))?;
         Ok(result_from_value(value))
     }
 
@@ -777,7 +781,7 @@ impl AgenticMcpServer {
         };
         let value = request_agent(&self.state, &params.agent_id, command, 5)
             .await
-            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+            .map_err(|reason| mcp_internal_error(reason.code, reason.to_string()))?;
         Ok(result_from_value(value))
     }
 
@@ -800,7 +804,7 @@ impl AgenticMcpServer {
         };
         let value = request_agent(&self.state, &params.agent_id, command, 5)
             .await
-            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+            .map_err(|reason| mcp_internal_error(reason.code, reason.to_string()))?;
         Ok(result_from_value(value))
     }
 
@@ -825,7 +829,7 @@ impl AgenticMcpServer {
         };
         let value = request_agent(&self.state, &params.agent_id, command, 65)
             .await
-            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+            .map_err(|reason| mcp_internal_error(reason.code, reason.to_string()))?;
         Ok(result_from_value(value))
     }
 
@@ -852,7 +856,7 @@ impl AgenticMcpServer {
         };
         let value = request_agent(&self.state, &params.agent_id, command, 65)
             .await
-            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+            .map_err(|reason| mcp_internal_error(reason.code, reason.to_string()))?;
         Ok(result_from_value(value))
     }
 
@@ -876,7 +880,7 @@ impl AgenticMcpServer {
         };
         let value = request_agent(&self.state, &params.agent_id, command, 5)
             .await
-            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+            .map_err(|reason| mcp_internal_error(reason.code, reason.to_string()))?;
         Ok(result_from_value(value))
     }
 
@@ -899,7 +903,7 @@ impl AgenticMcpServer {
         };
         let value = request_agent(&self.state, &params.agent_id, command, 65)
             .await
-            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+            .map_err(|reason| mcp_internal_error(reason.code, reason.to_string()))?;
         Ok(result_from_value(value))
     }
 
@@ -919,7 +923,9 @@ impl AgenticMcpServer {
             };
             let value = request_agent(&self.state, &agent_id, command, REQUEST_TIMEOUT_SECS)
                 .await
-                .unwrap_or_else(|reason| json!({ "error": { "code": "mcp_list_servers_timeout", "message": reason } }));
+                .unwrap_or_else(
+                    |reason| json!({ "error": { "code": reason.code, "message": reason } }),
+                );
             return Ok(result_from_value(value));
         }
 
@@ -954,9 +960,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(
-            |reason| json!({ "error": { "code": "mcp_list_tools_timeout", "message": reason } }),
-        );
+        .unwrap_or_else(|reason| json!({ "error": { "code": reason.code, "message": reason } }));
         Ok(result_from_value(value))
     }
 
@@ -987,7 +991,7 @@ impl AgenticMcpServer {
         let value = request_agent(&self.state, &payload.agent_id, command, request_timeout)
             .await
             .unwrap_or_else(
-                |reason| json!({ "error": { "code": "mcp_call_tool_timeout", "message": reason } }),
+                |reason| json!({ "error": { "code": reason.code, "message": reason } }),
             );
         Ok(result_from_value(value))
     }
@@ -1028,7 +1032,7 @@ impl AgenticMcpServer {
         let value = request_agent(&self.state, &payload.agent_id, command, request_timeout)
             .await
             .unwrap_or_else(
-                |reason| json!({ "error": { "code": "mcp_batch_timeout", "message": reason } }),
+                |reason| json!({ "error": { "code": reason.code, "message": reason } }),
             );
         Ok(result_from_value(value))
     }
@@ -1653,7 +1657,10 @@ fn room_route_error_value(error: RoomRouteError) -> Value {
     room_route_error_value_with_timeout(error, "room_notebook_timeout")
 }
 
-fn room_route_error_value_with_timeout(error: RoomRouteError, timeout_code: &'static str) -> Value {
+fn room_route_error_value_with_timeout(
+    error: RoomRouteError,
+    _timeout_code: &'static str,
+) -> Value {
     match error {
         RoomRouteError::NotActive => json!({
             "error": { "code": "room_not_active", "message": "no active room agent" }
@@ -1661,8 +1668,8 @@ fn room_route_error_value_with_timeout(error: RoomRouteError, timeout_code: &'st
         RoomRouteError::StateConflict => json!({
             "error": { "code": "room_state_conflict", "message": "active room state is inconsistent" }
         }),
-        RoomRouteError::Timeout(reason) => json!({
-            "error": { "code": timeout_code, "message": reason }
+        RoomRouteError::Dispatch(reason) => json!({
+            "error": { "code": reason.code, "message": reason }
         }),
     }
 }
@@ -2123,7 +2130,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error.contains("tool_unavailable_for_profile"));
+        assert!(error.to_string().contains("tool_unavailable_for_profile"));
         for name in [
             "room.diary.active",
             "room.diary.read",
@@ -2139,7 +2146,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                error.contains("tool_unavailable_for_profile"),
+                error.to_string().contains("tool_unavailable_for_profile"),
                 "{name}: {error}"
             );
         }
@@ -2165,7 +2172,7 @@ mod tests {
             .await
             .unwrap_err();
             assert!(
-                error.contains("tool_unavailable_for_profile"),
+                error.to_string().contains("tool_unavailable_for_profile"),
                 "{name}: {error}"
             );
         }
@@ -2217,7 +2224,7 @@ mod tests {
                 transport::call_app_tool(&server, json!({ "name": name, "arguments": {} })).await;
             if let Err(error) = result {
                 assert!(
-                    !error.starts_with("Unknown tool:"),
+                    !error.message.starts_with("Unknown tool:"),
                     "advertised tool {name} is not accepted by tools/call: {error}"
                 );
             }

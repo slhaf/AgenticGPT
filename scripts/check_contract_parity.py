@@ -3536,7 +3536,7 @@ def run_hub_late_response_gate(
     validate_operation_response(
         document, "/v1/process/exec", "post", 504, value, "Hub real delayed process.exec"
     )
-    if response.status != 504 or not isinstance(value, dict) or value.get("error", {}).get("code") != "process_exec_timeout":
+    if response.status != 504 or not isinstance(value, dict) or value.get("error", {}).get("code") != "agent_request_timeout":
         fail("Hub real delayed process.exec", f"expected the actual 35-second Hub timeout: {response.status}, {value}")
     if not relay.response_seen.is_set() or not isinstance(relay.late_response, dict):
         fail("Hub real delayed response", f"relay did not intercept the matching actual Agent Response frame; observed commands={len(relay.commands)}; expected response={relay._expected_response}; Agent diagnostics={agent.diagnostics()[-6000:]}")
@@ -4311,7 +4311,7 @@ def run_hub_agent_crash_recovery_gate(
     )
     if (
         response.status != 504
-        or value.get("error", {}).get("code") != "process_exec_timeout"
+        or value.get("error", {}).get("code") != "agent_request_timeout"
         or "events" in value
     ):
         fail(
@@ -7291,12 +7291,12 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 "room.maintenance.submit",
                 dirty_payload,
                 "Room HTTP maintenance.submit dirty rejection",
-                expected_status=400,
+                expected_status=409,
             )
         finally:
             dirty_path.unlink(missing_ok=True)
         if (
-            dirty_body.get("error", {}).get("code") != "room_maintenance_failed"
+            dirty_body.get("error", {}).get("code") != "room_maintenance_repository_dirty"
             or "room_maintenance_repository_dirty" not in dirty_body.get("error", {}).get("message", "")
         ):
             fail("Room HTTP maintenance.submit dirty rejection", f"Agent dirty-repository rejection was not preserved: {dirty_body}")
@@ -7534,7 +7534,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         if (
             offline_read_response.status != 503
             or offline_read_body.get("status") != "unavailable"
-            or offline_read_body.get("error", {}).get("code") != "process_read_unavailable"
+            or offline_read_body.get("error", {}).get("code") != "agent_offline"
             or offline_cached.get("processId") != completed_id
             or offline_read_body.get("freshness") not in {"cached", "stale"}
             or any(key in offline_read_body for key in ("output", "mcpResult", "events"))
@@ -7547,14 +7547,14 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             {}, "Hub offline process.cancel",
         )
         if (
-            offline_cancel_response.status != 502
-            or offline_cancel_body.get("error", {}).get("code") != "process_cancel_unavailable"
+            offline_cancel_response.status != 503
+            or offline_cancel_body.get("error", {}).get("code") != "agent_offline"
             or "cached" in offline_cancel_body
             or "observedAt" in offline_cancel_body
             or "events" in offline_cancel_body
         ):
             fail("Hub offline process.cancel", f"expected typed unavailable response without cached success: {offline_cancel_response.status}, {offline_cancel_body}")
-        validate_operation_response(document, "/v1/process/{processId}/cancel", "post", 502, offline_cancel_body, "Hub offline process.cancel")
+        validate_operation_response(document, "/v1/process/{processId}/cancel", "post", 503, offline_cancel_body, "Hub offline process.cancel")
         reports.append("PASS cache-only hub.process.status, typed offline process.read, and unavailable cancel")
     finally:
         for process in (

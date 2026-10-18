@@ -16,6 +16,51 @@ use crate::state::{HubState, OutboundAgentMessage};
 use crate::utils::random_id;
 use crate::REQUEST_TIMEOUT_SECS;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RequestError {
+    pub(crate) code: &'static str,
+    pub(crate) status: axum::http::StatusCode,
+    message: String,
+}
+
+impl RequestError {
+    fn internal(error: impl std::fmt::Display) -> Self {
+        Self {
+            code: "agent_request_failed",
+            status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            message: error.to_string(),
+        }
+    }
+    pub(crate) fn admission(reason: String) -> Self {
+        use axum::http::StatusCode;
+        let (code, status) = match reason.as_str() {
+            "agent_offline" => ("agent_offline", StatusCode::SERVICE_UNAVAILABLE),
+            "agent_not_ready" => ("agent_not_ready", StatusCode::SERVICE_UNAVAILABLE),
+            "agent_reporting_only" => ("agent_reporting_only", StatusCode::CONFLICT),
+            "agent_connection_changed" => ("agent_connection_changed", StatusCode::CONFLICT),
+            "agent_role_changed" => ("agent_role_changed", StatusCode::CONFLICT),
+            _ => return Self::internal(reason),
+        };
+        Self {
+            code,
+            status,
+            message: reason,
+        }
+    }
+}
+
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for RequestError {}
+impl serde::Serialize for RequestError {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.message)
+    }
+}
+
 struct PendingResponse {
     agent_id: String,
     request_id: String,
@@ -232,8 +277,10 @@ pub(crate) async fn request_agent(
     agent_id: &str,
     command: HubCommand,
     timeout_secs: u64,
-) -> std::result::Result<Value, String> {
-    let (target, admission) = lifecycle::resolve_command_target(state, agent_id).await?;
+) -> std::result::Result<Value, RequestError> {
+    let (target, admission) = lifecycle::resolve_command_target(state, agent_id)
+        .await
+        .map_err(RequestError::admission)?;
     let pending = state.dispatch.pending.lock().await;
     request_target(state, target, admission, pending, command, timeout_secs).await
 }
@@ -247,13 +294,7 @@ pub(crate) async fn request_room(
     let pending = state.dispatch.pending.lock().await;
     request_target(state, target, admission, pending, command, timeout_secs)
         .await
-        .map_err(|reason| match reason.as_str() {
-            "agent_offline"
-            | "agent_connection_changed"
-            | "agent_reporting_only"
-            | "agent_role_changed" => crate::room::control::RoomRouteError::StateConflict,
-            _ => crate::room::control::RoomRouteError::Timeout(reason),
-        })
+        .map_err(crate::room::control::RoomRouteError::Dispatch)
 }
 
 async fn request_target<'a>(
@@ -263,7 +304,7 @@ async fn request_target<'a>(
     pending: tokio::sync::MutexGuard<'a, HashMap<String, PendingResponse>>,
     command: HubCommand,
     timeout_secs: u64,
-) -> std::result::Result<Value, String> {
+) -> std::result::Result<Value, RequestError> {
     let request_id = command.request_id().to_string();
     let feedback_eligible = event_feedback::is_creation_command(&command);
     let needs_public_preflight = !matches!(&command, HubCommand::EventSettle { .. });
@@ -281,12 +322,16 @@ async fn request_target<'a>(
                     drop(pending);
                     event_feedback::flush_for_agent(state, &target.agent_id)
                         .await
-                        .map_err(|error| error.to_string())?;
-                    admission_slot = Some(lifecycle::admit_dispatch_target(state, &target).await?);
+                        .map_err(RequestError::internal)?;
+                    admission_slot = Some(
+                        lifecycle::admit_dispatch_target(state, &target)
+                            .await
+                            .map_err(RequestError::admission)?,
+                    );
                     pending_slot = Some(state.dispatch.pending.lock().await);
                     continue;
                 }
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(RequestError::internal(error)),
             }
         } else {
             None
@@ -295,7 +340,7 @@ async fn request_target<'a>(
         let mut conn = state.db.lock().unwrap();
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error.to_string())?;
+            .map_err(RequestError::internal)?;
         let run = runs::prepare_run_in_transaction(
             &transaction,
             &target.agent_id,
@@ -304,7 +349,7 @@ async fn request_target<'a>(
                 .as_ref()
                 .expect("dispatch command remains available"),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(RequestError::internal)?;
         let origin = EventOrigin {
             run_id: run.run_id.clone(),
             request_id: run.request_id.clone(),
@@ -312,9 +357,9 @@ async fn request_target<'a>(
         };
         if feedback_eligible {
             event_feedback::prepare_in_transaction(&transaction, &target.agent_id, &origin)
-                .map_err(|error| error.to_string())?;
+                .map_err(RequestError::internal)?;
         }
-        transaction.commit().map_err(|error| error.to_string())?;
+        transaction.commit().map_err(RequestError::internal)?;
         drop(conn);
 
         let owner_guard = if feedback_eligible {
@@ -337,7 +382,7 @@ async fn request_target<'a>(
             &run.command_hash,
             command.take().expect("dispatch command is sent once"),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(RequestError::internal)?;
         let (tx, rx) = oneshot::channel();
         pending.insert(
             run.run_id.clone(),
@@ -390,19 +435,20 @@ async fn request_target<'a>(
                 lifecycle::disconnect_agent(state, &target.agent_id, &target.connection_id, None)
                     .await;
         }
-        return Err(send_reason);
+        return Err(RequestError::admission(send_reason));
     }
     if let Err(error) = runs::mark_dispatched(state, &run_id) {
         warn!(runId = %run_id, %error, "failed to mark run dispatched");
     }
-    match timeout(Duration::from_secs(timeout_secs), rx).await {
+    let response = timeout(Duration::from_secs(timeout_secs), rx).await;
+    match response {
         Ok(Ok((value, sources))) => {
             if feedback_eligible {
                 if let Some(sources) = sources {
                     let mut guard = owner_guard.take().expect("feedback owner guard");
                     if let Err(error) = guard.set_sources(&sources) {
                         warn!(runId = %origin.run_id, %error, "event response metadata was rejected");
-                        return Err("event_response_metadata_rejected".to_string());
+                        return Err(RequestError::internal("event_response_metadata_rejected"));
                     }
                     let decision = event_feedback::finalize_original(
                         state,
@@ -410,10 +456,10 @@ async fn request_target<'a>(
                         &origin,
                         Some(&sources),
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(RequestError::internal)?;
                     guard
                         .complete_returned(decision)
-                        .map_err(|error| error.to_string())?;
+                        .map_err(RequestError::internal)?;
                     let flush_state = state.clone();
                     let flush_agent = target.agent_id.clone();
                     tokio::spawn(async move {
@@ -425,21 +471,34 @@ async fn request_target<'a>(
                     });
                 } else {
                     warn!(runId = %origin.run_id, "event response metadata was not persisted");
-                    return Err("event_response_metadata_unavailable".to_string());
+                    return Err(RequestError::internal(
+                        "event_response_metadata_unavailable",
+                    ));
                 }
             }
             Ok(value)
         }
-        _ => {
+        failure => {
+            let (code, status) = if failure.is_err() {
+                (
+                    "agent_request_timeout",
+                    axum::http::StatusCode::GATEWAY_TIMEOUT,
+                )
+            } else {
+                (
+                    "agent_response_channel_closed",
+                    axum::http::StatusCode::BAD_GATEWAY,
+                )
+            };
             state.dispatch.pending.lock().await.remove(&run_id);
             if feedback_eligible {
                 let mut guard = owner_guard.take().expect("feedback owner guard");
                 let decision =
                     event_feedback::finalize_original(state, &target.agent_id, &origin, None)
-                        .map_err(|error| error.to_string())?;
+                        .map_err(RequestError::internal)?;
                 guard
                     .complete_no_terminal(decision)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(RequestError::internal)?;
                 let flush_state = state.clone();
                 let flush_agent = target.agent_id.clone();
                 tokio::spawn(async move {
@@ -450,10 +509,16 @@ async fn request_target<'a>(
                     }
                 });
             }
-            if let Err(error) = runs::mark_timeout(state, &run_id, "process_exec_timeout") {
-                warn!(runId = %run_id, %error, "failed to mark run timeout");
+            if status == axum::http::StatusCode::GATEWAY_TIMEOUT {
+                if let Err(error) = runs::mark_timeout(state, &run_id, code) {
+                    warn!(runId = %run_id, %error, "failed to mark run timeout");
+                }
             }
-            Err(format!("process_exec_timeout; runId={}", run_id))
+            Err(RequestError {
+                code,
+                status,
+                message: format!("{code}; runId={run_id}"),
+            })
         }
     }
 }

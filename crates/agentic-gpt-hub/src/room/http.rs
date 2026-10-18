@@ -389,7 +389,7 @@ async fn forward_room_command(
     state: HubState,
     headers: HeaderMap,
     command: HubCommand,
-    timeout_code: &'static str,
+    _timeout_code: &'static str,
     timeout_secs: u64,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
@@ -407,9 +407,7 @@ async fn forward_room_command(
             "room_state_conflict",
             "active room state is inconsistent",
         ),
-        Err(RoomRouteError::Timeout(reason)) => {
-            api_error(StatusCode::GATEWAY_TIMEOUT, timeout_code, reason)
-        }
+        Err(RoomRouteError::Dispatch(error)) => api_error(error.status, error.code, error),
     }
 }
 
@@ -423,7 +421,11 @@ pub(super) fn room_value_response(value: Value) -> Response {
         return Json(value).into_response();
     };
     let status = match code {
-        "target_exists" | "idempotency_conflict" | "room_state_conflict" => StatusCode::CONFLICT,
+        "target_exists"
+        | "idempotency_conflict"
+        | "room_state_conflict"
+        | "room_maintenance_slot_occupied"
+        | "room_maintenance_repository_dirty" => StatusCode::CONFLICT,
         "not_found"
         | "room_notebook_not_found"
         | "room_state_entity_not_found"
@@ -432,7 +434,28 @@ pub(super) fn room_value_response(value: Value) -> Response {
         | "bootstrap_not_found"
         | "guide_not_found"
         | "room_not_active" => StatusCode::NOT_FOUND,
-        "bootstrap_read_failed" => StatusCode::INTERNAL_SERVER_ERROR,
+        "bootstrap_read_failed"
+        | "room_maintenance_failed"
+        | "room_notebook_read_failed"
+        | "room_notebook_write_failed"
+        | "room_state_read_failed"
+        | "room_state_write_failed"
+        | "skills_read_failed"
+        | "skills_write_failed"
+        | "room_diary_active_failed"
+        | "room_diary_read_failed"
+        | "room_notebook_recent_failed"
+        | "room_notebook_search_failed"
+        | "room_state_list_failed"
+        | "skills_list_failed"
+        | "skills_search_failed"
+        | "skills_active_failed"
+        | "skills_activate_failed"
+        | "skills_deactivate_failed"
+        | "skills_install_failed" => StatusCode::INTERNAL_SERVER_ERROR,
+        code if code.starts_with("room_maintenance_") && code.ends_with("_failed") => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
         _ => StatusCode::BAD_REQUEST,
     };
     (status, Json(value)).into_response()
