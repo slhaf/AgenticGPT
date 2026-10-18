@@ -2595,6 +2595,13 @@ impl ConfigTuiApp {
         let code = match code {
             "config_init_secret_path_invalid" => "config_init_secret_path_invalid",
             "config_init_secret_parent_invalid" => "config_init_secret_parent_invalid",
+            "config_init_secret_parent_create_failed" => "config_init_secret_parent_create_failed",
+            "config_init_secret_parent_permissions_failed" => {
+                "config_init_secret_parent_permissions_failed"
+            }
+            "config_init_secret_metadata_failed" => "config_init_secret_metadata_failed",
+            "config_init_secret_read_failed" => "config_init_secret_read_failed",
+            "config_init_recovery_read_failed" => "config_init_recovery_read_failed",
             "config_init_secret_write_failed" => "config_init_secret_write_failed",
             "config_init_config_write_failed" => "config_init_config_write_failed",
             "config_init_secret_rollback_failed" => "config_init_secret_rollback_failed",
@@ -2674,6 +2681,19 @@ fn system_error_message(code: &'static str, language: UiLanguage) -> &'static st
     match (code, language) {
         ("config_init_secret_path_invalid", UiLanguage::ZhCn) => "密钥路径无效，未写入配置。",
         ("config_init_secret_parent_invalid", UiLanguage::ZhCn) => "密钥目录不可用，未写入配置。",
+        ("config_init_secret_parent_create_failed", UiLanguage::ZhCn) => {
+            "密钥目录创建失败，未完成初始化。"
+        }
+        ("config_init_secret_parent_permissions_failed", UiLanguage::ZhCn) => {
+            "密钥目录权限设置失败，未完成初始化。"
+        }
+        ("config_init_secret_metadata_failed", UiLanguage::ZhCn) => {
+            "密钥路径信息读取失败，未完成初始化。"
+        }
+        ("config_init_secret_read_failed", UiLanguage::ZhCn) => "现有密钥读取失败，未完成初始化。",
+        ("config_init_recovery_read_failed", UiLanguage::ZhCn) => {
+            "恢复备份读取失败，请检查备份文件及访问权限。"
+        }
         ("config_init_secret_write_failed", UiLanguage::ZhCn) => "密钥写入失败，未完成初始化。",
         ("config_init_config_write_failed", UiLanguage::ZhCn) => "配置写入失败，未完成初始化。",
         ("config_init_secret_rollback_failed", UiLanguage::ZhCn) => {
@@ -2687,6 +2707,22 @@ fn system_error_message(code: &'static str, language: UiLanguage) -> &'static st
         }
         ("config_init_secret_parent_invalid", UiLanguage::En) => {
             "The secret directory is unavailable; configuration was not written."
+        }
+
+        ("config_init_secret_parent_create_failed", UiLanguage::En) => {
+            "The secret directory could not be created; initialization did not complete."
+        }
+        ("config_init_secret_parent_permissions_failed", UiLanguage::En) => {
+            "The secret directory permissions could not be set; initialization did not complete."
+        }
+        ("config_init_secret_metadata_failed", UiLanguage::En) => {
+            "The secret path metadata could not be read; initialization did not complete."
+        }
+        ("config_init_secret_read_failed", UiLanguage::En) => {
+            "The existing secret could not be read; initialization did not complete."
+        }
+        ("config_init_recovery_read_failed", UiLanguage::En) => {
+            "The recovery backup could not be read; check the backup file and access permissions."
         }
         ("config_init_secret_write_failed", UiLanguage::En) => {
             "The secret write failed; initialization did not complete."
