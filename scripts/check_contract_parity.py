@@ -4021,7 +4021,7 @@ def run_hub_feedback_delta_recovery_gate(
         fail(scenario, f"original process.batch HTTP call failed: {request_outcome['error']}")
     result = request_outcome.get("result")
     if (not isinstance(result, tuple) or len(result) != 2 or result[0].status != 504
-            or result[1].get("error", {}).get("code") != "process_batch_timeout"):
+            or result[1].get("error", {}).get("code") != "agent_request_timeout"):
         fail(scenario, f"expected original Hub process.batch NoTerminal timeout: {result}")
     if not terminal_sources_awaiting():
         fail(scenario, "timed-out Agent child sources were not both still awaiting settlement")
