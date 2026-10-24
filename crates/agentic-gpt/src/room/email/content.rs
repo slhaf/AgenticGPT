@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub(super) const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const TEXT_BUDGET: usize = 24 * 1024;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Attachment {
     pub id: String,
@@ -43,6 +43,34 @@ pub(super) fn normalize_text(text: &str) -> String {
 }
 
 pub(super) fn parse(raw: &[u8]) -> Result<Content> {
+    parse_parts(raw, Parts::Import)
+}
+
+pub(super) fn image(raw: &[u8]) -> Result<Content> {
+    parse_parts(raw, Parts::Image)
+}
+
+pub(super) fn attachments(raw: &[u8]) -> Result<Vec<Attachment>> {
+    Ok(parse_parts(raw, Parts::Metadata)?.attachments)
+}
+
+pub(super) fn attachment(raw: &[u8], id: &str) -> Result<Attachment> {
+    parse_parts(raw, Parts::Attachment(id))?
+        .attachments
+        .into_iter()
+        .find(|attachment| attachment.id == id)
+        .ok_or_else(|| anyhow!("email_attachment_not_found"))
+}
+
+#[derive(Clone, Copy)]
+enum Parts<'a> {
+    Import,
+    Image,
+    Metadata,
+    Attachment(&'a str),
+}
+
+fn parse_parts(raw: &[u8], parts: Parts<'_>) -> Result<Content> {
     if raw.len() > MAX_MESSAGE_BYTES {
         return Err(anyhow!("email_message_too_large"));
     }
@@ -58,9 +86,12 @@ pub(super) fn parse(raw: &[u8]) -> Result<Content> {
         &mut plain,
         &mut html,
         &mut attachments,
+        parts,
     )?;
-    let (body, format) = if let Some(plain) = plain.filter(|s| !s.trim().is_empty()) {
-        (normalize_text(&plain), "plain")
+    let (body, format) = if !matches!(parts, Parts::Import) {
+        (String::new(), "plain")
+    } else if let Some(plain) = plain {
+        (plain, "plain")
     } else if let Some(html) = &html {
         let converter = htmd::HtmlToMarkdown::builder()
             .skip_tags(vec![
@@ -189,6 +220,7 @@ fn collect(
     plain: &mut Option<String>,
     html: &mut Option<String>,
     attachments: &mut Vec<Attachment>,
+    parts: Parts<'_>,
 ) -> Result<()> {
     *count += 1;
     if depth > 30 || *count > 1000 {
@@ -204,34 +236,50 @@ fn collect(
     let mime = mail.ctype.mimetype.to_ascii_lowercase();
     if !is_attachment && !mail.subparts.is_empty() {
         for child in &mail.subparts {
-            collect(child, depth + 1, count, plain, html, attachments)?;
+            collect(child, depth + 1, count, plain, html, attachments, parts)?;
         }
     } else if !is_attachment && mime == "text/plain" {
-        if plain.is_none() {
-            *plain = Some(
-                mail.get_body()
-                    .map_err(|_| anyhow!("email_body_decode_failed"))?,
-            );
+        if plain.is_none() && matches!(parts, Parts::Import) {
+            let body = mail
+                .get_body()
+                .map_err(|_| anyhow!("email_body_decode_failed"))?;
+            let body = normalize_text(&body);
+            if !body.is_empty() {
+                *plain = Some(body);
+            }
         }
     } else if !is_attachment && mime == "text/html" {
-        if html.is_none() {
+        if html.is_none() && matches!(parts, Parts::Import | Parts::Image) {
             *html = Some(
                 mail.get_body()
                     .map_err(|_| anyhow!("email_body_decode_failed"))?,
             );
         }
     } else {
-        let bytes = mail
-            .get_body_raw()
-            .map_err(|_| anyhow!("email_attachment_decode_failed"))?;
         let index = attachments.len() + 1;
+        let id = format!("attachment_{index}");
+        let decode = match parts {
+            Parts::Import | Parts::Metadata => true,
+            Parts::Image => cid.is_some() && inline_image(&mime),
+            Parts::Attachment(target) => target == id,
+        };
+        let mut bytes = if decode {
+            mail.get_body_raw()
+                .map_err(|_| anyhow!("email_attachment_decode_failed"))?
+        } else {
+            Vec::new()
+        };
+        let size = bytes.len();
+        if matches!(parts, Parts::Metadata) {
+            bytes = Vec::new();
+        }
         attachments.push(Attachment {
-            id: format!("attachment_{index}"),
+            id,
             name: name
                 .map(|s| safe_filename(s))
                 .unwrap_or_else(|| format!("attachment-{index}")),
             mime_type: mime,
-            size: bytes.len(),
+            size,
             bytes,
             cid: cid.map(|s| s.trim().trim_matches(['<', '>']).to_owned()),
         });
@@ -261,10 +309,7 @@ pub(super) fn render_html(content: &Content) -> String {
     for attachment in &content.attachments {
         if let Some(cid) = &attachment.cid {
             // SVG and HTML are deliberately excluded from active inline resources.
-            if matches!(
-                attachment.mime_type.as_str(),
-                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-            ) {
+            if inline_image(&attachment.mime_type) {
                 html = html.replace(
                     &format!("cid:{cid}"),
                     &format!(
@@ -277,6 +322,13 @@ pub(super) fn render_html(content: &Content) -> String {
         }
     }
     html
+}
+
+fn inline_image(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
 }
 
 fn escape_html(text: &str) -> String {

@@ -4,16 +4,19 @@
 //! validated bytes in data URIs; HTTP, filesystem and stylesheet imports are
 //! never serviced. The parent prepares any explicitly requested remote images.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::process::Stdio;
 use std::time::Duration;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
+use html5ever::tendril::TendrilSink;
+use html5ever::{parse_document, serialize, Attribute, QualName};
 use image::ImageEncoder;
 use litehtml::email::prepare_email_html;
 use litehtml::pixbuf::PixbufContainer;
 use litehtml::{Document, DrawContext, Position};
+use markup5ever_rcdom::{NodeData, RcDom, SerializableHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,7 +33,7 @@ const MAX_REQUEST_BYTES: usize = 24 * 1024 * 1024;
 const MAX_IMAGE_BASE64_BYTES: usize = 7 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = MAX_IMAGE_BASE64_BYTES + 16 * 1024;
 const MAX_INLINE_IMAGES: usize = 128;
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
 static RENDER_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 const RENDER_CSS: &str = "html { background: white; } body { font-family: sans-serif; } \
@@ -43,6 +46,8 @@ struct ImageCursor {
     mail_id: String,
     revision: String,
     remote: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resources_revision: Option<String>,
     next_slice: u32,
 }
 
@@ -51,6 +56,10 @@ struct ImageCursor {
 struct WorkerRequest {
     html: String,
     slice: u32,
+    #[serde(default)]
+    discover: bool,
+    #[serde(default)]
+    resources: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -59,9 +68,11 @@ struct WorkerResponse {
     data: String,
     height: u32,
     blocked_remote_images: usize,
+    #[serde(default)]
+    sources: Vec<String>,
 }
 
-/// Render one image slice. `remote` binds the cursor's view; it never enables I/O.
+/// Render one image slice, with opt-in downloads owned by the parent process.
 pub(crate) async fn render(
     mail_id: &str,
     html: &str,
@@ -72,7 +83,7 @@ pub(crate) async fn render(
         return Err("email_render_html_too_large".to_owned());
     }
     let revision = format!("{:x}", Sha256::digest(html.as_bytes()));
-    let slice = match cursor {
+    let (slice, expected_resources_revision) = match cursor {
         Some(cursor) => {
             if cursor.len() > 4096 {
                 return Err("email_cursor_invalid".to_owned());
@@ -91,19 +102,35 @@ pub(crate) async fn render(
             {
                 return Err("email_cursor_invalid".to_owned());
             }
-            decoded.next_slice
+            (decoded.next_slice, decoded.resources_revision)
         }
-        None => 0,
+        None => (0, None),
     };
-    let input = serde_json::to_vec(&WorkerRequest {
+    // One permit covers discovery, downloading/cache work and final rendering.
+    let _permit = RENDER_SLOTS
+        .try_acquire()
+        .map_err(|_| "email_renderer_busy")?;
+    let resources = if remote {
+        crate::email_remote::prepare(mail_id, html, cursor.is_some()).await?
+    } else {
+        BTreeMap::new()
+    };
+    let resources_revision = if remote {
+        let bytes = serde_json::to_vec(&resources).map_err(|_| "email_cursor_encoding_failed")?;
+        Some(format!("{:x}", Sha256::digest(bytes)))
+    } else {
+        None
+    };
+    if cursor.is_some() && expected_resources_revision != resources_revision {
+        return Err("email_render_cache_expired".to_owned());
+    }
+    let output = run_worker(&WorkerRequest {
         html: html.to_owned(),
         slice,
+        discover: false,
+        resources,
     })
-    .map_err(|_| "email_renderer_request_failed")?;
-    if input.len() > MAX_REQUEST_BYTES {
-        return Err("email_render_html_too_large".to_owned());
-    }
-    let output = run_worker(&input).await?;
+    .await?;
     let has_more = (slice + 1) * SLICE_HEIGHT < output.height;
     let mut result = json!({
         "images": [{"mimeType": "image/png", "data": output.data}],
@@ -116,6 +143,7 @@ pub(crate) async fn render(
             mail_id: mail_id.to_owned(),
             revision,
             remote,
+            resources_revision,
             next_slice: slice + 1,
         };
         let next = serde_json::to_vec(&next).map_err(|_| "email_cursor_encoding_failed")?;
@@ -139,10 +167,24 @@ impl Drop for RenderChild {
     }
 }
 
-async fn run_worker(input: &[u8]) -> Result<WorkerResponse, String> {
-    let _permit = RENDER_SLOTS
-        .try_acquire()
-        .map_err(|_| "email_renderer_busy")?;
+/// Discover image URLs through the same library callbacks as the final render.
+/// The caller already owns the rendering permit; this worker never performs I/O.
+pub(crate) async fn discover(html: &str) -> Result<Vec<String>, String> {
+    Ok(run_worker(&WorkerRequest {
+        html: html.to_owned(),
+        slice: 0,
+        discover: true,
+        resources: BTreeMap::new(),
+    })
+    .await?
+    .sources)
+}
+
+async fn run_worker(request: &WorkerRequest) -> Result<WorkerResponse, String> {
+    let input = serde_json::to_vec(request).map_err(|_| "email_renderer_request_failed")?;
+    if input.len() > MAX_REQUEST_BYTES {
+        return Err("email_render_prepared_too_large".to_owned());
+    }
     let executable = std::env::current_exe().map_err(|_| "email_renderer_unavailable")?;
     let child = Command::new(executable)
         .arg("__email-render-worker")
@@ -159,7 +201,7 @@ async fn run_worker(input: &[u8]) -> Result<WorkerResponse, String> {
         let mut stdin = child.stdin.take().ok_or("email_renderer_io_failed")?;
         let stdout = child.stdout.take().ok_or("email_renderer_io_failed")?;
         stdin
-            .write_all(input)
+            .write_all(&input)
             .await
             .map_err(|_| "email_renderer_io_failed")?;
         drop(stdin);
@@ -240,13 +282,20 @@ fn render_document(request: WorkerRequest) -> Result<WorkerResponse, String> {
     if request.html.len() > MAX_HTML_BYTES || request.slice >= MAX_HEIGHT / SLICE_HEIGHT {
         return Err("email_renderer_request_invalid".to_owned());
     }
-    // No CID resolver or URL fetcher: the caller has already supplied allowed
-    // resources as data URIs. The built-in container only queues missing URLs.
-    let prepared = prepare_email_html(request.html.as_bytes(), None, None);
+    // Only an in-memory URI map is serviced. No URL fetcher, file loading or
+    // stylesheet imports are available in this disposable worker.
+    let html = normalize_image_attributes(&request.html)?;
+    let prepared = prepare_email_html(html.as_bytes(), None, None);
     let mut container = PixbufContainer::new(WIDTH, SLICE_HEIGHT);
     let mut loaded = HashSet::new();
-    let mut blocked = HashSet::new();
+    let mut blocked = BTreeSet::new();
     let mut pixels = 0;
+    for (uri, bytes) in request.resources {
+        let bytes = STANDARD
+            .decode(bytes)
+            .map_err(|_| "email_render_image_invalid")?;
+        load_inline_image(&mut container, &mut loaded, &mut pixels, uri, bytes)?;
+    }
     for (uri, bytes) in prepared.images {
         load_inline_image(&mut container, &mut loaded, &mut pixels, uri, bytes)?;
     }
@@ -276,7 +325,13 @@ fn render_document(request: WorkerRequest) -> Result<WorkerResponse, String> {
                     x: 0.0,
                     y: 0.0,
                     width: WIDTH as f32,
-                    height: SLICE_HEIGHT as f32,
+                    // Discovery must visit background images below the first
+                    // slice too. The fixed pixbuf clips writes independently.
+                    height: if request.discover {
+                        height as f32
+                    } else {
+                        SLICE_HEIGHT as f32
+                    },
                 }),
             );
             height
@@ -296,6 +351,24 @@ fn render_document(request: WorkerRequest) -> Result<WorkerResponse, String> {
         if added {
             container.resize(WIDTH, SLICE_HEIGHT);
             continue;
+        }
+        if request.discover {
+            return Ok(WorkerResponse {
+                data: String::new(),
+                height,
+                blocked_remote_images: blocked.len(),
+                sources: blocked
+                    .into_iter()
+                    .filter(|uri| {
+                        let lower = uri.to_ascii_lowercase();
+                        lower.starts_with("http:")
+                            || lower.starts_with("https:")
+                            || lower.starts_with("//")
+                    })
+                    .filter(|uri| uri.len() <= 4096)
+                    .take(16)
+                    .collect(),
+            });
         }
         if request.slice * SLICE_HEIGHT >= height {
             return Err("email_cursor_invalid".to_owned());
@@ -323,6 +396,7 @@ fn render_document(request: WorkerRequest) -> Result<WorkerResponse, String> {
             data,
             height,
             blocked_remote_images: blocked.len(),
+            sources: Vec::new(),
         });
     }
     Err("email_render_resources_unstable".to_owned())
@@ -366,4 +440,107 @@ fn load_inline_image(
     container.load_image_data(&uri, &first.bytes);
     loaded.insert(uri);
     Ok(true)
+}
+
+/// litehtml does not select srcset candidates, and legacy background support
+/// differs across element types. Normalize these attributes once in the worker;
+/// the engine discovers and resolves every resulting CSS image itself.
+fn normalize_image_attributes(html: &str) -> Result<String, String> {
+    const MAX_NODES: usize = 100_000;
+    if html
+        .bytes()
+        .filter(|byte| *byte == b'<')
+        .take(MAX_NODES + 1)
+        .count()
+        > MAX_NODES
+    {
+        return Err("email_render_html_complexity_exceeded".to_owned());
+    }
+    let dom = parse_document(RcDom::default(), Default::default()).one(html);
+    let mut stack = vec![(dom.document.clone(), 0)];
+    let mut count = 0;
+    while let Some((node, depth)) = stack.pop() {
+        count += 1;
+        if count > MAX_NODES || depth > 128 {
+            return Err("email_render_html_complexity_exceeded".to_owned());
+        }
+        if let NodeData::Element { name, attrs, .. } = &node.data {
+            let mut attrs = attrs.borrow_mut();
+            let attribute = |key: &str| {
+                attrs
+                    .iter()
+                    .find(|attr| {
+                        attr.name.ns.as_ref().is_empty() && attr.name.local.as_ref() == key
+                    })
+                    .map(|attr| attr.value.as_ref().trim().to_owned())
+            };
+            if name.local.as_ref() == "img" && attribute("src").is_none_or(|src| src.is_empty()) {
+                if let Some(source) = attribute("srcset").and_then(|value| {
+                    value
+                        .trim_start_matches(|c: char| c.is_ascii_whitespace() || c == ',')
+                        .split_ascii_whitespace()
+                        .next()
+                        .map(|source| source.trim_end_matches(',').to_owned())
+                        .filter(|source| !source.is_empty())
+                }) {
+                    attrs.retain(|attr| attr.name.local.as_ref() != "src");
+                    attrs.push(Attribute {
+                        name: QualName::new(None, Default::default(), "src".into()),
+                        value: source.into(),
+                    });
+                }
+            }
+            if matches!(name.local.as_ref(), "body" | "table" | "tr" | "td" | "th") {
+                let background = attrs
+                    .iter()
+                    .find(|attr| attr.name.local.as_ref() == "background")
+                    .map(|attr| attr.value.to_string());
+                if let Some(background) = background.filter(|source| !source.trim().is_empty()) {
+                    let mut quoted = String::new();
+                    for character in background.chars() {
+                        match character {
+                            '\\' | '"' => {
+                                quoted.push('\\');
+                                quoted.push(character);
+                            }
+                            '\n' | '\r' | '\u{c}' => quoted.push_str("\\a "),
+                            '\0' => quoted.push('\u{fffd}'),
+                            _ => quoted.push(character),
+                        }
+                    }
+                    let prefix = format!("background-image:url(\"{quoted}\");");
+                    if let Some(style) = attrs
+                        .iter_mut()
+                        .find(|attr| attr.name.local.as_ref() == "style")
+                    {
+                        style.value = format!("{prefix}{}", style.value).into();
+                    } else {
+                        attrs.push(Attribute {
+                            name: QualName::new(None, Default::default(), "style".into()),
+                            value: prefix.into(),
+                        });
+                    }
+                    attrs.retain(|attr| attr.name.local.as_ref() != "background");
+                }
+            }
+        }
+        stack.extend(
+            node.children
+                .borrow()
+                .iter()
+                .rev()
+                .map(|node| (node.clone(), depth + 1)),
+        );
+    }
+    let mut output = Vec::new();
+    serialize(
+        &mut output,
+        &SerializableHandle::from(dom.document.clone()),
+        Default::default(),
+    )
+    .map_err(|_| "email_render_html_invalid")?;
+    if output.len() > MAX_HTML_BYTES {
+        return Err("email_render_html_too_large".to_owned());
+    }
+    String::from_utf8(output).map_err(|_| "email_render_html_invalid".to_owned())
 }

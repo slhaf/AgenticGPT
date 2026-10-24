@@ -122,7 +122,7 @@ fn email_import_boundary_and_notification_outbox_survive_reopen() {
     assert_eq!(service.store.pending_events().unwrap()[0].0, id);
     let mail = service.store.get(&id).unwrap();
     assert!(!mail.unread);
-    let content = service.store.read_content(&mail).unwrap();
+    let content = service.store.read_image(&mail).unwrap();
     assert!(content.body.contains("Available after restart"));
     assert!(!content.body.contains("secret_script"));
     service.store.acknowledge_event(&id).unwrap();
@@ -143,7 +143,7 @@ fn email_import_boundary_and_notification_outbox_survive_reopen() {
     );
     assert!(service
         .store
-        .read_content(&service.store.get(&id).unwrap())
+        .read_image(&service.store.get(&id).unwrap())
         .is_ok());
     // Changing server identity must not re-import history or change old IDs.
     assert!(service.store.sync_record("account", 32, 100).is_err());
@@ -153,7 +153,7 @@ fn email_import_boundary_and_notification_outbox_survive_reopen() {
     );
     assert!(service
         .store
-        .read_content(&service.store.get(&id).unwrap())
+        .read_image(&service.store.get(&id).unwrap())
         .is_ok());
     assert!(service.store.pending_events().unwrap().is_empty());
 }
@@ -188,7 +188,7 @@ fn email_pending_send_reopens_as_queryable_unknown_and_expiry_keeps_identity() {
         id
     );
     assert_eq!(
-        service.store.read_content(&mail).unwrap().body,
+        service.store.read_image(&mail).unwrap().body,
         "Recorded before SMTP."
     );
     assert!(service
@@ -204,7 +204,7 @@ fn email_pending_send_reopens_as_queryable_unknown_and_expiry_keeps_identity() {
     let mail = service.store.get(&id).unwrap();
     assert_eq!(mail.status, "unknown");
     assert_eq!(
-        service.store.read_content(&mail).err().unwrap().to_string(),
+        service.store.read_image(&mail).err().unwrap().to_string(),
         "email_content_expired"
     );
     assert_eq!(
@@ -231,6 +231,7 @@ fn email_saved_mime_keeps_plain_body_and_attachment_bytes_after_reopen() {
         "From: sender@example.com\r\nTo: reader@example.com\r\nSubject: Charset and attachment\r\n",
         "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=mixed\r\n\r\n",
         "--mixed\r\nContent-Type: multipart/alternative; boundary=alternative\r\n\r\n",
+        "--alternative\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n \t\r\n",
         "--alternative\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n",
         "Plain body =E4=BD=A0=E5=A5=BD\r\n",
         "--alternative\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>HTML alternate</p>\r\n--alternative--\r\n",
@@ -243,16 +244,50 @@ fn email_saved_mime_keeps_plain_body_and_attachment_bytes_after_reopen() {
         .unwrap();
     let id = service.store.pending_events().unwrap()[0].0.clone();
     drop(service);
+    // Tier ⑤: a real schema-1 archive must migrate without an eager EML scan,
+    // backfill attachment metadata once, and retain its normalized body. This
+    // also catches empty MIME alternatives hiding a later usable plain body.
+    let conn = rusqlite::Connection::open(fixture.root.join("state/email.sqlite3")).unwrap();
+    conn.execute_batch(
+        "UPDATE mail SET body_bytes=length(CAST(body AS BLOB));
+         UPDATE stats SET value=(SELECT SUM(raw_bytes+body_bytes) FROM mail) WHERE key='content_bytes';
+         ALTER TABLE mail DROP COLUMN attachments; PRAGMA user_version=1;",
+    ).unwrap();
+    drop(conn);
+    let raw_path = fixture.root.join("state/email").join(format!("{id}.eml"));
+    let moved = raw_path.with_extension("held");
+    std::fs::rename(&raw_path, &moved).unwrap();
     let service = fixture.open();
+    std::fs::rename(&moved, &raw_path).unwrap();
     let content = service
         .store
-        .read_content(&service.store.get(&id).unwrap())
+        .read_image(&service.store.get(&id).unwrap())
         .unwrap();
     assert_eq!(content.body, "Plain body 你好");
     assert_eq!(content.format, "plain");
     assert_eq!(content.attachments.len(), 1);
     assert_eq!(content.attachments[0].name, "report.bin");
-    assert_eq!(content.attachments[0].bytes, vec![0, 1, 2, 255]);
+    let mail = service.store.get(&id).unwrap();
+    let attachments = service.store.attachment_metadata(&mail).unwrap();
+    assert_eq!(attachments[0].size, 4);
+    assert_eq!(
+        service
+            .store
+            .read_attachment(&mail, "attachment_1")
+            .unwrap()
+            .bytes,
+        vec![0, 1, 2, 255]
+    );
+    drop(service);
+    std::fs::rename(&raw_path, &moved).unwrap();
+    let service = fixture.open();
+    let attachments = service
+        .store
+        .attachment_metadata(&service.store.get(&id).unwrap())
+        .unwrap();
+    assert_eq!(attachments[0].name, "report.bin");
+    assert_eq!(attachments[0].size, 4);
+    std::fs::rename(moved, raw_path).unwrap();
     assert_eq!(
         service.store.search("account", "你好", "body").unwrap().0[0]["ref"],
         id
@@ -433,7 +468,7 @@ fn email_unreadable_mail_progress_and_explicit_recovery_keep_old_references() {
     assert_eq!(
         service
             .store
-            .read_content(too_large)
+            .read_image(too_large)
             .err()
             .unwrap()
             .to_string(),
@@ -459,7 +494,7 @@ fn email_unreadable_mail_progress_and_explicit_recovery_keep_old_references() {
     assert_eq!(
         service
             .store
-            .read_content(&service.store.get(&old_id).unwrap())
+            .read_image(&service.store.get(&old_id).unwrap())
             .unwrap()
             .body,
         "Still delivered."
@@ -499,7 +534,7 @@ fn email_unreadable_mail_progress_and_explicit_recovery_keep_old_references() {
     );
     assert!(service
         .store
-        .read_content(&service.store.get(&old_id).unwrap())
+        .read_image(&service.store.get(&old_id).unwrap())
         .is_ok());
 }
 
@@ -748,10 +783,13 @@ async fn email_real_tls_imap_peek_imports_without_marking_read() {
         assert!(transcript.iter().any(|line| line == "UID BODY.PEEK[]"));
         let mail = state.email.store.get(&id).unwrap();
         assert!(mail.unread);
-        let content = state.email.store.read_content(&mail).unwrap();
+        let content = state.email.store.read_image(&mail).unwrap();
         assert_eq!(content.body, "Verified delivery over TLS.");
         assert_eq!(
-            mail_metadata(&mail, &content)["to"]
+            mail_metadata(
+                &mail,
+                &state.email.store.attachment_metadata(&mail).unwrap()
+            )["to"]
                 .as_array()
                 .unwrap()
                 .len(),

@@ -1,18 +1,15 @@
-//! Explicit remote-image preparation. The renderer itself never accesses the network.
-use std::collections::{BTreeMap, BTreeSet};
+//! Opt-in image downloads and a bounded snapshot cache. HTML parsing stays in the worker.
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Component, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use html5ever::tendril::TendrilSink;
-use html5ever::{parse_document, serialize, Attribute, QualName};
-use markup5ever_rcdom::{Handle, NodeData, RcDom, SerializableHandle};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
@@ -20,101 +17,93 @@ use url::{Host, Url};
 const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES: usize = 12 * 1024 * 1024;
 const MAX_RESOURCES: usize = 16;
-const MAX_HTML_BYTES: usize = 16 * 1024 * 1024;
-const MAX_DOM_NODES: usize = 100_000;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_CACHE_FILE_BYTES: u64 = (MAX_HTML_BYTES as u64).div_ceil(3) * 4 + 1024;
+const MAX_CACHE_FILE_BYTES: u64 = (MAX_DOWNLOAD_BYTES as u64).div_ceil(3) * 4 + 128 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
-const UNAVAILABLE: &str = "email-remote-image-unavailable:";
 const CACHE_ERROR: &str = "email_render_cache_unavailable";
 const PREPARED_TOO_LARGE: &str = "email_render_prepared_too_large";
-static PREPARE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 type Result<T> = std::result::Result<T, String>;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CachedHtml {
+struct CachedImages {
     created_at: u64,
-    // Base64 bounds JSON expansion even for unusual control characters in HTML.
-    html_base64: String,
+    // Original URI -> validated, static raster bytes in base64. No HTML rewriting.
+    images: BTreeMap<String, String>,
 }
 
-/// Image-only network access is opt-in at the caller. A continuation never refetches.
-pub(crate) async fn prepare(mail_id: &str, html: &str, cursor_present: bool) -> Result<String> {
+/// Called under the renderer's concurrency permit. Continuations only read snapshots.
+pub(crate) async fn prepare(
+    mail_id: &str,
+    html: &str,
+    cursor_present: bool,
+) -> Result<BTreeMap<String, String>> {
     if mail_id.is_empty()
         || !mail_id
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
     {
-        return Err("email_id_invalid".to_string());
+        return Err("email_id_invalid".to_owned());
     }
-    if html.len() > MAX_HTML_BYTES {
-        return Err(PREPARED_TOO_LARGE.to_string());
-    }
-    let html = html.to_owned();
     let started = tokio::time::Instant::now();
     tokio::time::timeout(TOTAL_TIMEOUT, async move {
-        let _guard = PREPARE_LOCK.lock().await;
         let cache = Arc::new(
             tokio::task::spawn_blocking(Cache::open)
                 .await
-                .map_err(|_| CACHE_ERROR.to_string())??,
+                .map_err(|_| CACHE_ERROR.to_owned())??,
         );
-        let file_lock = Arc::new(cache.acquire_lock().await?);
+        let lock = Arc::new(cache.acquire_lock().await?);
         let key = format!("remote-{:x}.json", Sha256::digest(html.as_bytes()));
         let read_key = key.clone();
-        if let Some(prepared) = cache_work(cache.clone(), file_lock.clone(), move |cache| {
+        if let Some(images) = cache_work(cache.clone(), lock.clone(), move |cache| {
             cache.read(&read_key)
         })
         .await?
         {
-            return Ok(prepared);
+            return Ok(images);
         }
         if cursor_present {
-            return Err("email_render_cache_expired".to_string());
+            return Err("email_render_cache_expired".to_owned());
         }
-        cache_work(cache.clone(), file_lock.clone(), |cache| cache.cleanup(0)).await?;
-        let source_html = html.clone();
-        let sources = tokio::task::spawn_blocking(move || sources(&source_html))
-            .await
-            .map_err(|_| "email_render_html_invalid".to_string())??;
-        let mut replacements = BTreeMap::new();
+        let sources = crate::email_render::discover(html).await?;
+        let mut images = BTreeMap::new();
         let mut downloaded_bytes = 0;
-        // Reserve time for the final DOM rewrite/cache commit. The full call is capped at 15s.
+        let mut stored_bytes = 0;
         let network_deadline = started + Duration::from_secs(12);
-        for (index, source) in sources.into_iter().enumerate() {
+        for source in sources
+            .into_iter()
+            .filter(|source| remote_candidate(source))
+            .take(MAX_RESOURCES)
+        {
             let deadline = network_deadline.min(tokio::time::Instant::now() + REQUEST_TIMEOUT);
-            let image = if tokio::time::Instant::now() < network_deadline {
-                tokio::time::timeout_at(deadline, fetch_image(&source, &mut downloaded_bytes))
-                    .await
-                    .ok()
-                    .flatten()
-            } else {
-                None
-            };
-            replacements.insert(
-                source,
-                image.unwrap_or_else(|| format!("{UNAVAILABLE}{}", index + 1)),
-            );
+            if tokio::time::Instant::now() >= network_deadline {
+                break;
+            }
+            if let Ok(Some(image)) =
+                tokio::time::timeout_at(deadline, fetch_image(&source, &mut downloaded_bytes)).await
+            {
+                stored_bytes += image.len();
+                if stored_bytes > MAX_DOWNLOAD_BYTES.div_ceil(3) * 4 {
+                    break;
+                }
+                images.insert(source, image);
+            }
         }
-        let prepared = tokio::task::spawn_blocking(move || rewrite(&html, &replacements))
-            .await
-            .map_err(|_| "email_render_html_invalid".to_string())??;
-        cache_work(cache, file_lock, move |cache| {
-            cache.write(&key, &prepared)?;
-            Ok(prepared)
+        cache_work(cache, lock, move |cache| {
+            cache.write(&key, &images)?;
+            Ok(images)
         })
         .await
     })
     .await
-    .map_err(|_| "email_remote_images_timeout".to_string())?
+    .map_err(|_| "email_remote_images_timeout".to_owned())?
 }
 
-// The shared file lock stays held if a cancelled caller leaves a bounded disk
-// operation finishing in the blocking pool. Another process cannot race cleanup.
+// Retain the cross-process lock even when cancellation leaves blocking disk work
+// running. Atomic rename and locked cleanup protect complete snapshots.
 async fn cache_work<T: Send + 'static>(
     cache: Arc<Cache>,
     lock: Arc<File>,
@@ -125,333 +114,12 @@ async fn cache_work<T: Send + 'static>(
         work(&cache)
     })
     .await
-    .map_err(|_| CACHE_ERROR.to_string())?
-}
-
-fn parse(html: &str) -> Result<RcDom> {
-    if html
-        .bytes()
-        .filter(|byte| *byte == b'<')
-        .take(MAX_DOM_NODES + 1)
-        .count()
-        > MAX_DOM_NODES
-    {
-        return Err("email_render_html_complexity_exceeded".to_string());
-    }
-    Ok(parse_document(RcDom::default(), Default::default()).one(html))
-}
-
-/// Use DOM attributes after HTML entity decoding. Never inspect arbitrary script/text URLs.
-fn sources(html: &str) -> Result<Vec<String>> {
-    let dom = parse(html)?;
-    let mut result = Vec::new();
-    let mut seen = BTreeSet::new();
-    walk(&dom.document, |handle| {
-        if let NodeData::Element { name, attrs, .. } = &handle.data {
-            let attrs = attrs.borrow();
-            if name.local.as_ref() == "img" {
-                if let Some(source) = image_source(&attrs).filter(|source| remote_candidate(source))
-                {
-                    push_source(&mut result, &mut seen, &source);
-                }
-            }
-            if let Some(css) = attribute(&attrs, "style") {
-                visit_css_urls(css, |_, source| {
-                    if remote_candidate(source) {
-                        push_source(&mut result, &mut seen, source);
-                    }
-                    Ok(())
-                })?;
-            }
-            if name.local.as_ref() == "style" {
-                for child in handle.children.borrow().iter() {
-                    if let NodeData::Text { contents } = &child.data {
-                        visit_css_urls(contents.borrow().as_ref(), |_, source| {
-                            if remote_candidate(source) {
-                                push_source(&mut result, &mut seen, source);
-                            }
-                            Ok(())
-                        })?;
-                    }
-                }
-            }
-            // Legacy table/body background images are common in email.
-            if let Some(source) = attribute(&attrs, "background")
-                .filter(|source| legacy_background(name.local.as_ref()) && remote_candidate(source))
-            {
-                push_source(&mut result, &mut seen, source);
-            }
-        }
-        Ok(())
-    })?;
-    Ok(result)
-}
-
-fn push_source(result: &mut Vec<String>, seen: &mut BTreeSet<String>, source: &str) {
-    if result.len() < MAX_RESOURCES && seen.insert(source.to_owned()) {
-        result.push(source.to_owned());
-    }
-}
-
-fn walk(root: &Handle, mut visit: impl FnMut(&Handle) -> Result<()>) -> Result<()> {
-    let mut stack = vec![(root.clone(), 0usize)];
-    let mut count = 0;
-    while let Some((handle, depth)) = stack.pop() {
-        count += 1;
-        if count > MAX_DOM_NODES || depth > 128 {
-            return Err("email_render_html_complexity_exceeded".to_string());
-        }
-        visit(&handle)?;
-        // Templates are inert. Only the document tree rendered by litehtml is visited.
-        stack.extend(
-            handle
-                .children
-                .borrow()
-                .iter()
-                .rev()
-                .map(|child| (child.clone(), depth + 1)),
-        );
-    }
-    Ok(())
-}
-
-fn attribute<'a>(attributes: &'a [Attribute], name: &str) -> Option<&'a str> {
-    attributes
-        .iter()
-        .find(|a| a.name.ns.as_ref().is_empty() && a.name.local.as_ref() == name)
-        .map(|a| a.value.as_ref().trim())
-}
-
-fn image_source(attributes: &[Attribute]) -> Option<String> {
-    attribute(attributes, "src")
-        .filter(|source| !source.is_empty())
-        .map(str::to_owned)
-        .or_else(|| attribute(attributes, "srcset").and_then(first_srcset_url))
-}
-
-/// Select the first srcset candidate when src is absent; descriptors do not affect layout here.
-fn first_srcset_url(srcset: &str) -> Option<String> {
-    let srcset = srcset.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == ',');
-    let url = srcset
-        .split_ascii_whitespace()
-        .next()?
-        .trim_end_matches(',');
-    (!url.is_empty()).then(|| url.to_owned())
+    .map_err(|_| CACHE_ERROR.to_owned())?
 }
 
 fn remote_candidate(source: &str) -> bool {
-    let lower = source.trim_start().to_ascii_lowercase();
+    let lower = source.to_ascii_lowercase();
     lower.starts_with("http:") || lower.starts_with("https:") || lower.starts_with("//")
-}
-
-fn legacy_background(tag: &str) -> bool {
-    matches!(tag, "body" | "table" | "tr" | "td" | "th")
-}
-
-fn rewritten_source(source: &str, replacements: &mut BTreeMap<String, String>) -> String {
-    if remote_candidate(source) {
-        let index = replacements.len() + 1;
-        replacements
-            .entry(source.to_owned())
-            .or_insert_with(|| format!("{UNAVAILABLE}{index}"))
-            .clone()
-    } else {
-        source.to_owned()
-    }
-}
-
-fn rewrite(html: &str, replacements: &BTreeMap<String, String>) -> Result<String> {
-    let dom = parse(html)?;
-    let mut replacements = replacements.clone();
-    let mut prepared_bytes = html.len();
-    walk(&dom.document, |handle| {
-        if let NodeData::Element { name, attrs, .. } = &handle.data {
-            let mut attrs = attrs.borrow_mut();
-            if name.local.as_ref() == "img" {
-                if let Some(source) = image_source(&attrs) {
-                    let original_len = source.len();
-                    let source = rewritten_source(&source, &mut replacements);
-                    expansion(&mut prepared_bytes, original_len, source.len())?;
-                    attrs.retain(|a| !matches!(a.name.local.as_ref(), "src" | "srcset"));
-                    attrs.push(Attribute {
-                        name: QualName::new(None, Default::default(), "src".into()),
-                        value: source.into(),
-                    });
-                }
-            }
-            for attr in attrs.iter_mut() {
-                if attr.name.local.as_ref() == "background" {
-                    let next = rewritten_source(attr.value.as_ref().trim(), &mut replacements);
-                    expansion(&mut prepared_bytes, attr.value.len(), next.len())?;
-                    attr.value = next.into();
-                } else if attr.name.local.as_ref() == "style" {
-                    let next = rewrite_css(attr.value.as_ref(), &mut replacements)?;
-                    expansion(&mut prepared_bytes, attr.value.len(), next.len())?;
-                    attr.value = next.into();
-                }
-            }
-            if name.local.as_ref() == "style" {
-                for child in handle.children.borrow().iter() {
-                    if let NodeData::Text { contents } = &child.data {
-                        let mut css = contents.borrow_mut();
-                        let next = rewrite_css(css.as_ref(), &mut replacements)?;
-                        expansion(&mut prepared_bytes, css.len(), next.len())?;
-                        *css = next.into();
-                    }
-                }
-            }
-        }
-        Ok(())
-    })?;
-    let mut output = BoundedOutput(Vec::new());
-    serialize(
-        &mut output,
-        &SerializableHandle::from(dom.document.clone()),
-        Default::default(),
-    )
-    .map_err(|_| PREPARED_TOO_LARGE.to_string())?;
-    String::from_utf8(output.0).map_err(|_| "email_render_html_invalid".to_string())
-}
-
-fn expansion(total: &mut usize, previous: usize, next: usize) -> Result<()> {
-    *total = total.saturating_sub(previous).saturating_add(next);
-    if *total > MAX_HTML_BYTES {
-        return Err(PREPARED_TOO_LARGE.to_string());
-    }
-    Ok(())
-}
-
-fn visit_css_urls(
-    css: &str,
-    mut visit: impl FnMut(std::ops::Range<usize>, &str) -> Result<()>,
-) -> Result<()> {
-    static DECLARATIONS: OnceLock<regex::Regex> = OnceLock::new();
-    static URLS: OnceLock<regex::Regex> = OnceLock::new();
-    // A restricted image-property subset deliberately excludes @import and font-face src.
-    let declarations = DECLARATIONS.get_or_init(|| regex::Regex::new(
-        r"(?is)(?:^|[;{}])\s*(?:background(?:-image)?|border-image(?:-source)?|list-style(?:-image)?|content)\s*:\s*([^;{}]*)"
-    ).expect("constant CSS declaration pattern"));
-    let urls = URLS.get_or_init(|| {
-        regex::Regex::new(
-            r#"(?is)\burl\(\s*(?:"([^"\\\r\n]*)"|'([^'\\\r\n]*)'|([^"'\\\s()]+))\s*\)"#,
-        )
-        .expect("constant CSS image pattern")
-    });
-    let visible = mask_css_comments(css);
-    for declaration in declarations.captures_iter(&visible) {
-        let value = declaration.get(1).expect("declaration value capture");
-        for captures in urls.captures_iter(value.as_str()) {
-            let whole = captures.get(0).expect("URL capture");
-            let source = captures
-                .get(1)
-                .or_else(|| captures.get(2))
-                .or_else(|| captures.get(3))
-                .expect("URL value capture");
-            let start = value.start() + source.start();
-            let end = value.start() + source.end();
-            // Comments were replaced by spaces at identical byte positions.
-            visit(
-                value.start() + whole.start()..value.start() + whole.end(),
-                css[start..end].trim(),
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn mask_css_comments(css: &str) -> String {
-    let mut bytes = css.as_bytes().to_vec();
-    let mut quote = None;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(quoted) = quote {
-            if byte == b'\\' {
-                index = (index + 2).min(bytes.len());
-                continue;
-            }
-            if byte == quoted {
-                quote = None;
-            }
-        } else if matches!(byte, b'\'' | b'"') {
-            // Keep quoted URL arguments, but mask ordinary CSS strings so text
-            // such as content:"url(...)" cannot trigger a network request.
-            let prefix = css[..index].trim_end();
-            let url_argument = prefix.len() >= 4
-                && prefix.as_bytes()[prefix.len() - 4..].eq_ignore_ascii_case(b"url(");
-            if url_argument {
-                quote = Some(byte);
-            } else {
-                let mut end = index + 1;
-                while end < bytes.len() {
-                    if bytes[end] == b'\\' {
-                        end = (end + 2).min(bytes.len());
-                        continue;
-                    }
-                    if bytes[end] == byte {
-                        end += 1;
-                        break;
-                    }
-                    end += 1;
-                }
-                bytes[index..end].fill(b' ');
-                index = end;
-                continue;
-            }
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            let end = bytes[index + 2..]
-                .windows(2)
-                .position(|pair| pair == b"*/")
-                .map_or(bytes.len(), |offset| index + 2 + offset + 2);
-            bytes[index..end].fill(b' ');
-            index = end;
-            continue;
-        }
-        index += 1;
-    }
-    String::from_utf8(bytes).expect("masking whole comments preserves UTF-8")
-}
-
-fn rewrite_css(css: &str, replacements: &mut BTreeMap<String, String>) -> Result<String> {
-    let mut output = BoundedOutput(Vec::new());
-    let mut offset = 0;
-    visit_css_urls(css, |range, source| {
-        output
-            .write_all(&css.as_bytes()[offset..range.start])
-            .map_err(|_| PREPARED_TOO_LARGE.to_string())?;
-        if remote_candidate(source) {
-            let next = rewritten_source(source, replacements);
-            output
-                .write_all(b"url(\"")
-                .and_then(|_| output.write_all(next.as_bytes()))
-                .and_then(|_| output.write_all(b"\")"))
-                .map_err(|_| PREPARED_TOO_LARGE.to_string())?;
-        } else {
-            output
-                .write_all(css[range.clone()].as_bytes())
-                .map_err(|_| PREPARED_TOO_LARGE.to_string())?;
-        }
-        offset = range.end;
-        Ok(())
-    })?;
-    output
-        .write_all(&css.as_bytes()[offset..])
-        .map_err(|_| PREPARED_TOO_LARGE.to_string())?;
-    String::from_utf8(output.0).map_err(|_| "email_render_html_invalid".to_string())
-}
-
-struct BoundedOutput(Vec<u8>);
-impl Write for BoundedOutput {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.0.len().saturating_add(bytes.len()) > MAX_HTML_BYTES {
-            return Err(io::Error::other(PREPARED_TOO_LARGE));
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 async fn fetch_image(source: &str, total: &mut usize) -> Option<String> {
@@ -549,11 +217,7 @@ async fn fetch_image(source: &str, total: &mut usize) -> Option<String> {
             if image.bytes.len() > MAX_IMAGE_BYTES {
                 return None;
             }
-            Some(format!(
-                "data:{};base64,{}",
-                image.mime_type,
-                STANDARD.encode(image.bytes)
-            ))
+            Some(STANDARD.encode(image.bytes))
         })
         .await
         .ok()?;
@@ -627,14 +291,9 @@ impl Cache {
     fn open() -> Result<Self> {
         let base = crate::utils::agentic_home().map_err(|_| CACHE_ERROR.to_string())?;
         let home = base.parent().ok_or_else(|| CACHE_ERROR.to_string())?;
-        let mut directory = File::open("/").map_err(|_| CACHE_ERROR.to_string())?;
-        for component in home.components() {
-            match component {
-                Component::RootDir => {}
-                Component::Normal(name) => directory = open_directory(&directory, name, false)?,
-                _ => return Err(CACHE_ERROR.to_string()),
-            }
-        }
+        // HOME may legitimately contain symlinks. Protect the private state
+        // directories below it, rather than rejecting its ancestor layout.
+        let mut directory = File::open(home).map_err(|_| CACHE_ERROR.to_string())?;
         for name in [".agentic_gpt", "cache", "email"] {
             directory = open_directory(&directory, std::ffi::OsStr::new(name), true)?;
             directory
@@ -692,7 +351,7 @@ impl Cache {
         }
     }
 
-    fn read(&self, key: &str) -> Result<Option<String>> {
+    fn read(&self, key: &str) -> Result<Option<BTreeMap<String, String>>> {
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
@@ -703,17 +362,19 @@ impl Cache {
             Err(_) => return Err(CACHE_ERROR.to_string()),
         };
         let metadata = file.metadata().map_err(|_| CACHE_ERROR.to_string())?;
-        if !metadata.is_file()
-            || metadata.permissions().mode() & 0o777 != 0o600
-            || metadata.len() > MAX_CACHE_FILE_BYTES
-        {
+        if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
             return Err(CACHE_ERROR.to_string());
+        }
+        // Older HTML snapshots could be larger than the new image-only limit.
+        // Derived content can be regenerated; do not make it a permanent error.
+        if metadata.len() > MAX_CACHE_FILE_BYTES {
+            return Ok(None);
         }
         let mut bytes = Vec::new();
         file.take(MAX_CACHE_FILE_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| CACHE_ERROR.to_string())?;
-        let cached: CachedHtml = match serde_json::from_slice(&bytes) {
+        let cached: CachedImages = match serde_json::from_slice(&bytes) {
             Ok(cached) => cached,
             Err(_) => return Ok(None),
         };
@@ -721,11 +382,14 @@ impl Cache {
         if cached.created_at > now || now - cached.created_at >= CACHE_TTL.as_secs() {
             return Ok(None);
         }
-        let html = match STANDARD.decode(cached.html_base64) {
-            Ok(html) if html.len() <= MAX_HTML_BYTES => html,
-            _ => return Ok(None),
-        };
-        Ok(String::from_utf8(html).ok())
+        if cached.images.len() > MAX_RESOURCES
+            || cached.images.iter().any(|(uri, image)| {
+                uri.len() > 4096 || image.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4
+            })
+        {
+            return Ok(None);
+        }
+        Ok(Some(cached.images))
     }
 
     fn cleanup(&self, incoming: u64) -> Result<()> {
@@ -769,10 +433,10 @@ impl Cache {
         Ok(())
     }
 
-    fn write(&self, key: &str, html: &str) -> Result<()> {
-        let value = CachedHtml {
+    fn write(&self, key: &str, images: &BTreeMap<String, String>) -> Result<()> {
+        let value = CachedImages {
             created_at: now_seconds()?,
-            html_base64: STANDARD.encode(html),
+            images: images.clone(),
         };
         let bytes = serde_json::to_vec(&value).map_err(|_| CACHE_ERROR.to_string())?;
         if bytes.len() as u64 > MAX_CACHE_FILE_BYTES {

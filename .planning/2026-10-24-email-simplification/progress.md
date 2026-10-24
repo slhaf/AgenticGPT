@@ -3,3 +3,13 @@
 主代理已审公共DTO与MCP实际diff，远程check通过；Hub删除重复Args和JSON往返，公共schema是可选纯schemars依赖。按需读取增加SQLite v2附件清单，v1首次读取惰性补齐；在现有真实DB测试中验证迁移和空白plain处理。
 主验收补查发现discover首片clip可能漏后页CSS背景，已要求并落实全文回调发现及实际worker测试；旧缓存格式/尺寸现在视为可重建缓存，不永久报错。公开API测试加入无EML的text第二页、图片颜色、cache失效及旧缓存恢复。
 远程严格lint发现schema版本0|1|2需用范围语法，已按建议修正；工作区真实测试运行中。
+
+主验收结果：remote-build check/build/lint均通过，工作区542通过、1个原有手动测试跳过。新增回归保障合并进既有真实DB/MCP/worker测试，无新增测试函数；包括v1迁移、text缺原文续读、已验证像素颜色、全篇CSS资源发现、旧缓存/失效恢复和events。
+为核实公共DTO去重后Hub两个入口，主代理在现有live parity流程补六邮件API实际HTTP/MCP调用；隔离Room未启用邮件，要求到达Agent并保留email_disabled和events，不触发外发。该流程运行中。
+SMTP网络实现未改，原断线unknown且只建立一次发送连接的真实TLS测试仍通过。
+
+最终分页验收发现并修复：远程图片cursor同时绑定HTML与已下载图片内容摘要，缓存被重建为不同图片后返回email_render_cache_expired，避免分页跳动。已有真实Local MCP测试实际替换缓存验证该行为；最终远程工作区测试仍为542通过、0失败、1原有手动项跳过，最终fmt/Clippy通过。
+首次补充Hub联调失败来自验收脚本先提取structuredContent却仍检查外层isError；实际返回已有email_disabled和events。主代理修正脚本分层检查，待最终build与parity结果，不将首次运行记为通过。
+
+最终构建及live parity通过；六个邮件API全部完成真实Hub HTTP/MCP调用，保留email_disabled和共享events响应。所有check/build/test/lint/parity均通过用户~/.local/bin/remote-build在远程机器执行，测试和联调使用独立HOME。未使用真实邮箱凭据，未进行ARM64发布构建或目标机运行。
+相较收敛前93dc0f4，生产Rust代码净减223行，Rust测试净增138行；没有新增测试函数。接口/公共请求去重为第一阶段提交83b1ce1；第二阶段包含按需读取、图片库回调、缓存和文档及最终验收。主代理独立审diff并修复全文CSS发现、统一准备超时、旧缓存重建和图片快照cursor一致性问题。

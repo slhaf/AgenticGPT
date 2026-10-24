@@ -90,7 +90,20 @@ fn local_email_api_preserves_native_images_cursors_and_attachment_writes() {
     let text_cursor = data(&first_text)["nextCursor"]
         .as_str()
         .expect("text continuation");
+    // The first read fills metadata for legacy/externally seeded rows. Later
+    // text pages must use the persisted body and metadata without opening EML.
+    let raw_path = fixture
+        .root
+        .join("h/.agentic_gpt/state/email")
+        .join(format!("{id}.eml"));
+    let held_raw = raw_path.with_extension("held");
+    fs::rename(&raw_path, &held_raw).unwrap();
     let second_text = fixture.call("room.email.read", json!({"id":id,"cursor":text_cursor}));
+    fs::rename(held_raw, raw_path).unwrap();
+    assert_eq!(
+        data(&second_text)["attachments"],
+        data(&first_text)["attachments"]
+    );
     let joined = format!(
         "{}{}",
         data(&first_text)["body"].as_str().unwrap(),
@@ -130,6 +143,15 @@ fn local_email_api_preserves_native_images_cursors_and_attachment_writes() {
         native_image(&second_image),
         "image cursor repeated the first slice"
     );
+    let second_png = STANDARD.decode(native_image(&second_image)).unwrap();
+    let first_pixels = image.to_rgba8();
+    let second_pixels = image::load_from_memory(&second_png).unwrap().to_rgba8();
+    assert!(first_pixels
+        .pixels()
+        .any(|pixel| pixel.0 == [170, 51, 34, 255]));
+    assert!(second_pixels
+        .pixels()
+        .any(|pixel| pixel.0 == [34, 85, 153, 255]));
 
     let remote_image = fixture.call("room.email.read", json!({"id":id,"view":"imageWithRemote"}));
     assert!(data(&remote_image)["blockedRemoteImages"].as_u64().unwrap() >= 1);
@@ -154,9 +176,45 @@ fn local_email_api_preserves_native_images_cursors_and_attachment_writes() {
     assert_ne!(native_image(&remote_image), native_image(&continued));
     assert_eq!(
         cached,
-        fs::read(cache).unwrap(),
+        fs::read(&cache).unwrap(),
         "continuation regenerated the prepared page"
     );
+    // A rebuilt snapshot can change image dimensions and page boundaries. An
+    // old cursor must not continue against different downloaded image bytes.
+    let mut replaced: Value = serde_json::from_slice(&cached).unwrap();
+    replaced["images"][&remote] = json!(native_image(&remote_image));
+    fs::write(&cache, serde_json::to_vec(&replaced).unwrap()).unwrap();
+    let changed = fixture.call(
+        "room.email.read",
+        json!({"id":id,"view":"imageWithRemote","cursor":remote_cursor}),
+    );
+    assert_eq!(
+        changed["structuredContent"]["error"]["code"],
+        "email_render_cache_expired"
+    );
+    fs::remove_file(&cache).unwrap();
+    let expired = fixture.call(
+        "room.email.read",
+        json!({"id":id,"view":"imageWithRemote","cursor":remote_cursor}),
+    );
+    assert_eq!(
+        expired["structuredContent"]["error"]["code"],
+        "email_render_cache_expired"
+    );
+    // A previous-version derived snapshot must rebuild from page one, while a
+    // continuation must never silently re-download resources or change layout.
+    fs::write(
+        &cache,
+        serde_json::to_vec(&json!({
+            "createdAt": chrono::Utc::now().timestamp() as u64,
+            "htmlBase64": STANDARD.encode(b"old cached HTML")
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o600)).unwrap();
+    let rebuilt = fixture.call("room.email.read", json!({"id":id,"view":"imageWithRemote"}));
+    assert_eq!(native_image(&rebuilt), native_image(&remote_image));
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
         "remote mode connected to a forbidden local URL"

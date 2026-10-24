@@ -7329,6 +7329,41 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub Full MCP maintenance ownership", "MCP submit did not mutate only the Agent-owned repository")
         reports.append("PASS Hub Full MCP dispatched all nine current Room operations and real local maintenance")
 
+        # Exercise the shared email DTOs through both real Hub adapters. The
+        # fixture has email disabled, so even send/trash have no external effect.
+        # This protects dispatch, enum parsing and the common Agent error frame;
+        # enabled mail content/render/export is covered by the Local binary test.
+        for request_id, (action, payload) in enumerate((
+            ("list", {}),
+            ("read", {"id": "fixture", "view": "imageWithRemote"}),
+            ("search", {"query": "fixture", "field": "body"}),
+            ("attachment", {"id": "fixture", "attachmentId": "attachment_1"}),
+            ("send", {"to": ["fixture@example.invalid"], "subject": "fixture", "text": "fixture"}),
+            ("operate", {"id": "fixture", "action": "trash"}),
+        ), start=150):
+            label = f"Hub email shared request {action}"
+            validate_instance(document, schemas, f"RoomEmail{action.capitalize()}Request", payload, label)
+            response = http_request(
+                hub_port, "POST", f"/v1/room/email/{action}", payload,
+                {"Authorization": f"Bearer {hub_key}"}, label,
+            )
+            if response.status != 403:
+                fail(label, f"expected disabled Agent response, got HTTP {response.status}: {response.body[:500]!r}")
+            http_value = response.json(label)
+            reply = mcp_call(
+                hub_port, hub_key, full_session, request_id, "tools/call",
+                {"name": f"room.email.{action}", "arguments": payload}, label,
+            )
+            result = reply.get("result", {})
+            if result.get("isError") is not True:
+                fail(label, f"MCP did not preserve the Agent business error: {result}")
+            for value in (http_value, json_result(reply, label)):
+                validate_instance(document, schemas, "AgentErrorResponse", value, label)
+                if value.get("error", {}).get("code") != "email_disabled":
+                    fail(label, f"request did not reach the active Room email service: {value}")
+                event_panel(value, label)
+        reports.append("PASS all six Hub email HTTP/MCP calls used shared requests and retained Agent events/error frames")
+
         room_process.stop()
         room_process = None
         wait_for_agent_offline(hub_port, hub_key, room_id, "Hub Room disconnect before lifecycle checks")

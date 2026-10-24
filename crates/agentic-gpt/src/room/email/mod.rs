@@ -6,7 +6,11 @@ mod store;
 
 use std::sync::Arc;
 
-use agentic_gpt_protocol::{EventInjectRequest, EventSeverity};
+use agentic_gpt_protocol::{
+    EventInjectRequest, EventSeverity, RoomEmailAction, RoomEmailAttachmentRequest,
+    RoomEmailFilter, RoomEmailListRequest, RoomEmailOperateRequest, RoomEmailReadRequest,
+    RoomEmailSearchField, RoomEmailSearchRequest, RoomEmailSendRequest, RoomEmailView,
+};
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
@@ -311,23 +315,7 @@ pub(crate) async fn dispatch(state: &AppState, operation: &str, args: Value) -> 
                 Ok(bytes) => bytes.len(),
                 Err(_) => return error_value("email_response_serialization_failed"),
             };
-            let image_bytes = value
-                .get("images")
-                .and_then(Value::as_array)
-                .map(|images| {
-                    images
-                        .iter()
-                        .filter_map(|image| image.get("data").and_then(Value::as_str))
-                        .map(str::len)
-                        .sum::<usize>()
-                })
-                .unwrap_or(0);
-            // MCP emits metadata both as text and structured content. Image
-            // payloads become image blocks, so their Base64 is counted once.
-            let projected_bytes = serialized_bytes
-                .saturating_mul(2)
-                .saturating_sub(image_bytes);
-            if projected_bytes > 8 * 1024 * 1024 {
+            if serialized_bytes > 8 * 1024 * 1024 {
                 error_value("email_response_too_large")
             } else {
                 value
@@ -337,28 +325,11 @@ pub(crate) async fn dispatch(state: &AppState, operation: &str, args: Value) -> 
     }
 }
 
-#[derive(Clone, Default, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ListFilter {
-    unread: Option<bool>,
-    received_after: Option<String>,
-    received_before: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListRequest {
-    cursor: Option<String>,
-    limit: Option<usize>,
-    #[serde(default)]
-    filter: ListFilter,
-}
-
 #[derive(Serialize, Deserialize)]
 struct ListCursor {
     v: u8,
     account: String,
-    filter: ListFilter,
+    filter: RoomEmailFilter,
     time: i64,
     id: String,
 }
@@ -374,44 +345,39 @@ fn parse_date(date: &Option<String>) -> Result<Option<i64>> {
 }
 
 async fn list(state: &AppState, account: &EmailAccountConfig, args: Value) -> Result<Value> {
-    let request: ListRequest =
+    let request: RoomEmailListRequest =
         serde_json::from_value(args).map_err(|_| anyhow!("email_arguments_invalid"))?;
     let limit = request.limit.unwrap_or(20);
     if !(1..=100).contains(&limit) {
         return Err(anyhow!("email_limit_invalid"));
     }
-    let after = parse_date(&request.filter.received_after)?;
-    let before = parse_date(&request.filter.received_before)?;
+    let filter = request.filter.unwrap_or_default();
+    let after = parse_date(&filter.received_after)?;
+    let before = parse_date(&filter.received_before)?;
     if after.zip(before).is_some_and(|(a, b)| a >= b) {
         return Err(anyhow!("email_date_range_invalid"));
     }
     let key = account_key(account);
     let cursor: Option<ListCursor> = request.cursor.as_deref().map(decode_cursor).transpose()?;
-    if cursor.as_ref().is_some_and(|cursor| {
-        cursor.v != 1 || cursor.account != key || cursor.filter != request.filter
-    }) {
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.v != 1 || cursor.account != key || cursor.filter != filter)
+    {
         return Err(anyhow!("email_cursor_filter_mismatch"));
     }
     let service = state.email.clone();
     blocking(move||{
-        let mut mails=service.store.list_page(&key,request.filter.unread,after,before,cursor.as_ref().map(|c|(c.time,c.id.as_str())),limit+1)?;
+        let mut mails=service.store.list_page(&key,filter.unread,after,before,cursor.as_ref().map(|c|(c.time,c.id.as_str())),limit+1)?;
         let has_more=mails.len()>limit;
         mails.truncate(limit);
         let mut response=json!({"items":mails.iter().map(store::Mail::summary).collect::<Vec<_>>(),"hasMore":has_more,"sync":service.store.sync_status(&key)?});
         if has_more {
-            if let Some(last)=mails.last() { response["nextCursor"]=json!(encode_cursor(&ListCursor{v:1,account:key,filter:request.filter,time:last.received_at,id:last.id.clone()})?); }
+            if let Some(last)=mails.last() { response["nextCursor"]=json!(encode_cursor(&ListCursor{v:1,account:key,filter,time:last.received_at,id:last.id.clone()})?); }
         }
         Ok(response)
     }).await
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReadRequest {
-    id: String,
-    view: Option<String>,
-    cursor: Option<String>,
-}
 #[derive(Serialize, Deserialize)]
 struct TextCursor {
     v: u8,
@@ -437,37 +403,31 @@ fn body_revision(mail: &store::Mail) -> String {
     )
 }
 
-fn mail_metadata(mail: &store::Mail, content: &content::Content) -> Value {
+fn mail_metadata(mail: &store::Mail, attachments: &[content::Attachment]) -> Value {
     json!({"id":mail.id,"from":mail.from,"to":content::addresses(&mail.to),"cc":content::addresses(&mail.cc),"subject":mail.subject,
         "receivedAt":store::timestamp(mail.received_at),"status":mail.status,
-        "attachments":content.attachments,"hasMore":false})
+        "attachments":attachments,"hasMore":false})
 }
 
-async fn read(state: &AppState, account: &EmailAccountConfig, args: Value) -> Result<Value> {
-    let request: ReadRequest =
+async fn read(state: &AppState, account: &EmailAccountConfig, mut args: Value) -> Result<Value> {
+    normalize_enum::<RoomEmailView>(&mut args, "view", "email_view_invalid")?;
+    let request: RoomEmailReadRequest =
         serde_json::from_value(args).map_err(|_| anyhow!("email_arguments_invalid"))?;
-    let view = request.view.as_deref().unwrap_or("text");
-    if !matches!(view, "text" | "image" | "imageWithRemote") {
-        return Err(anyhow!("email_view_invalid"));
-    }
     let service = state.email.clone();
     let key = account_key(account);
     let id = request.id.clone();
-    let (mail, content) = blocking(move || {
+    let image = request.view != RoomEmailView::Text;
+    let (mail, attachments, content) = blocking(move || {
         let mail = owned_mail(&service, &key, &id)?;
-        let content = service.store.read_content(&mail)?;
-        Ok((mail, content))
+        let attachments = service.store.attachment_metadata(&mail)?;
+        let content = image.then(|| service.store.read_image(&mail)).transpose()?;
+        Ok((mail, attachments, content))
     })
     .await?;
-    let mut response = mail_metadata(&mail, &content);
-    if view != "text" {
-        let remote = view == "imageWithRemote";
-        let mut html = content::render_html(&content);
-        if remote {
-            html = crate::email_remote::prepare(&mail.id, &html, request.cursor.is_some())
-                .await
-                .map_err(anyhow::Error::msg)?;
-        }
+    let mut response = mail_metadata(&mail, &attachments);
+    if let Some(content) = content {
+        let remote = request.view == RoomEmailView::ImageWithRemote;
+        let html = content::render_html(&content);
         let rendered =
             crate::email_render::render(&mail.id, &html, request.cursor.as_deref(), remote)
                 .await
@@ -512,16 +472,15 @@ async fn read(state: &AppState, account: &EmailAccountConfig, args: Value) -> Re
     Ok(response)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchRequest {
-    query: String,
-    id: Option<String>,
-    field: Option<String>,
-}
-
-async fn search(state: &AppState, account: &EmailAccountConfig, args: Value) -> Result<Value> {
-    let request: SearchRequest =
+async fn search(state: &AppState, account: &EmailAccountConfig, mut args: Value) -> Result<Value> {
+    // Per-mail search always searches its normalized body, regardless of field.
+    if args.get("id").is_some_and(Value::is_string)
+        && args.get("field").is_some_and(Value::is_string)
+    {
+        args["field"] = json!("all");
+    }
+    normalize_enum::<RoomEmailSearchField>(&mut args, "field", "email_field_invalid")?;
+    let request: RoomEmailSearchRequest =
         serde_json::from_value(args).map_err(|_| anyhow!("email_arguments_invalid"))?;
     if request.query.trim().is_empty() || request.query.len() > 4096 {
         return Err(anyhow!("email_query_invalid"));
@@ -562,10 +521,12 @@ async fn search(state: &AppState, account: &EmailAccountConfig, args: Value) -> 
             }
             (items, truncated)
         } else {
-            let field = request.field.as_deref().unwrap_or("all");
-            if !matches!(field, "all" | "subject" | "body" | "from") {
-                return Err(anyhow!("email_field_invalid"));
-            }
+            let field = match request.field {
+                RoomEmailSearchField::All => "all",
+                RoomEmailSearchField::Subject => "subject",
+                RoomEmailSearchField::Body => "body",
+                RoomEmailSearchField::From => "from",
+            };
             service.store.search(&key, &request.query, field)?
         };
         Ok(json!({"items":items,"truncated":truncated,"sync":service.store.sync_status(&key)?}))
@@ -573,17 +534,15 @@ async fn search(state: &AppState, account: &EmailAccountConfig, args: Value) -> 
     .await
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AttachmentRequest {
-    id: String,
-    attachment_id: String,
-    download: Option<bool>,
-    path: Option<String>,
-}
-
-async fn attachment(state: &AppState, account: &EmailAccountConfig, args: Value) -> Result<Value> {
-    let request: AttachmentRequest =
+async fn attachment(
+    state: &AppState,
+    account: &EmailAccountConfig,
+    mut args: Value,
+) -> Result<Value> {
+    if args.get("download").is_some_and(Value::is_null) {
+        args["download"] = json!(false);
+    }
+    let request: RoomEmailAttachmentRequest =
         serde_json::from_value(args).map_err(|_| anyhow!("email_arguments_invalid"))?;
     let service = state.email.clone();
     let key = account_key(account);
@@ -591,15 +550,10 @@ async fn attachment(state: &AppState, account: &EmailAccountConfig, args: Value)
     let attachment_id = request.attachment_id.clone();
     let resource = blocking(move || {
         let mail = owned_mail(&service, &key, &id)?;
-        let content = service.store.read_content(&mail)?;
-        content
-            .attachments
-            .into_iter()
-            .find(|attachment| attachment.id == attachment_id)
-            .ok_or_else(|| anyhow!("email_attachment_not_found"))
+        service.store.read_attachment(&mail, &attachment_id)
     })
     .await?;
-    if request.download.unwrap_or(false) || request.path.is_some() {
+    if request.download || request.path.is_some() {
         Ok(crate::email_files::save_attachment(
             state,
             &request.id,
@@ -619,19 +573,6 @@ async fn attachment(state: &AppState, account: &EmailAccountConfig, args: Value)
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SendRequest {
-    to: Vec<String>,
-    #[serde(default)]
-    cc: Vec<String>,
-    #[serde(default)]
-    bcc: Vec<String>,
-    subject: String,
-    text: String,
-    reply_to_id: Option<String>,
-}
-
 async fn send(
     state: &AppState,
     config: &Config,
@@ -639,7 +580,7 @@ async fn send(
     owner: &Arc<EmailOwner>,
     args: Value,
 ) -> Result<Value> {
-    let request: SendRequest =
+    let request: RoomEmailSendRequest =
         serde_json::from_value(args).map_err(|_| anyhow!("email_arguments_invalid"))?;
     if request.to.is_empty()
         || request.to.len() + request.cc.len() + request.bcc.len() > 100
@@ -797,28 +738,23 @@ fn send_failure(error: impl std::fmt::Display, id: &str, status: &str) -> Value 
     failure
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OperateRequest {
-    id: String,
-    action: String,
-}
-
 async fn operate(
     state: &AppState,
     config: &Config,
     account: &EmailAccountConfig,
     owner: &Arc<EmailOwner>,
-    args: Value,
+    mut args: Value,
 ) -> Result<Value> {
-    let request: OperateRequest =
+    normalize_enum::<RoomEmailAction>(&mut args, "action", "email_action_invalid")?;
+    let request: RoomEmailOperateRequest =
         serde_json::from_value(args).map_err(|_| anyhow!("email_arguments_invalid"))?;
-    if !matches!(
-        request.action.as_str(),
-        "markRead" | "markUnread" | "flag" | "unflag" | "trash"
-    ) {
-        return Err(anyhow!("email_action_invalid"));
-    }
+    let action = match request.action {
+        RoomEmailAction::MarkRead => "markRead",
+        RoomEmailAction::MarkUnread => "markUnread",
+        RoomEmailAction::Flag => "flag",
+        RoomEmailAction::Unflag => "unflag",
+        RoomEmailAction::Trash => "trash",
+    };
     let key = account_key(account);
     let mail = owned_mail(&state.email, &key, &request.id)?;
     let validity = mail
@@ -834,7 +770,7 @@ async fn operate(
     if status["state"] == "recoveryRequired" {
         return Err(anyhow!("email_identity_recovery_required"));
     }
-    if request.action == "trash" {
+    if request.action == RoomEmailAction::Trash {
         confirm(
             state,
             config,
@@ -854,10 +790,8 @@ async fn operate(
     let network_owner = owner.clone();
     blocking(move || {
         let _owner = network_owner;
-        network::operate(&account, validity, uid, &request.action)?;
-        service
-            .store
-            .apply_operation(&request.id, &request.action)?;
+        network::operate(&account, validity, uid, action)?;
+        service.store.apply_operation(&request.id, action)?;
         Ok(json!({"id":request.id,"action":request.action,"status":"applied"}))
     })
     .await
@@ -887,6 +821,23 @@ fn owned_mail(service: &EmailService, account: &str, id: &str) -> Result<store::
         return Err(anyhow!("email_not_found"));
     }
     Ok(mail)
+}
+
+fn normalize_enum<T: serde::de::DeserializeOwned>(
+    args: &mut Value,
+    field: &str,
+    invalid: &str,
+) -> Result<()> {
+    if let Some(value) = args.get(field) {
+        if value.is_null() && field != "action" {
+            if let Some(object) = args.as_object_mut() {
+                object.remove(field);
+            }
+        } else if value.is_string() && serde_json::from_value::<T>(value.clone()).is_err() {
+            return Err(anyhow!("{invalid}"));
+        }
+    }
+    Ok(())
 }
 
 fn encode_cursor(value: &impl Serialize) -> Result<String> {

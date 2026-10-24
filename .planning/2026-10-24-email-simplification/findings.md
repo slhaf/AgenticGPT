@@ -1,3 +1,5 @@
+以下为实现前的审查记录；实施结果和验收见 progress.md。
+
 原设计第13节明确email-lib与拆分库为待选项；当前实际imap+lettre+mailparse+htmd。核心2272行由mod906/store645/network419/content302组成。现有规划没有保留email-lib与拆分库的比较依据，需要本次实证。
 
 独立代码复核已定位可精简候选：核心重复MCP体积估算约25行；私有Request与protocol已有DTO重复约45–65行。需保留最终入口实际编码预算检查。

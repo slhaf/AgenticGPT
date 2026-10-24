@@ -67,7 +67,7 @@ impl Store {
                 return Err(anyhow!("email_database_path_invalid"));
             }
         }
-        let conn =
+        let mut conn =
             Connection::open(&database).map_err(|_| anyhow!("email_database_open_failed"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         #[cfg(unix)]
@@ -76,7 +76,7 @@ impl Store {
             fs::set_permissions(&database, fs::Permissions::from_mode(0o600))?;
         }
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if !matches!(version, 0 | 1) {
+        if !matches!(version, 0..=2) {
             return Err(anyhow!("email_database_version_unsupported"));
         }
         conn.execute_batch(
@@ -99,9 +99,16 @@ impl Store {
             CREATE INDEX IF NOT EXISTS email_inbox ON mail(account,inbox,received_at DESC,id DESC);
             CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, message TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS stats (key TEXT PRIMARY KEY,value INTEGER NOT NULL);
-            INSERT OR IGNORE INTO stats(key,value) SELECT 'content_bytes',COALESCE(SUM(raw_bytes+body_bytes),0) FROM mail;
-            PRAGMA user_version=1;",
+            INSERT OR IGNORE INTO stats(key,value) SELECT 'content_bytes',COALESCE(SUM(raw_bytes+body_bytes),0) FROM mail;",
         )?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 2 {
+            tx.execute_batch(
+                "ALTER TABLE mail ADD COLUMN attachments TEXT; PRAGMA user_version=2;",
+            )?;
+        }
+        tx.commit()?;
         let store = Self {
             conn: Mutex::new(conn),
             raw_root,
@@ -291,14 +298,19 @@ impl Store {
             None => snippet(&content.body),
         };
         let format = unavailable.unwrap_or(content.format);
+        let attachments = unavailable
+            .is_none()
+            .then(|| serde_json::to_string(&content.attachments))
+            .transpose()?;
+        let body_bytes = body.map_or(0, str::len) + attachments.as_ref().map_or(0, String::len);
         let result = (|| -> Result<()> {
             let mut conn = self.conn.lock();
             let tx = conn.transaction()?;
-            tx.execute("INSERT INTO mail(id,account,validity,uid,inbox,sender,recipients,cc,subject,received_at,unread,flagged,status,snippet,body,format,message_id,refs,raw_bytes,body_bytes)
-                VALUES(?,?,?,?,1,?,?,?,?,?,?,?,'received',?,?,?,?,?,?,?)", params![
+            tx.execute("INSERT INTO mail(id,account,validity,uid,inbox,sender,recipients,cc,subject,received_at,unread,flagged,status,snippet,body,format,message_id,refs,raw_bytes,body_bytes,attachments)
+                VALUES(?,?,?,?,1,?,?,?,?,?,?,?,'received',?,?,?,?,?,?,?,?)", params![
                 id,account,record.validity,remote.uid,content.from,content.to,content.cc,content.subject,
                 remote.received_at.timestamp_millis(),remote.unread,remote.flagged,
-                snippet,body,format,content.message_id,content.references,raw_bytes as i64,content.body.len() as i64])?;
+                snippet,body,format,content.message_id,content.references,raw_bytes as i64,body_bytes as i64,attachments])?;
             if remote.uid > record.baseline {
                 let notice = format!(
                     "New email from {}: {}. Read with room.email.read id={id}",
@@ -316,7 +328,7 @@ impl Store {
             )?;
             tx.execute(
                 "UPDATE stats SET value=value+? WHERE key='content_bytes'",
-                [(raw_bytes + content.body.len()) as i64],
+                [(raw_bytes + body_bytes) as i64],
             )?;
             tx.commit()?;
             Ok(())
@@ -412,7 +424,7 @@ impl Store {
         Ok((items, false))
     }
 
-    pub fn read_content(&self, mail: &Mail) -> Result<content::Content> {
+    fn check_content(mail: &Mail) -> Result<()> {
         if mail.format == "tooLarge" {
             return Err(anyhow!("email_message_too_large"));
         }
@@ -422,6 +434,11 @@ impl Store {
         if mail.body.is_none() || mail.raw_bytes == 0 {
             return Err(anyhow!("email_content_expired"));
         }
+        Ok(())
+    }
+
+    fn read_raw(&self, mail: &Mail) -> Result<Vec<u8>> {
+        Self::check_content(mail)?;
         let path = self.raw_root.join(format!("{}.eml", mail.id));
         let metadata =
             fs::symlink_metadata(&path).map_err(|_| anyhow!("email_content_unavailable"))?;
@@ -431,7 +448,47 @@ impl Store {
         {
             return Err(anyhow!("email_content_unavailable"));
         }
-        content::parse(&fs::read(path).map_err(|_| anyhow!("email_content_unavailable"))?)
+        fs::read(path).map_err(|_| anyhow!("email_content_unavailable"))
+    }
+
+    pub fn attachment_metadata(&self, mail: &Mail) -> Result<Vec<content::Attachment>> {
+        Self::check_content(mail)?;
+        let metadata: Option<String> = self.conn.lock().query_row(
+            "SELECT attachments FROM mail WHERE id=?",
+            [&mail.id],
+            |row| row.get(0),
+        )?;
+        if let Some(metadata) = metadata {
+            return Ok(serde_json::from_str(&metadata)?);
+        }
+        // Schema 1 records acquire metadata once, without changing their saved
+        // normalized body or requiring an eager scan of the raw mail archive.
+        let attachments = content::attachments(&self.read_raw(mail)?)?;
+        let metadata = serde_json::to_string(&attachments)?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE mail SET attachments=?,body_bytes=body_bytes+? WHERE id=? AND attachments IS NULL AND body IS NOT NULL AND raw_bytes>0",
+            params![metadata, metadata.len() as i64, mail.id],
+        )?;
+        if changed > 0 {
+            tx.execute(
+                "UPDATE stats SET value=value+? WHERE key='content_bytes'",
+                [metadata.len() as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(attachments)
+    }
+
+    pub fn read_image(&self, mail: &Mail) -> Result<content::Content> {
+        let mut content = content::image(&self.read_raw(mail)?)?;
+        content.body = mail.body.clone().unwrap_or_default();
+        Ok(content)
+    }
+
+    pub fn read_attachment(&self, mail: &Mail, id: &str) -> Result<content::Attachment> {
+        content::attachment(&self.read_raw(mail)?, id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -447,15 +504,17 @@ impl Store {
     ) -> Result<String> {
         let id = format!("mail_{}", Uuid::new_v4().simple());
         let parsed = content::parse(raw)?;
+        let attachments = serde_json::to_string(&parsed.attachments)?;
+        let body_bytes = body.len() + attachments.len();
         self.write_raw(&id, raw)?;
         let result = (|| -> Result<()> {
             let mut conn = self.conn.lock();
             let tx = conn.transaction()?;
-            tx.execute("INSERT INTO mail(id,account,inbox,sender,recipients,cc,subject,received_at,unread,status,snippet,body,format,message_id,refs,raw_bytes,body_bytes)
-            VALUES(?,?,0,?,?,?,?,?,0,'pending',?,?,'plain',?,?,?,?)", params![id,account,from,to.join(", "),cc.join(", "),subject,Utc::now().timestamp_millis(),snippet(body),body,parsed.message_id,parsed.references,raw.len() as i64,body.len() as i64])?;
+            tx.execute("INSERT INTO mail(id,account,inbox,sender,recipients,cc,subject,received_at,unread,status,snippet,body,format,message_id,refs,raw_bytes,body_bytes,attachments)
+            VALUES(?,?,0,?,?,?,?,?,0,'pending',?,?,'plain',?,?,?,?,?)", params![id,account,from,to.join(", "),cc.join(", "),subject,Utc::now().timestamp_millis(),snippet(body),body,parsed.message_id,parsed.references,raw.len() as i64,body_bytes as i64,attachments])?;
             tx.execute(
                 "UPDATE stats SET value=value+? WHERE key='content_bytes'",
-                [(raw.len() + body.len()) as i64],
+                [(raw.len() + body_bytes) as i64],
             )?;
             tx.commit()?;
             Ok(())
@@ -539,7 +598,7 @@ impl Store {
             // Commit expiry before deleting files. Reopen (or the next cleanup
             // after an unlink failure) removes orphans without losing mail IDs.
             tx.execute(
-                "UPDATE mail SET body=NULL,raw_bytes=0,body_bytes=0 WHERE id=?",
+                "UPDATE mail SET body=NULL,raw_bytes=0,body_bytes=0,attachments=NULL WHERE id=?",
                 [id],
             )?;
         }
