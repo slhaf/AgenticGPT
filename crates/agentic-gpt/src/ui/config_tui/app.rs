@@ -2674,7 +2674,17 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         | SetupField::EmailMaxStorageBytes
         | SetupField::EmailSendPolicy
         | SetupField::EmailTrashPolicy => crate::config_templates::OptionalSection::Email,
-        SetupField::RoomTimezone
+        SetupField::RoomSecretEnabled
+        | SetupField::RoomSecretServerUrl
+        | SetupField::RoomSecretAccount
+        | SetupField::RoomSecretClientId
+        | SetupField::RoomSecretClientSecret
+        | SetupField::RoomSecretMasterPassword
+        | SetupField::RoomSecretGetPolicy
+        | SetupField::RoomSecretUpsertPolicy
+        | SetupField::RoomSecretDeletePolicy
+        | SetupField::RoomSecretSyncWaitTimeoutMs
+        | SetupField::RoomTimezone
         | SetupField::DiaryBoundaryHour
         | SetupField::RepositoryRoot
         | SetupField::RoomMaintenanceMode

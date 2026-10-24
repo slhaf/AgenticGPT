@@ -84,6 +84,8 @@ mod room_maintenance;
 mod room_reads;
 #[path = "room/room_repository.rs"]
 mod room_repository;
+#[path = "room/secret/mod.rs"]
+mod secret;
 
 #[path = "skills/skill_installs.rs"]
 mod skill_installs;

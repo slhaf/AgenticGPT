@@ -250,6 +250,7 @@ mod tests {
                 repository_root: "/tmp/room-repository".to_string(),
                 maintenance_mode: "workflow".to_string(),
                 maintenance_auto_push: true,
+                secret: Default::default(),
             }))
             .unwrap();
 
@@ -628,7 +629,17 @@ pub(super) fn validate_field(
             OptionalSection::Email,
             &session.optional_draft(OptionalSection::Email),
         ),
-        SetupField::RoomTimezone
+        SetupField::RoomSecretEnabled
+        | SetupField::RoomSecretServerUrl
+        | SetupField::RoomSecretAccount
+        | SetupField::RoomSecretClientId
+        | SetupField::RoomSecretClientSecret
+        | SetupField::RoomSecretMasterPassword
+        | SetupField::RoomSecretGetPolicy
+        | SetupField::RoomSecretUpsertPolicy
+        | SetupField::RoomSecretDeletePolicy
+        | SetupField::RoomSecretSyncWaitTimeoutMs
+        | SetupField::RoomTimezone
         | SetupField::DiaryBoundaryHour
         | SetupField::RepositoryRoot
         | SetupField::RoomMaintenanceMode
@@ -833,6 +844,9 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
             }
         }
         (OptionalSection::Room, OptionalSectionDraft::Room(value)) => {
+            if let Err((field, code)) = value.secret.to_config() {
+                errors.push(error(field, code));
+            }
             required(
                 &value.timezone,
                 SetupField::RoomTimezone,
@@ -1356,10 +1370,14 @@ fn apply_optional_draft(
                     return Err(vec![error(
                         SetupField::RoomMaintenanceMode,
                         "config_init_room_maintenance_mode_invalid",
-                    )])
+                    )]);
                 }
             };
             input.room = Some(RoomConfig {
+                secret: value
+                    .secret
+                    .to_config()
+                    .map_err(|(field, code)| vec![error(field, code)])?,
                 repository_root: optional_path(&value.repository_root),
                 timezone: value.timezone.trim().to_string(),
                 diary_day_boundary_hour,
@@ -1392,7 +1410,7 @@ fn apply_optional_draft(
                     return Err(vec![error(
                         SetupField::HubReportingDetail,
                         "config_init_reporting_detail_invalid",
-                    )])
+                    )]);
                 }
             };
             input.hub_reporting = Some(HubReportingConfig {
@@ -1409,7 +1427,7 @@ fn apply_optional_draft(
                     return Err(vec![error(
                         SetupField::ShellInitFileMode,
                         "config_init_shell_init_file_mode_invalid",
-                    )])
+                    )]);
                 }
             };
             input.shell = Some(ShellConfig { init_file });
@@ -1421,7 +1439,7 @@ fn apply_optional_draft(
             return Err(vec![error(
                 first_field(section),
                 "config_init_optional_section_invalid",
-            )])
+            )]);
         }
     }
     Ok(())

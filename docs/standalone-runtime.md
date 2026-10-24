@@ -189,7 +189,9 @@ room.state.list, room.state.read
 room.maintenance.status, room.maintenance.submit
 ```
 
-相同的九个语义 Room 名称是本地 Unix MCP、Tunnel stdio 和 Hub Full MCP/HTTP 当前合同的一部分。Hub Full 会通过捕获的活动 Room lease 转发
+另有六项 `room.email.*` 邮件工具；启用 `room.secret.enabled=true` 后，密钥工具为 `room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete`。密钥子开关默认关闭，修改后需重启；已知工具名的直接调用也受准入约束。配置、固定 `bw` 版本、严格确认与无敏感回执边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
+
+相同的九个文档／维护语义 Room 名称是本地 Unix MCP、Tunnel stdio 和 Hub Full MCP/HTTP 当前合同的一部分。Hub Full 会通过捕获的活动 Room lease 转发
 `room.diary.active/read`、`room.notebook.recent/search/read`、
 `room.state.list/read` 和 `room.maintenance.status/submit`；对应的 HTTP 路由是
 `POST /v1/room/<namespace>/<action>`，且不接受 `agentId`。

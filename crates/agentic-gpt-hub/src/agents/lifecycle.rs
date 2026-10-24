@@ -172,6 +172,22 @@ pub(super) async fn handle_agent_message(
         }
     }
 
+    if let AgentMessage::SecretResponse {
+        dispatch_id,
+        request_id,
+        data,
+    } = parsed
+    {
+        return dispatch::handle_secret_response(
+            state,
+            agent_id,
+            connection_id,
+            &dispatch_id,
+            &request_id,
+            data,
+        );
+    }
+
     if reliable {
         drop(agents);
         return dispatch::handle_reliable_message(state, agent_id, parsed).await;
@@ -312,7 +328,8 @@ pub(super) async fn handle_agent_message(
             confirmation_publication = Some(publication);
             None
         }
-        AgentMessage::Response { .. }
+        AgentMessage::SecretResponse { .. }
+        | AgentMessage::Response { .. }
         | AgentMessage::EventSources { .. }
         | AgentMessage::TransportAck { .. }
         | AgentMessage::TransportRunStatus { .. } => {

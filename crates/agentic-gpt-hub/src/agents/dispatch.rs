@@ -68,20 +68,145 @@ struct PendingResponse {
     sender: oneshot::Sender<(Value, Option<Vec<EventResponseDisposition>>)>,
 }
 
+struct SecretResponse {
+    agent_id: String,
+    connection_id: String,
+    request_id: String,
+    sender: oneshot::Sender<Value>,
+}
+
+struct SecretWaiter<'a> {
+    dispatch: &'a Dispatch,
+    id: String,
+}
+
+impl Drop for SecretWaiter<'_> {
+    fn drop(&mut self) {
+        self.dispatch
+            .secret_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
 pub(crate) struct Dispatch {
     pub(crate) response_feedback: event_feedback::FeedbackCoordinator,
     pending: Mutex<HashMap<String, PendingResponse>>,
+    secret_pending: std::sync::Mutex<HashMap<String, SecretResponse>>,
 }
 
 impl Dispatch {
+    #[cfg(test)]
+    pub(super) fn secret_pending_count(&self) -> usize {
+        self.secret_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             response_feedback: event_feedback::FeedbackCoordinator::default(),
             pending: Mutex::new(HashMap::new()),
+            secret_pending: std::sync::Mutex::new(HashMap::new()),
         }
     }
     pub(crate) async fn pending_count(&self) -> usize {
         self.pending.lock().await.len()
+    }
+}
+
+pub(super) fn handle_secret_response(
+    state: &HubState,
+    agent_id: &str,
+    connection_id: &str,
+    dispatch_id: &str,
+    request_id: &str,
+    data: Value,
+) -> Result<(), String> {
+    let mut pending = state
+        .dispatch
+        .secret_pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(owner) = pending.get(dispatch_id) else {
+        // A disconnected or timed-out caller cannot recover plaintext through replay.
+        return Ok(());
+    };
+    if owner.agent_id != agent_id
+        || owner.connection_id != connection_id
+        || owner.request_id != request_id
+    {
+        return Err("secret_response_owner_mismatch".to_owned());
+    }
+    if let Some(owner) = pending.remove(dispatch_id) {
+        let _ = owner.sender.send(data);
+    }
+    Ok(())
+}
+
+async fn request_secret(
+    state: &HubState,
+    target: lifecycle::DispatchTarget,
+    admission: lifecycle::DispatchAdmission<'_>,
+    command: HubCommand,
+    timeout_secs: u64,
+) -> Result<Value, RequestError> {
+    let write = matches!(
+        command,
+        HubCommand::RoomSecretUpsert { .. } | HubCommand::RoomSecretDelete { .. }
+    );
+    let request_id = command.request_id().to_owned();
+    let dispatch_id = random_id("secret");
+    let text = serde_json::to_string(&agentic_gpt_protocol::HubMessage::SecretCommand {
+        dispatch_id: dispatch_id.clone(),
+        command: Box::new(command),
+    })
+    .map_err(|_| RequestError::internal("secret_request_encode_failed"))?;
+    let (sender, receiver) = oneshot::channel();
+    {
+        let mut pending = state
+            .dispatch
+            .secret_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if pending.len() >= 128 {
+            return Err(RequestError::internal("secret_request_capacity_exhausted"));
+        }
+        pending.insert(
+            dispatch_id.clone(),
+            SecretResponse {
+                agent_id: target.agent_id,
+                connection_id: target.connection_id,
+                request_id,
+                sender,
+            },
+        );
+    }
+    let _waiter = SecretWaiter {
+        dispatch: &state.dispatch,
+        id: dispatch_id,
+    };
+    let sent = admission.send(OutboundAgentMessage::Text(text));
+    drop(admission);
+    sent.map_err(RequestError::admission)?;
+    match timeout(Duration::from_secs(timeout_secs), receiver).await {
+        Ok(Ok(value)) => Ok(value),
+        result => {
+            let code = if write {
+                "secret_write_outcome_unknown"
+            } else if result.is_err() {
+                "agent_request_timeout"
+            } else {
+                "agent_response_channel_closed"
+            };
+            Err(RequestError {
+                code,
+                status: axum::http::StatusCode::GATEWAY_TIMEOUT,
+                message: code.to_owned(),
+            })
+        }
     }
 }
 pub(super) async fn handle_reliable_message(
@@ -250,6 +375,7 @@ pub(super) async fn handle_reliable_message(
         }
         AgentMessage::Hello { .. }
         | AgentMessage::Heartbeat { .. }
+        | AgentMessage::SecretResponse { .. }
         | AgentMessage::ProcessUpdate { .. }
         | AgentMessage::RunReport { .. }
         | AgentMessage::ConfirmationRequest { .. } => {
@@ -311,6 +437,10 @@ async fn request_target<'a>(
     command: HubCommand,
     timeout_secs: u64,
 ) -> std::result::Result<Value, RequestError> {
+    if command.is_room_secret() {
+        drop(pending);
+        return request_secret(state, target, admission, command, timeout_secs).await;
+    }
     let request_id = command.request_id().to_string();
     let feedback_eligible = event_feedback::is_creation_command(&command);
     let needs_public_preflight = !matches!(&command, HubCommand::EventSettle { .. });

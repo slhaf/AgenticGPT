@@ -95,6 +95,10 @@ pub(crate) fn command_type(command: &HubCommand) -> &'static str {
         HubCommand::McpCallTool { .. } => "mcp.callTool",
         HubCommand::McpBatch { .. } => "mcp.batch",
         HubCommand::UserNotifyDeliver { .. } => "user.notify.deliver",
+        HubCommand::RoomSecretList { .. } => "room.secret.list",
+        HubCommand::RoomSecretGet { .. } => "room.secret.get",
+        HubCommand::RoomSecretUpsert { .. } => "room.secret.upsert",
+        HubCommand::RoomSecretDelete { .. } => "room.secret.delete",
         HubCommand::RoomEmailList { .. } => "room.email.list",
         HubCommand::RoomEmailRead { .. } => "room.email.read",
         HubCommand::RoomEmailSearch { .. } => "room.email.search",
@@ -146,6 +150,9 @@ pub(crate) fn prepare_run_in_transaction(
     request_id: &str,
     command: &HubCommand,
 ) -> Result<PreparedRun> {
+    if command.is_room_secret() {
+        return Err(anyhow!("secret_persistence_forbidden"));
+    }
     let command_json = serde_json::to_string(command)?;
     let command_hash = sha256_hex(&command_json);
     let run_id = random_id("run");

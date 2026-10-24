@@ -20,6 +20,130 @@ use crate::REQUEST_TIMEOUT_SECS;
 
 const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
+pub(crate) async fn room_secret_list(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    payload: Result<
+        Json<agentic_gpt_protocol::RoomSecretListRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    let Ok(Json(payload)) = payload else {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_params",
+            "invalid secret request JSON",
+        );
+    };
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomSecretList {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_secret_list_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_secret_get(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    payload: Result<
+        Json<agentic_gpt_protocol::RoomSecretGetRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    let Ok(Json(payload)) = payload else {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_params",
+            "invalid secret request JSON",
+        );
+    };
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomSecretGet {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_secret_get_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_secret_upsert(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    payload: Result<
+        Json<agentic_gpt_protocol::RoomSecretUpsertRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    let Ok(Json(payload)) = payload else {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_params",
+            "invalid secret request JSON",
+        );
+    };
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomSecretUpsert {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_secret_upsert_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_secret_delete(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    payload: Result<
+        Json<agentic_gpt_protocol::RoomSecretDeleteRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    let Ok(Json(payload)) = payload else {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_params",
+            "invalid secret request JSON",
+        );
+    };
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomSecretDelete {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_secret_delete_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
 pub(crate) async fn room_email_list(
     State(state): State<HubState>,
     headers: HeaderMap,
@@ -529,6 +653,17 @@ pub(super) fn room_value_response(value: Value) -> Response {
         return Json(value).into_response();
     };
     let status = match code {
+        "secret_not_found" => StatusCode::NOT_FOUND,
+        "secret_confirmation_rejected" | "secret_confirmation_unavailable" => StatusCode::FORBIDDEN,
+        "ambiguous_secret"
+        | "secret_presence_unknown"
+        | "secret_value_missing"
+        | "secret_write_outcome_unknown" => StatusCode::CONFLICT,
+        "secret_invalid_totp" | "secret_result_too_large" => StatusCode::BAD_REQUEST,
+        "secret_not_configured"
+        | "secret_authentication_failed"
+        | "secret_vault_locked"
+        | "secret_provider_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         "email_not_found" | "email_attachment_not_found" => StatusCode::NOT_FOUND,
         "email_disabled" | "email_policy_denied" => StatusCode::FORBIDDEN,
         code if code.starts_with("email_confirmation_") => StatusCode::FORBIDDEN,

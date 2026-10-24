@@ -4670,6 +4670,7 @@ mod tests {
             crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
         let state = AppState {
             email: crate::email::EmailService::open(&private_state).expect("email store"),
+            secret: crate::secret::SecretService::open(&private_state).expect("secret service"),
             transport_agent_id: config.agent_id.clone(),
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
@@ -5196,14 +5197,22 @@ mod tests {
             }
             let denied_read = "if cat \"$private/secret\" >/dev/null 2>&1; then exit 31; fi";
             let checks = match scope {
-                "read" => "test \"$(cat \"$private/secret\")\" = 'private fixture'; if touch \"$private/not-approved\" 2>/dev/null; then exit 32; fi",
-                "write" => "if cat \"$private/secret\" >/dev/null 2>&1; then exit 31; fi; printf granted > \"$private/approved/result\"; if touch \"$private/not-approved\" 2>/dev/null; then exit 32; fi",
-                "alias" => r#"p=/bin/printf; if [[ -r "$p" ]]; then exit 34; fi; if cat "$private/secret" >/dev/null 2>&1; then exit 31; fi"#,
+                "read" => {
+                    "test \"$(cat \"$private/secret\")\" = 'private fixture'; if touch \"$private/not-approved\" 2>/dev/null; then exit 32; fi"
+                }
+                "write" => {
+                    "if cat \"$private/secret\" >/dev/null 2>&1; then exit 31; fi; printf granted > \"$private/approved/result\"; if touch \"$private/not-approved\" 2>/dev/null; then exit 32; fi"
+                }
+                "alias" => {
+                    r#"p=/bin/printf; if [[ -r "$p" ]]; then exit 34; fi; if cat "$private/secret" >/dev/null 2>&1; then exit 31; fi"#
+                }
                 _ => denied_read,
             };
             let command = format!(
                 "private='{}'; token='{}'; {}; if cat \"$token\" >/dev/null 2>&1; then exit 33; fi; printf public > effect",
-                private.display(), denied_file.display(), checks
+                private.display(),
+                denied_file.display(),
+                checks
             );
             let mut request = exec_request(&command, &public);
             request.wait_seconds = Some(3);

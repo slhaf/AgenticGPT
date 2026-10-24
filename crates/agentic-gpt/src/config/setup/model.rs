@@ -80,6 +80,16 @@ pub(crate) enum SetupField {
     EmailMaxStorageBytes,
     EmailSendPolicy,
     EmailTrashPolicy,
+    RoomSecretEnabled,
+    RoomSecretServerUrl,
+    RoomSecretAccount,
+    RoomSecretClientId,
+    RoomSecretClientSecret,
+    RoomSecretMasterPassword,
+    RoomSecretGetPolicy,
+    RoomSecretUpsertPolicy,
+    RoomSecretDeletePolicy,
+    RoomSecretSyncWaitTimeoutMs,
     RoomTimezone,
     DiaryBoundaryHour,
     RepositoryRoot,
@@ -108,6 +118,33 @@ pub(crate) enum SetupField {
     Toolsets,
 }
 impl SetupField {
+    pub(crate) fn room_secret_key(self) -> Option<&'static str> {
+        match self {
+            Self::RoomSecretEnabled => Some("enabled"),
+            Self::RoomSecretServerUrl => Some("serverUrl"),
+            Self::RoomSecretAccount => Some("account"),
+            Self::RoomSecretClientId => Some("clientId"),
+            Self::RoomSecretClientSecret => Some("clientSecret"),
+            Self::RoomSecretMasterPassword => Some("masterPassword"),
+            Self::RoomSecretGetPolicy => Some("getPolicy"),
+            Self::RoomSecretUpsertPolicy => Some("upsertPolicy"),
+            Self::RoomSecretDeletePolicy => Some("deletePolicy"),
+            Self::RoomSecretSyncWaitTimeoutMs => Some("syncWaitTimeoutMs"),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn room_secret_is_sensitive(self) -> bool {
+        matches!(
+            self,
+            Self::RoomSecretServerUrl
+                | Self::RoomSecretAccount
+                | Self::RoomSecretClientId
+                | Self::RoomSecretClientSecret
+                | Self::RoomSecretMasterPassword
+        )
+    }
+
     pub(crate) fn internal_event_type(self) -> Option<&'static str> {
         match self {
             Self::EventProcessCompletedLevel => Some("process.completed"),
@@ -451,8 +488,144 @@ impl EmailDraft {
     }
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct RoomSecretDraft {
+    pub(crate) values: BTreeMap<SetupField, String>,
+}
+
+impl Default for RoomSecretDraft {
+    fn default() -> Self {
+        Self::from_config(&crate::config::RoomSecretConfig::default())
+    }
+}
+
+impl fmt::Debug for RoomSecretDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let values: BTreeMap<_, _> = self
+            .values
+            .iter()
+            .map(|(field, value)| {
+                (
+                    *field,
+                    if field.room_secret_is_sensitive() {
+                        "[REDACTED]"
+                    } else {
+                        value.as_str()
+                    },
+                )
+            })
+            .collect();
+        formatter
+            .debug_struct("RoomSecretDraft")
+            .field("values", &values)
+            .finish()
+    }
+}
+
+impl RoomSecretDraft {
+    pub(crate) const FIELDS: &'static [SetupField] = &[
+        SetupField::RoomSecretEnabled,
+        SetupField::RoomSecretServerUrl,
+        SetupField::RoomSecretAccount,
+        SetupField::RoomSecretClientId,
+        SetupField::RoomSecretClientSecret,
+        SetupField::RoomSecretMasterPassword,
+        SetupField::RoomSecretGetPolicy,
+        SetupField::RoomSecretUpsertPolicy,
+        SetupField::RoomSecretDeletePolicy,
+        SetupField::RoomSecretSyncWaitTimeoutMs,
+    ];
+
+    pub(crate) fn from_config(config: &crate::config::RoomSecretConfig) -> Self {
+        let value = serde_json::to_value(config).expect("Room Secret configuration serializes");
+        let values = Self::FIELDS
+            .iter()
+            .map(|field| {
+                let value = &value[field.room_secret_key().expect("Room Secret field")];
+                let text = value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string());
+                (*field, text)
+            })
+            .collect();
+        Self { values }
+    }
+
+    pub(crate) fn value(&self, field: SetupField) -> String {
+        self.values.get(&field).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn to_config(
+        &self,
+    ) -> Result<crate::config::RoomSecretConfig, (SetupField, &'static str)> {
+        let mut value = serde_json::Map::new();
+        for field in Self::FIELDS {
+            let text = self.value(*field);
+            let parsed = match field {
+                SetupField::RoomSecretEnabled => serde_json::Value::Bool(
+                    text.parse()
+                        .map_err(|_| (*field, "room_secret_enabled_invalid"))?,
+                ),
+                SetupField::RoomSecretSyncWaitTimeoutMs => serde_json::Value::from(
+                    text.parse::<u64>()
+                        .map_err(|_| (*field, "room_secret_sync_wait_timeout_ms_invalid"))?,
+                ),
+                SetupField::RoomSecretGetPolicy
+                | SetupField::RoomSecretUpsertPolicy
+                | SetupField::RoomSecretDeletePolicy => {
+                    if !matches!(text.as_str(), "allow" | "confirm") {
+                        return Err((*field, "room_secret_policy_invalid"));
+                    }
+                    serde_json::Value::String(text)
+                }
+                _ => serde_json::Value::String(text),
+            };
+            value.insert(
+                field
+                    .room_secret_key()
+                    .expect("Room Secret field")
+                    .to_string(),
+                parsed,
+            );
+        }
+        let config: crate::config::RoomSecretConfig =
+            serde_json::from_value(serde_json::Value::Object(value))
+                .map_err(|_| (SetupField::RoomSecretEnabled, "room_secret_config_invalid"))?;
+        config
+            .validate()
+            .map_err(|error| match error.to_string().as_str() {
+                "room_secret_server_url_invalid" => (
+                    SetupField::RoomSecretServerUrl,
+                    "room_secret_server_url_invalid",
+                ),
+                "room_secret_account_invalid" => {
+                    (SetupField::RoomSecretAccount, "room_secret_account_invalid")
+                }
+                "room_secret_client_id_reference_invalid" => (
+                    SetupField::RoomSecretClientId,
+                    "room_secret_client_id_reference_invalid",
+                ),
+                "room_secret_client_secret_reference_invalid" => (
+                    SetupField::RoomSecretClientSecret,
+                    "room_secret_client_secret_reference_invalid",
+                ),
+                "room_secret_master_password_reference_invalid" => (
+                    SetupField::RoomSecretMasterPassword,
+                    "room_secret_master_password_reference_invalid",
+                ),
+                _ => (
+                    SetupField::RoomSecretSyncWaitTimeoutMs,
+                    "room_secret_sync_wait_timeout_ms_invalid",
+                ),
+            })?;
+        Ok(config)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RoomDraft {
+    pub(crate) secret: RoomSecretDraft,
     pub(crate) timezone: String,
     pub(crate) diary_boundary_hour: String,
     pub(crate) repository_root: String,
@@ -1055,6 +1228,7 @@ pub(crate) fn default_optional_draft_for_profile(
             &crate::config::EmailConfig::default(),
         )),
         OptionalSection::Room => OptionalSectionDraft::Room(RoomDraft {
+            secret: RoomSecretDraft::default(),
             timezone: "Asia/Shanghai".to_string(),
             diary_boundary_hour: "5".to_string(),
             repository_root: String::new(),
@@ -1148,6 +1322,7 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
         }),
         email: Some(EmailDraft::from_config(&config.email)),
         room: Some(RoomDraft {
+            secret: RoomSecretDraft::from_config(&config.room.secret),
             timezone: config.room.timezone.clone(),
             diary_boundary_hour: config.room.diary_day_boundary_hour.to_string(),
             repository_root: config

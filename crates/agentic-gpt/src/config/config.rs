@@ -1,5 +1,8 @@
 #[path = "email.rs"]
 mod email;
+#[path = "secret.rs"]
+mod secret;
+pub(crate) use secret::{RoomSecretConfig, SecretPolicy};
 #[path = "mcp_servers.rs"]
 pub(crate) mod mcp_servers;
 pub(crate) use email::{EmailAccountConfig, EmailConfig, EmailPolicy, EmailTls};
@@ -999,6 +1002,8 @@ pub(crate) struct RoomMaintenanceConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RoomConfig {
+    #[serde(default)]
+    pub(crate) secret: RoomSecretConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) repository_root: Option<PathBuf>,
     pub(crate) timezone: String,
@@ -1235,6 +1240,7 @@ impl Config {
         config.validate_policies()?;
         config.events.validate()?;
         config.email.validate()?;
+        config.room.secret.validate()?;
         Ok(config)
     }
 
@@ -1571,6 +1577,7 @@ impl Config {
     pub(crate) fn validate_local(&self) -> Result<()> {
         self.events.validate()?;
         self.email.validate()?;
+        self.room.secret.validate()?;
         self.validate_policies()?;
         self.validate_mcp_servers()?;
         if self.auxiliary_hub_enabled() {
@@ -1740,6 +1747,7 @@ fn materialize_import_value(value: &Value) -> Result<Config> {
     config.room.skills = config.skills.clone();
     config.validate_policies()?;
     config.email.validate()?;
+    config.room.secret.validate()?;
     Ok(config)
 }
 
@@ -1807,6 +1815,17 @@ fn prune_sparse_value(value: &mut Value, defaults: &Value, root: bool) {
 }
 
 fn redact_config_secrets(value: &mut Value) {
+    for key in [
+        "serverUrl",
+        "account",
+        "clientId",
+        "clientSecret",
+        "masterPassword",
+    ] {
+        if let Some(secret) = value.pointer_mut(&format!("/room/secret/{key}")) {
+            *secret = Value::String("[REDACTED]".to_string());
+        }
+    }
     if let Some(password) = value.pointer_mut("/email/account/password") {
         *password = Value::String("[REDACTED]".to_string());
     }
@@ -1938,6 +1957,7 @@ fn safe_policy(policy: &PolicyConfig) -> SafePolicyRules {
 
 pub(crate) fn default_room_config() -> RoomConfig {
     RoomConfig {
+        secret: RoomSecretConfig::default(),
         repository_root: None,
         timezone: "Asia/Shanghai".to_string(),
         diary_day_boundary_hour: default_diary_day_boundary_hour(),
@@ -2658,6 +2678,7 @@ mod tests {
     #[test]
     fn room_repository_and_maintenance_use_the_v2_json_shape() {
         let room = RoomConfig {
+            secret: RoomSecretConfig::default(),
             repository_root: Some(PathBuf::from("/tmp/room-repository")),
             timezone: "UTC".to_string(),
             diary_day_boundary_hour: 4,

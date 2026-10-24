@@ -48,7 +48,10 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "config_init_secret_path_invalid" => ("Secret path is invalid.", "密钥路径无效。"),
         "config_init_secret_source_invalid" => ("Secret source is invalid.", "密钥来源无效。"),
         "config_init_number_invalid" => ("Enter a valid number.", "请输入有效数字。"),
-        "config_init_path_policy_invalid" => ("Choose allow or deny and enter valid path-root arrays.", "请选择 allow 或 deny，并输入有效的路径根目录数组。"),
+        "config_init_path_policy_invalid" => (
+            "Choose allow or deny and enter valid path-root arrays.",
+            "请选择 allow 或 deny，并输入有效的路径根目录数组。",
+        ),
         "config_init_runtime_paths_invalid" => (
             "Required runtime paths must be a JSON array.",
             "运行时路径必须是 JSON 数组。",
@@ -92,10 +95,7 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
             "Public URL must be an HTTPS origin with no userinfo, path, query, or fragment.",
             "Public URL 必须是 HTTPS 来源，不能包含用户信息、路径、查询参数或片段。",
         ),
-        "http_mcp_host_invalid" => (
-            "HTTP MCP host is invalid.",
-            "HTTP MCP 主机地址无效。",
-        ),
+        "http_mcp_host_invalid" => ("HTTP MCP host is invalid.", "HTTP MCP 主机地址无效。"),
         "http_mcp_port_invalid" => (
             "HTTP MCP port must be between 1 and 65535.",
             "HTTP MCP 端口必须在 1 到 65535 之间。",
@@ -114,26 +114,81 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "config_init_optional_section_invalid" => {
             ("Optional section is invalid.", "可选配置区块无效。")
         }
-        "config_init_toolsets_invalid" => {
-            ("Toolset namespace selection is invalid.", "工具集命名空间选择无效。")
-        }
-        "email_sync_interval_seconds_invalid" => ("Sync interval must be from 10 through 86400 seconds.", "同步间隔必须在 10 到 86400 秒之间。"),
-        "email_retention_days_invalid" => ("Retention must be from 1 through 36500 days.", "保存天数必须在 1 到 36500 之间。"),
-        "email_max_storage_bytes_invalid" => ("Storage limit must be at least 1048576 bytes.", "容量上限至少为 1048576 字节。"),
-        "email_account_password_reference_invalid" => ("Use env:NAME or file:/absolute/path for the password.", "密码必须使用 env:NAME 或 file:/绝对路径引用。"),
-        "email_account_from_invalid" => ("Enter a single email address without a display name.", "请输入不含显示名的单个发件邮箱地址。"),
-        "email_account_host_invalid" => ("Enter IMAP and SMTP server hostnames without a URL scheme.", "请填写 IMAP 和 SMTP 服务器地址，不带协议前缀或路径。"),
-        "email_account_port_invalid" => ("Ports must be between 1 and 65535.", "端口必须在 1 到 65535 之间。"),
+        "config_init_toolsets_invalid" => (
+            "Toolset namespace selection is invalid.",
+            "工具集命名空间选择无效。",
+        ),
+        "room_secret_server_url_invalid" => (
+            "Enter an HTTP(S) Vaultwarden server URL without credentials, query or fragment.",
+            "请填写 HTTP(S) Vaultwarden 服务地址，不包含凭据、查询参数或片段。",
+        ),
+        "room_secret_account_invalid" => (
+            "Enter the dedicated Vaultwarden account without whitespace.",
+            "请填写专用 Vaultwarden 账号，不包含空白。",
+        ),
+        "room_secret_client_id_reference_invalid"
+        | "room_secret_client_secret_reference_invalid"
+        | "room_secret_master_password_reference_invalid" => (
+            "Use env:NAME or file:PATH for each credential; plaintext is rejected.",
+            "凭据仅接受 env:NAME 或 file:PATH 引用，不能填写明文。",
+        ),
+        "room_secret_sync_wait_timeout_ms_invalid" => (
+            "Sync wait must be an integer from 0 through 30000 milliseconds.",
+            "同步等待必须是 0 到 30000 之间的整数，单位毫秒。",
+        ),
+        "room_secret_policy_invalid" => (
+            "Secret policies allow only allow or confirm.",
+            "密钥策略仅允许 allow 或 confirm。",
+        ),
+        "room_secret_enabled_invalid" | "room_secret_config_invalid" => (
+            "Check the Room Secret settings before enabling the service.",
+            "启用服务前请检查 Room Secret 配置。",
+        ),
+        "email_sync_interval_seconds_invalid" => (
+            "Sync interval must be from 10 through 86400 seconds.",
+            "同步间隔必须在 10 到 86400 秒之间。",
+        ),
+        "email_retention_days_invalid" => (
+            "Retention must be from 1 through 36500 days.",
+            "保存天数必须在 1 到 36500 之间。",
+        ),
+        "email_max_storage_bytes_invalid" => (
+            "Storage limit must be at least 1048576 bytes.",
+            "容量上限至少为 1048576 字节。",
+        ),
+        "email_account_password_reference_invalid" => (
+            "Use env:NAME or file:/absolute/path for the password.",
+            "密码必须使用 env:NAME 或 file:/绝对路径引用。",
+        ),
+        "email_account_from_invalid" => (
+            "Enter a single email address without a display name.",
+            "请输入不含显示名的单个发件邮箱地址。",
+        ),
+        "email_account_host_invalid" => (
+            "Enter IMAP and SMTP server hostnames without a URL scheme.",
+            "请填写 IMAP 和 SMTP 服务器地址，不带协议前缀或路径。",
+        ),
+        "email_account_port_invalid" => (
+            "Ports must be between 1 and 65535.",
+            "端口必须在 1 到 65535 之间。",
+        ),
         "email_account_username_invalid" => ("Enter an account username.", "请填写账户用户名。"),
-        "email_config_invalid" => ("Use implicit/starttls for TLS and allow/confirm/deny for policies.", "加密方式使用 implicit/starttls，策略使用 allow/confirm/deny。"),
-        "email_account_required" => ("Configure the email account before enabling email.", "启用邮件前请先填写完整账户信息。"),
+        "email_config_invalid" => (
+            "Use implicit/starttls for TLS and allow/confirm/deny for policies.",
+            "加密方式使用 implicit/starttls，策略使用 allow/confirm/deny。",
+        ),
+        "email_account_required" => (
+            "Configure the email account before enabling email.",
+            "启用邮件前请先填写完整账户信息。",
+        ),
         "room_config_requires_room_toolset" => (
             "Room settings require the Room toolset namespace to be enabled.",
             "Room 配置需要启用 Room 工具集命名空间。",
         ),
-        "config_init_room_maintenance_mode_invalid" => {
-            ("Maintenance mode must be local or workflow.", "维护模式必须是 local 或 workflow。")
-        }
+        "config_init_room_maintenance_mode_invalid" => (
+            "Maintenance mode must be local or workflow.",
+            "维护模式必须是 local 或 workflow。",
+        ),
         "config_init_events_low_ttl_seconds_invalid" => (
             "Low event TTL must be a non-negative integer.",
             "低等级事件保留时间必须是非负整数。",
@@ -1514,6 +1569,63 @@ fn render_optional_form(
                 theme,
                 errors,
             );
+            lines.push(Line::raw(t(
+                language,
+                "Room changes require restart.",
+                "Room 配置修改后需重启。",
+            )));
+            push_boolean_field(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::RoomSecretEnabled,
+                language,
+                theme,
+                errors,
+            );
+            for field in [
+                SetupField::RoomSecretServerUrl,
+                SetupField::RoomSecretAccount,
+                SetupField::RoomSecretClientId,
+                SetupField::RoomSecretClientSecret,
+                SetupField::RoomSecretMasterPassword,
+                SetupField::RoomSecretSyncWaitTimeoutMs,
+            ] {
+                push_long_form_field(
+                    &mut lines,
+                    &mut focused_line,
+                    session,
+                    section,
+                    draft,
+                    state,
+                    field,
+                    language,
+                    theme,
+                    errors,
+                    left.width,
+                );
+            }
+            for field in [
+                SetupField::RoomSecretGetPolicy,
+                SetupField::RoomSecretUpsertPolicy,
+                SetupField::RoomSecretDeletePolicy,
+            ] {
+                push_choice_group(
+                    &mut lines,
+                    &mut focused_line,
+                    section,
+                    draft,
+                    state,
+                    field,
+                    optional_field_label(field, language),
+                    &[("allow", "allow"), ("confirm", "confirm")],
+                    theme,
+                    errors,
+                    language,
+                );
+            }
         }
         OptionalSection::TunnelClient => {
             for field in [SetupField::TunnelClientVersion, SetupField::TunnelCacheDir] {
@@ -1778,7 +1890,9 @@ fn push_long_form_field(
     };
     if matches!(
         field,
-        SetupField::DiaryBoundaryHour | SetupField::EventsLowTtlSeconds
+        SetupField::DiaryBoundaryHour
+            | SetupField::EventsLowTtlSeconds
+            | SetupField::RoomSecretSyncWaitTimeoutMs
     ) {
         lines.push(numeric_input_value_line(
             current,
@@ -1793,7 +1907,7 @@ fn push_long_form_field(
             focused,
             cursor.is_some(),
             cursor,
-            field == SetupField::EmailPassword,
+            field == SetupField::EmailPassword || field.room_secret_is_sensitive(),
             is_default,
             width,
             theme,
@@ -2846,6 +2960,37 @@ pub(super) fn optional_focus_items(
                 value: "workflow",
             },
             OptionalFocusItem::Field(SetupField::RoomMaintenanceAutoPush),
+            OptionalFocusItem::Field(SetupField::RoomSecretEnabled),
+            OptionalFocusItem::Field(SetupField::RoomSecretServerUrl),
+            OptionalFocusItem::Field(SetupField::RoomSecretAccount),
+            OptionalFocusItem::Field(SetupField::RoomSecretClientId),
+            OptionalFocusItem::Field(SetupField::RoomSecretClientSecret),
+            OptionalFocusItem::Field(SetupField::RoomSecretMasterPassword),
+            OptionalFocusItem::Field(SetupField::RoomSecretSyncWaitTimeoutMs),
+            OptionalFocusItem::Choice {
+                field: SetupField::RoomSecretGetPolicy,
+                value: "allow",
+            },
+            OptionalFocusItem::Choice {
+                field: SetupField::RoomSecretGetPolicy,
+                value: "confirm",
+            },
+            OptionalFocusItem::Choice {
+                field: SetupField::RoomSecretUpsertPolicy,
+                value: "allow",
+            },
+            OptionalFocusItem::Choice {
+                field: SetupField::RoomSecretUpsertPolicy,
+                value: "confirm",
+            },
+            OptionalFocusItem::Choice {
+                field: SetupField::RoomSecretDeletePolicy,
+                value: "allow",
+            },
+            OptionalFocusItem::Choice {
+                field: SetupField::RoomSecretDeletePolicy,
+                value: "confirm",
+            },
         ],
         OptionalSection::TunnelClient => vec![
             OptionalFocusItem::Field(SetupField::TunnelClientVersion),
@@ -3225,9 +3370,14 @@ fn optional_center_inspector_body(
                     "• streamable-http",
                     "• stdio",
                 ],
-                OptionalSection::Email => &["Configure IMAP/SMTP, synchronization, local storage, and sending/trash permissions.", "Account connection changes require restart; other changes apply immediately.", "Password: env:NAME or file:/absolute/path. TLS: implicit or starttls. Policies: allow, confirm, deny."],
+                OptionalSection::Email => &[
+                    "Configure IMAP/SMTP, synchronization, local storage, and sending/trash permissions.",
+                    "Account connection changes require restart; other changes apply immediately.",
+                    "Password: env:NAME or file:/absolute/path. TLS: implicit or starttls. Policies: allow, confirm, deny.",
+                ],
                 OptionalSection::Room => &[
-                    "Set Room timezone, diary day boundary, repository root, and maintenance behavior.",
+                    "Set Room timezone, diary boundary, repository, maintenance and Secret settings.",
+                    "All Room changes require restart. Secret credentials use env:NAME or file:PATH references.",
                     "The repository defaults to <workspace>/room; maintenance is local with auto-push off.",
                     "Only available when the Room toolset namespace is enabled.",
                 ],
@@ -3297,9 +3447,14 @@ fn optional_center_inspector_body(
                     "",
                     "Normal 启用除 Room 外的所有命名空间；Room 启用全部命名空间。",
                 ],
-                OptionalSection::Email => &["配置 IMAP/SMTP、同步、本地保存及发送和移入垃圾箱权限。", "账户连接修改后需重启；其他修改立即生效。", "密码使用 env:NAME 或 file:/绝对路径。加密方式：implicit 或 starttls；策略：allow、confirm、deny。"],
+                OptionalSection::Email => &[
+                    "配置 IMAP/SMTP、同步、本地保存及发送和移入垃圾箱权限。",
+                    "账户连接修改后需重启；其他修改立即生效。",
+                    "密码使用 env:NAME 或 file:/绝对路径。加密方式：implicit 或 starttls；策略：allow、confirm、deny。",
+                ],
                 OptionalSection::Room => &[
-                    "设置 Room 的时区、日记日界线、仓库根目录和维护行为。",
+                    "设置 Room 的时区、日记日界线、仓库、维护行为和密钥服务。",
+                    "所有 Room 配置修改后均需重启；密钥凭据使用 env:NAME 或 file:PATH 引用。",
                     "仓库默认使用 <workspace>/room；维护默认为 local 且关闭自动推送。",
                     "仅在启用 Room 工具集命名空间时可用。",
                 ],
@@ -3340,14 +3495,20 @@ fn optional_form_inspector_body(
                     "• untouched: use the host name when available",
                     "• saved default draft: write AgenticGPT agent",
                 ],
-                SetupField::WorkspaceRoot => &["Default working directory; access requires an explicit matching path policy."],
+                SetupField::WorkspaceRoot => &[
+                    "Default working directory; access requires an explicit matching path policy.",
+                ],
                 SetupField::PathDefaultAction => &[
                     "Choose whether paths outside every configured root are allowed or denied.",
                     "Denied roots still take precedence over this default.",
                 ],
-                SetupField::PathReadOnlyPaths => &["Concrete roots that may be read but not modified."],
+                SetupField::PathReadOnlyPaths => {
+                    &["Concrete roots that may be read but not modified."]
+                }
                 SetupField::PathWritePaths => &["Concrete roots that may be read and modified."],
-                SetupField::PathDenyPaths => &["Concrete roots that remain inaccessible even under an allowed parent."],
+                SetupField::PathDenyPaths => {
+                    &["Concrete roots that remain inaccessible even under an allowed parent."]
+                }
                 SetupField::ConfirmationChannels => &[
                     "Choose confirmation fallback channels.",
                     "Selected order is the fallback order: the first available channel handles the request.",
@@ -3437,6 +3598,38 @@ fn optional_form_inspector_body(
                     "Bearer token for this streamable-http MCP server.",
                     "Enter the token without the Bearer prefix.",
                     "The TUI masks this value and redacts it from the final JSON preview.",
+                ],
+                SetupField::RoomSecretEnabled => &[
+                    "Enable Room Secret on the active Room toolset.",
+                    "Configure the server, account and all three credential references first.",
+                    "All Room changes require restart.",
+                ],
+                SetupField::RoomSecretServerUrl => &[
+                    "Vaultwarden HTTP(S) server URL, without credentials, query or fragment.",
+                    "All Room changes require restart.",
+                ],
+                SetupField::RoomSecretAccount => &[
+                    "Dedicated Vaultwarden account used to verify the logged-in identity.",
+                    "All Room changes require restart.",
+                ],
+                SetupField::RoomSecretClientId
+                | SetupField::RoomSecretClientSecret
+                | SetupField::RoomSecretMasterPassword => &[
+                    "Use env:NAME or file:PATH; plaintext is rejected.",
+                    "File paths support ~ expansion. The reference is masked in Review.",
+                    "All Room changes require restart.",
+                ],
+                SetupField::RoomSecretGetPolicy
+                | SetupField::RoomSecretUpsertPolicy
+                | SetupField::RoomSecretDeletePolicy => &[
+                    "allow executes directly; confirm requires explicit approval.",
+                    "Rejection, timeout and unavailable confirmation never disclose or modify secrets.",
+                    "All Room changes require restart.",
+                ],
+                SetupField::RoomSecretSyncWaitTimeoutMs => &[
+                    "Query sync wait budget: 0 through 30000 milliseconds; default 3000.",
+                    "Zero reads without waiting. Budget expiry does not cancel synchronization.",
+                    "All Room changes require restart.",
                 ],
                 SetupField::RoomTimezone => &[
                     "Timezone used to assign Room diary and Notebook dates.",
@@ -3631,6 +3824,38 @@ fn optional_form_inspector_body(
                     "只填写 token 本身，不要带 Bearer 前缀。",
                     "TUI 会掩码该值，并在最终 JSON 预览中脱敏。",
                 ],
+                SetupField::RoomSecretEnabled => &[
+                    "在已启用的 Room 工具集中开启密钥服务。",
+                    "请先填写服务地址、账号和三个凭据引用。",
+                    "所有 Room 配置修改后均需重启。",
+                ],
+                SetupField::RoomSecretServerUrl => &[
+                    "Vaultwarden HTTP(S) 服务地址，不含凭据、查询参数或片段。",
+                    "所有 Room 配置修改后均需重启。",
+                ],
+                SetupField::RoomSecretAccount => &[
+                    "用于核对登录身份的 Vaultwarden 专用账号。",
+                    "所有 Room 配置修改后均需重启。",
+                ],
+                SetupField::RoomSecretClientId
+                | SetupField::RoomSecretClientSecret
+                | SetupField::RoomSecretMasterPassword => &[
+                    "仅接受 env:NAME 或 file:PATH 引用，不接受明文。",
+                    "文件路径支持 ~ 展开；Review 隐藏引用内容。",
+                    "所有 Room 配置修改后均需重启。",
+                ],
+                SetupField::RoomSecretGetPolicy
+                | SetupField::RoomSecretUpsertPolicy
+                | SetupField::RoomSecretDeletePolicy => &[
+                    "allow 直接执行；confirm 要求明确批准。",
+                    "拒绝、超时或确认不可用时，不披露或修改密钥。",
+                    "所有 Room 配置修改后均需重启。",
+                ],
+                SetupField::RoomSecretSyncWaitTimeoutMs => &[
+                    "查询等待同步的预算：0 到 30000 毫秒，默认 3000。",
+                    "0 表示不等待；预算耗尽不会取消同步。",
+                    "所有 Room 配置修改后均需重启。",
+                ],
                 SetupField::RoomTimezone => &[
                     "Room 日记和 Notebook 日期归属使用的时区。",
                     "默认 Asia/Shanghai；建议使用 Europe/Berlin 这类 IANA 时区。",
@@ -3686,10 +3911,9 @@ fn optional_form_inspector_body(
                     "必须正好是 64 个十六进制字符。",
                     "",
                 ],
-                SetupField::EventsLowTtlSeconds => &[
-                    "低等级事件的保留秒数。",
-                    "请输入非负整数；0 表示立即过期。",
-                ],
+                SetupField::EventsLowTtlSeconds => {
+                    &["低等级事件的保留秒数。", "请输入非负整数；0 表示立即过期。"]
+                }
                 SetupField::EventProcessCompletedLevel
                 | SetupField::EventProcessFailedLevel
                 | SetupField::EventProcessRejectedLevel
@@ -3766,6 +3990,25 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
 
 fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str {
     match field {
+        SetupField::RoomSecretEnabled => t(language, "Secret enabled", "启用密钥服务"),
+        SetupField::RoomSecretServerUrl => {
+            t(language, "Vaultwarden server URL", "Vaultwarden 服务地址")
+        }
+        SetupField::RoomSecretAccount => t(language, "Vaultwarden account", "Vaultwarden 账号"),
+        SetupField::RoomSecretClientId => t(language, "Client ID reference", "Client ID 引用"),
+        SetupField::RoomSecretClientSecret => {
+            t(language, "Client secret reference", "Client secret 引用")
+        }
+        SetupField::RoomSecretMasterPassword => {
+            t(language, "Master password reference", "主密码引用")
+        }
+        SetupField::RoomSecretGetPolicy => t(language, "Get policy", "读取策略"),
+        SetupField::RoomSecretUpsertPolicy => t(language, "Upsert policy", "创建与更新策略"),
+        SetupField::RoomSecretDeletePolicy => t(language, "Delete policy", "删除策略"),
+        SetupField::RoomSecretSyncWaitTimeoutMs => {
+            t(language, "Sync wait (milliseconds)", "同步等待（毫秒）")
+        }
+
         SetupField::EmailEnabled => t(language, "Enabled", "启用邮件"),
         SetupField::EmailImapHost => t(language, "IMAP host", "IMAP 服务器"),
         SetupField::EmailImapPort => t(language, "IMAP port", "IMAP 端口"),
@@ -3862,6 +4105,7 @@ pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
             | SetupField::TunnelAutoDownload
             | SetupField::HubReportingEnabled
             | SetupField::RoomMaintenanceAutoPush
+            | SetupField::RoomSecretEnabled
             | SetupField::EmailEnabled
     )
 }
@@ -3913,6 +4157,7 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             SetupField::RepositoryRoot => value.repository_root.clone(),
             SetupField::RoomMaintenanceMode => value.maintenance_mode.clone(),
             SetupField::RoomMaintenanceAutoPush => value.maintenance_auto_push.to_string(),
+            field if field.room_secret_key().is_some() => value.secret.value(field),
             _ => String::new(),
         },
         OptionalSectionDraft::TunnelClient(value) => match field {
@@ -3990,6 +4235,9 @@ pub(super) fn set_optional_field(
             SetupField::RepositoryRoot => draft.repository_root = value,
             SetupField::RoomMaintenanceMode => draft.maintenance_mode = value,
             SetupField::RoomMaintenanceAutoPush => draft.maintenance_auto_push = value == "true",
+            field if field.room_secret_key().is_some() => {
+                draft.secret.values.insert(field, value);
+            }
             _ => {}
         },
         OptionalSectionDraft::TunnelClient(draft) => match field {
@@ -4033,6 +4281,10 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
         OptionalSectionDraft::Email(draft) if field == SetupField::EmailEnabled => {
             let value = draft.value(field) != "true";
             draft.values.insert(field, value.to_string());
+        }
+        OptionalSectionDraft::Room(draft) if field == SetupField::RoomSecretEnabled => {
+            let enabled = draft.secret.value(field) != "true";
+            draft.secret.values.insert(field, enabled.to_string());
         }
         OptionalSectionDraft::Room(draft) if field == SetupField::RoomMaintenanceAutoPush => {
             draft.maintenance_auto_push = !draft.maintenance_auto_push
@@ -4821,6 +5073,17 @@ pub(super) fn review_search_text(
 
 fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
     match label_key {
+        "enabled" => t(language, "Secret enabled", "启用密钥服务"),
+        "serverUrl" => t(language, "Vaultwarden server URL", "Vaultwarden 服务地址"),
+        "account" => t(language, "Vaultwarden account", "Vaultwarden 账号"),
+        "clientId" => t(language, "Client ID reference", "Client ID 引用"),
+        "clientSecret" => t(language, "Client secret reference", "Client secret 引用"),
+        "masterPassword" => t(language, "Master password reference", "主密码引用"),
+        "getPolicy" => t(language, "Get policy", "读取策略"),
+        "upsertPolicy" => t(language, "Upsert policy", "创建与更新策略"),
+        "deletePolicy" => t(language, "Delete policy", "删除策略"),
+        "syncWaitTimeoutMs" => t(language, "Sync wait (milliseconds)", "同步等待（毫秒）"),
+
         "mode" => t(language, "Mode", "模式"),
         "profile" => t(language, "Profile", "能力配置"),
         "tunnel_id" => t(language, "Tunnel ID", "隧道 ID"),

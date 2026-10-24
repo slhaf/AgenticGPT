@@ -209,7 +209,7 @@ agentic-gpt run
 | `policy` | 统一的自动命令／路径策略：`enabled`、`command`、`path` 与 `bubblewrap`。 |
 | `limits` | Process 并发限制与最大活动 Process/Skill/MCP Job 容量。 |
 | `skills` | Skill package/install 限制与网络策略。 |
-| `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
+| `room` | Room 仓库根目录、时区、日记日界线、维护策略及可选 Vaultwarden 密钥服务。 |
 | `email` | 单账户 IMAP/SMTP、同步间隔、本地内容保存限制和发送/垃圾箱策略；见[邮件使用指南](email.zh-CN.md)。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
 | `browser` | 可选的高级 Browser runtime 覆盖；Browser runtime 自动 discovery 受 Browser 工具集开关控制；managed runtime 自动 provisioning 需显式启用 `browser.managed.autoProvision`，默认 `false`。 |
@@ -754,7 +754,7 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 `room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；
 `room.maintenance.autoPush` 默认是 `false`。
 
-Room namespace 的九个语义操作是 Diary active/read、Notebook recent/search/read、
+Room namespace 的九个文档／维护语义操作是 Diary active/read、Notebook recent/search/read、
 State list/read，以及 maintenance status/submit。Notebook recent/search 的 `limit`
 默认 20、范围为 1–100；search query 必须非空且不超过 256 个 Unicode 字符；
 Markdown read 限制为 512 KiB。Maintenance submit 接受 1–5 个不重复的 semantic slot，可选
@@ -778,6 +778,24 @@ Process 主动确认获准的 `read`／`write` 路径可追加到本次挂载，
 `bwrap` 可执行文件从 Agent 的 `PATH` 查找；启动或挂载失败时操作失败，不回退到未隔离执行。`policy.bubblewrap=false`、或
 `policy.enabled=false` 时不启用 OS 挂载隔离；显式主动确认仍生效。tmux、下游 MCP 和 Browser
 JavaScript 不属于受管理 Process 的 bubblewrap 范围。
+
+## Room 密钥配置
+
+`room.secret` 通过 Agent 本机的 Bitwarden CLI 访问独立 Vaultwarden 账号，默认关闭。它要求启用 `room` 工具集并设置 `room.secret.enabled=true`；当前生效配置关闭任一开关都会拒绝后续密钥调用，不能用已知工具名绕过。设置、调用示例、同步与敏感内容边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
+
+| 配置键 | 默认值 | 约束 |
+| --- | --- | --- |
+| `room.secret.enabled` | `false` | 启用时须填写完整连接配置。 |
+| `room.secret.serverUrl` | 空 | HTTP(S) Vaultwarden 地址，不含 userinfo、query 或 fragment；最多 4096 字节。 |
+| `room.secret.account` | 空 | 专用 Vaultwarden 账号；不含空白或控制字符，最多 1024 字节。 |
+| `room.secret.clientId`、`clientSecret`、`masterPassword` | 空 | 仅接受 `env:NAME` 或 `file:PATH` 引用；非空引用最多 4096 字节，不接受明文或控制字符。 |
+| `room.secret.getPolicy` | `allow` | 仅允许 `allow` 或 `confirm`。 |
+| `room.secret.upsertPolicy`、`deletePolicy` | `confirm` | 仅允许 `allow` 或 `confirm`。 |
+| `room.secret.syncWaitTimeoutMs` | `3000` 毫秒 | 0–30000；仅限制 list/get 等待同步的预算，0 表示不等待，不取消同步。 |
+
+CLI 支持上述全部键，TUI 的 Room 页和 Review 提供对应编辑入口。`config show`、JSON 预览、Review 和 Debug 隐藏服务地址、账号及三个凭据引用；`agent.info` 的配置摘要不包含这些内容。引用在使用时按现有 secret reference 机制解析，文件引用支持 `~` 展开。
+
+`getPolicy=confirm`、`upsertPolicy=confirm` 或 `deletePolicy=confirm` 均要求明确批准；拒绝、超时或确认不可用时不披露或修改密钥，不受 `policy.enabled=false` 绕过。`list` 不请求确认。整个 `room.secret` 沿用 Room 的重启生效边界，磁盘修改不代表运行中能力已经切换。
 
 ## Room 邮件配置
 
@@ -832,6 +850,7 @@ registry 包含以下常用 scalar：
 - `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
 - `shell.initFile`
 - `room.maintenance.mode`、`room.maintenance.autoPush`
+- `room.secret.enabled`、`serverUrl`、`account`、`clientId`、`clientSecret`、`masterPassword`、`getPolicy`、`upsertPolicy`、`deletePolicy`、`syncWaitTimeoutMs`（均以 `room.secret.` 为前缀）
 - 文档列出的 `skills.*` scalar/list 字段
 - `httpMcp.enabled`、`httpMcp.host`、`httpMcp.port`、`httpMcp.publicUrl`、`httpMcp.bearerToken`、`httpMcp.allowHosts`
 - `events.lowTtlSeconds`、以及每个 `events.internalOverrides.<event-type>` 注册键（例如 `events.internalOverrides.process.completed`、`events.internalOverrides.skill_install.failed`）
@@ -882,7 +901,7 @@ live subset。无效候选会保留上一份有效状态；候选修改需要重
 | `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |
 | `email.account` | 需要重启；运行中保持原账户连接配置 |
 | `email.enabled`、`syncIntervalSeconds`、`retentionDays`、`maxStorageBytes`、`sendPolicy`、`trashPolicy` | 热加载；后续同步/请求采用新值，已接纳操作保留原策略 |
-| `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |
+| `room.*` 仓库、时区、日界线、maintenance 和 secret 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |
 | `tunnel.*` client identity/source/secret | 需要重启 |
 | `hub`、reporting mode | 相关连接需要重启 |
 | Skill install 并发等 startup-owned 设置 | 需要重启 |

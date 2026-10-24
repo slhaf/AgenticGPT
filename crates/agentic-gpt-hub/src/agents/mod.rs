@@ -4,3 +4,6 @@ pub(crate) mod transport;
 
 #[cfg(test)]
 mod test_support;
+
+#[cfg(test)]
+mod secret_dispatch_tests;

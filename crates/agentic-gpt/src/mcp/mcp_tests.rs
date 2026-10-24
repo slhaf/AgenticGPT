@@ -244,6 +244,7 @@ async fn managed_test_state(max_active_processes: usize) -> (AppState, PathBuf) 
     let event_store = crate::event_store::EventStore::open(&private_state).unwrap();
     let state = AppState {
         email: crate::email::EmailService::open(&private_state).expect("email store"),
+        secret: crate::secret::SecretService::open(&private_state).expect("secret service"),
         config_path: root.join("config.json"),
         transport_agent_id: config.agent_id.clone(),
         config: Arc::new(RwLock::new(config)),

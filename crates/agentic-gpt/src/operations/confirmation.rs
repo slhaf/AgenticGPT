@@ -163,6 +163,35 @@ pub(crate) async fn authorize_email_operation(
     operation: &str,
     preview: &str,
 ) -> Result<OperationAuthorization, String> {
+    let title = match (confirmation_language_is_zh(config), operation) {
+        (true, "room.email.send") => "确认发送邮件",
+        (true, _) => "确认移入邮件垃圾箱",
+        (false, "room.email.send") => "Confirm email send",
+        (false, _) => "Confirm moving email to Trash",
+    }
+    .to_owned();
+    authorize_sensitive_operation(
+        state,
+        config,
+        decision,
+        operation,
+        &title,
+        preview,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+}
+
+/// Strict confirmation for a sanitized preview. Only explicit approval allows disclosure or effects.
+pub(crate) async fn authorize_sensitive_operation(
+    state: &AppState,
+    config: &Config,
+    decision: crate::policy::PolicyDecision,
+    operation: &str,
+    title: &str,
+    preview: &str,
+    cancelled: Arc<AtomicBool>,
+) -> Result<OperationAuthorization, String> {
     use crate::policy::PolicyDecision;
     match decision {
         PolicyDecision::Deny => return Err("policy_denied".to_owned()),
@@ -170,18 +199,12 @@ pub(crate) async fn authorize_email_operation(
             return Ok(OperationAuthorization {
                 approved: false,
                 result: None,
-            })
+            });
         }
         PolicyDecision::Confirm => {}
     }
     let mut content = confirmation_content(config, None, operation, "");
-    content.title = match (confirmation_language_is_zh(config), operation) {
-        (true, "room.email.send") => "确认发送邮件",
-        (true, _) => "确认移入邮件垃圾箱",
-        (false, "room.email.send") => "Confirm email send",
-        (false, _) => "Confirm moving email to Trash",
-    }
-    .to_owned();
+    content.title = title.to_owned();
     let normalized = preview.replace("\r\n", "\n").replace('\r', "\n");
     let mut characters = normalized
         .chars()
@@ -197,7 +220,7 @@ pub(crate) async fn authorize_email_operation(
         operation,
         &[content.body.clone()],
         &content,
-        Arc::new(AtomicBool::new(false)),
+        cancelled,
     )
     .await;
     if result == "allow_once" {

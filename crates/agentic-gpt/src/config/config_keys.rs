@@ -34,6 +34,7 @@ pub(crate) enum ConfigValueKind {
     WorkerProfile,
     RoomMaintenanceMode,
     PolicyAction,
+    SecretPolicy,
     EmailAccount,
     PathDefaultAction,
 }
@@ -60,6 +61,7 @@ impl ConfigValueKind {
             Self::WorkerProfile => "worker-profile",
             Self::RoomMaintenanceMode => "room-maintenance-mode",
             Self::PolicyAction => "policy-action",
+            Self::SecretPolicy => "secret-policy",
             Self::EmailAccount => "email-account-object-or-null",
             Self::PathDefaultAction => "path-default-action",
             Self::EventNotificationLevel => "event-notification-level",
@@ -70,6 +72,7 @@ impl ConfigValueKind {
         match self {
             Self::Boolean => Some(&["true", "false"]),
             Self::PolicyAction => Some(&["allow", "confirm", "deny"]),
+            Self::SecretPolicy => Some(&["allow", "confirm"]),
             Self::PathDefaultAction => Some(&["allow", "deny"]),
             Self::ConfirmationChannels => Some(&["freedesktop", "ntfy"]),
             Self::HubTransport => Some(&["websocket", "sse"]),
@@ -219,6 +222,106 @@ macro_rules! config_key {
 }
 
 pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
+    config_key!(
+        "room.secret.enabled",
+        Room,
+        Boolean,
+        false,
+        "Enable Room Secret; changes require restart.",
+        "启用 Room Secret；修改后需重启。",
+        "false",
+        set_room_secret_enabled
+    ),
+    config_key!(
+        "room.secret.serverUrl",
+        Room,
+        String,
+        false,
+        "Vaultwarden server URL; changes require restart.",
+        "Vaultwarden 服务地址；修改后需重启。",
+        "https://vault.example.invalid",
+        set_room_secret_server_url
+    ),
+    config_key!(
+        "room.secret.account",
+        Room,
+        String,
+        false,
+        "Dedicated Vaultwarden account; changes require restart.",
+        "Vaultwarden 专用账号；修改后需重启。",
+        "agent@example.invalid",
+        set_room_secret_account
+    ),
+    config_key!(
+        "room.secret.clientId",
+        Room,
+        String,
+        false,
+        "Personal API client ID reference; env:NAME or file:PATH, never plaintext.",
+        "Personal API client ID 引用；仅接受 env:NAME 或 file:PATH。",
+        "env:BITWARDEN_CLIENT_ID",
+        set_room_secret_client_id
+    ),
+    config_key!(
+        "room.secret.clientSecret",
+        Room,
+        String,
+        false,
+        "Personal API client secret reference; env:NAME or file:PATH, never plaintext.",
+        "Personal API client secret 引用；仅接受 env:NAME 或 file:PATH。",
+        "env:BITWARDEN_CLIENT_SECRET",
+        set_room_secret_client_secret
+    ),
+    config_key!(
+        "room.secret.masterPassword",
+        Room,
+        String,
+        false,
+        "Master password reference; env:NAME or file:PATH, never plaintext.",
+        "主密码引用；仅接受 env:NAME 或 file:PATH。",
+        "env:BITWARDEN_MASTER_PASSWORD",
+        set_room_secret_master_password
+    ),
+    config_key!(
+        "room.secret.getPolicy",
+        Room,
+        SecretPolicy,
+        false,
+        "Secret retrieval policy; allow or confirm. Requires restart.",
+        "密钥读取策略：allow 或 confirm；修改后需重启。",
+        "allow",
+        set_room_secret_get_policy
+    ),
+    config_key!(
+        "room.secret.upsertPolicy",
+        Room,
+        SecretPolicy,
+        false,
+        "Secret creation/update policy; allow or confirm. Requires restart.",
+        "密钥创建与更新策略：allow 或 confirm；修改后需重启。",
+        "confirm",
+        set_room_secret_upsert_policy
+    ),
+    config_key!(
+        "room.secret.deletePolicy",
+        Room,
+        SecretPolicy,
+        false,
+        "Secret deletion policy; allow or confirm. Requires restart.",
+        "密钥删除策略：allow 或 confirm；修改后需重启。",
+        "confirm",
+        set_room_secret_delete_policy
+    ),
+    config_key!(
+        "room.secret.syncWaitTimeoutMs",
+        Room,
+        NonNegativeInteger,
+        false,
+        "Query sync wait in milliseconds, 0..30000; restart required. Zero does not wait.",
+        "查询等待同步的毫秒数，0..30000；修改后需重启，0 表示不等待。",
+        "3000",
+        set_room_secret_sync_wait_timeout_ms
+    ),
     config_key!(
         "mode",
         Runtime,
@@ -389,15 +492,96 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "en",
         set_confirmation_language
     ),
-    config_key!("policy.enabled", Policy, Boolean, false, "Enable command and path policy enforcement.", "启用命令与路径策略执行。", "true", set_policy_enabled),
-    config_key!("policy.command.defaultAction", Policy, PolicyAction, false, "Default command policy action.", "命令未匹配规则时的默认动作。", "confirm", set_policy_command_default_action),
-    config_key!("policy.command.allow", Policy, JsonStringArray, false, "Allowed command patterns.", "允许的命令模式数组。", r#"[]"#, set_policy_command_allow),
-    config_key!("policy.command.confirm", Policy, JsonStringArray, false, "Command patterns that require confirmation.", "需要确认的命令模式数组。", r#"[]"#, set_policy_command_confirm),
-    config_key!("policy.command.deny", Policy, JsonStringArray, false, "Denied command patterns.", "拒绝的命令模式数组。", r#"[]"#, set_policy_command_deny),
-    config_key!("policy.path.defaultAction", Policy, PathDefaultAction, false, "Default path policy action.", "路径未匹配根目录时的默认动作。", "deny", set_policy_path_default_action),
-    config_key!("policy.path.readOnly", Policy, JsonPathArray, false, "Concrete read-only path roots.", "具体的只读路径根目录。", r#"["/usr"]"#, set_policy_path_read_only),
-    config_key!("policy.path.write", Policy, JsonPathArray, false, "Concrete writable path roots.", "具体的可写路径根目录。", r#"["~/.agentic_gpt/workspace"]"#, set_policy_path_write),
-    config_key!("policy.path.deny", Policy, JsonPathArray, false, "Concrete denied path roots.", "具体的拒绝访问路径根目录。", r#"[]"#, set_policy_path_deny),
+    config_key!(
+        "policy.enabled",
+        Policy,
+        Boolean,
+        false,
+        "Enable command and path policy enforcement.",
+        "启用命令与路径策略执行。",
+        "true",
+        set_policy_enabled
+    ),
+    config_key!(
+        "policy.command.defaultAction",
+        Policy,
+        PolicyAction,
+        false,
+        "Default command policy action.",
+        "命令未匹配规则时的默认动作。",
+        "confirm",
+        set_policy_command_default_action
+    ),
+    config_key!(
+        "policy.command.allow",
+        Policy,
+        JsonStringArray,
+        false,
+        "Allowed command patterns.",
+        "允许的命令模式数组。",
+        r#"[]"#,
+        set_policy_command_allow
+    ),
+    config_key!(
+        "policy.command.confirm",
+        Policy,
+        JsonStringArray,
+        false,
+        "Command patterns that require confirmation.",
+        "需要确认的命令模式数组。",
+        r#"[]"#,
+        set_policy_command_confirm
+    ),
+    config_key!(
+        "policy.command.deny",
+        Policy,
+        JsonStringArray,
+        false,
+        "Denied command patterns.",
+        "拒绝的命令模式数组。",
+        r#"[]"#,
+        set_policy_command_deny
+    ),
+    config_key!(
+        "policy.path.defaultAction",
+        Policy,
+        PathDefaultAction,
+        false,
+        "Default path policy action.",
+        "路径未匹配根目录时的默认动作。",
+        "deny",
+        set_policy_path_default_action
+    ),
+    config_key!(
+        "policy.path.readOnly",
+        Policy,
+        JsonPathArray,
+        false,
+        "Concrete read-only path roots.",
+        "具体的只读路径根目录。",
+        r#"["/usr"]"#,
+        set_policy_path_read_only
+    ),
+    config_key!(
+        "policy.path.write",
+        Policy,
+        JsonPathArray,
+        false,
+        "Concrete writable path roots.",
+        "具体的可写路径根目录。",
+        r#"["~/.agentic_gpt/workspace"]"#,
+        set_policy_path_write
+    ),
+    config_key!(
+        "policy.path.deny",
+        Policy,
+        JsonPathArray,
+        false,
+        "Concrete denied path roots.",
+        "具体的拒绝访问路径根目录。",
+        r#"[]"#,
+        set_policy_path_deny
+    ),
     config_key!(
         "policy.bubblewrap",
         Policy,
@@ -609,13 +793,76 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         r#"["skills.example.com"]"#,
         set_skills_allowed_hosts
     ),
-    config_key!("email.enabled", Email, Boolean, false, "Enable email synchronization while Room is enabled.", "启用邮件同步；同时需要启用 Room。", "false", set_email_enabled),
-    config_key!("email.account", Email, EmailAccount, true, "Account connection object or null; changes require restart. Password must be an env:/file: reference.", "账户连接 JSON 对象或 null；修改后重启生效。密码必须使用 env:/file: 引用。", "null", set_email_account),
-    config_key!("email.syncIntervalSeconds", Email, NonNegativeInteger, false, "Synchronization interval in seconds, from 10 through 86400.", "同步间隔秒数，范围 10 到 86400。", "60", set_email_sync_interval_seconds),
-    config_key!("email.retentionDays", Email, NonNegativeInteger, false, "Local content retention in days, from 1 through 36500.", "本地邮件内容保存天数，范围 1 到 36500。", "90", set_email_retention_days),
-    config_key!("email.maxStorageBytes", Email, NonNegativeInteger, false, "Local email storage limit in bytes, at least 1048576.", "本地邮件容量上限字节数，至少 1048576。", "2147483648", set_email_max_storage_bytes),
-    config_key!("email.sendPolicy", Email, PolicyAction, false, "Email sending policy: allow, confirm, or deny.", "发信策略：allow、confirm 或 deny。", "confirm", set_email_send_policy),
-    config_key!("email.trashPolicy", Email, PolicyAction, false, "Email trash policy: allow, confirm, or deny.", "移入垃圾箱策略：allow、confirm 或 deny。", "confirm", set_email_trash_policy),
+    config_key!(
+        "email.enabled",
+        Email,
+        Boolean,
+        false,
+        "Enable email synchronization while Room is enabled.",
+        "启用邮件同步；同时需要启用 Room。",
+        "false",
+        set_email_enabled
+    ),
+    config_key!(
+        "email.account",
+        Email,
+        EmailAccount,
+        true,
+        "Account connection object or null; changes require restart. Password must be an env:/file: reference.",
+        "账户连接 JSON 对象或 null；修改后重启生效。密码必须使用 env:/file: 引用。",
+        "null",
+        set_email_account
+    ),
+    config_key!(
+        "email.syncIntervalSeconds",
+        Email,
+        NonNegativeInteger,
+        false,
+        "Synchronization interval in seconds, from 10 through 86400.",
+        "同步间隔秒数，范围 10 到 86400。",
+        "60",
+        set_email_sync_interval_seconds
+    ),
+    config_key!(
+        "email.retentionDays",
+        Email,
+        NonNegativeInteger,
+        false,
+        "Local content retention in days, from 1 through 36500.",
+        "本地邮件内容保存天数，范围 1 到 36500。",
+        "90",
+        set_email_retention_days
+    ),
+    config_key!(
+        "email.maxStorageBytes",
+        Email,
+        NonNegativeInteger,
+        false,
+        "Local email storage limit in bytes, at least 1048576.",
+        "本地邮件容量上限字节数，至少 1048576。",
+        "2147483648",
+        set_email_max_storage_bytes
+    ),
+    config_key!(
+        "email.sendPolicy",
+        Email,
+        PolicyAction,
+        false,
+        "Email sending policy: allow, confirm, or deny.",
+        "发信策略：allow、confirm 或 deny。",
+        "confirm",
+        set_email_send_policy
+    ),
+    config_key!(
+        "email.trashPolicy",
+        Email,
+        PolicyAction,
+        false,
+        "Email trash policy: allow, confirm, or deny.",
+        "移入垃圾箱策略：allow、confirm 或 deny。",
+        "confirm",
+        set_email_trash_policy
+    ),
     config_key!(
         "room.repositoryRoot",
         Room,
@@ -896,6 +1143,9 @@ pub(crate) fn apply_config_key(config: &mut Config, key: &str, value: &str) -> R
     (spec.apply)(config, value)?;
     if spec.section == ConfigSection::Email {
         config.email.validate()?;
+    }
+    if key.starts_with("room.secret.") {
+        config.room.secret.validate()?;
     }
     if spec.section == ConfigSection::HttpMcp {
         config.validate_http_mcp()?;
@@ -1430,7 +1680,7 @@ fn set_tunnel_hub_reporting_detail(config: &mut Config, value: &str) -> Result<(
         _ => {
             return Err(anyhow!(
                 "tunnel hub reporting detail must be metadata or full"
-            ))
+            ));
         }
     };
     tunnel_config(config).hub_reporting.detail = detail;
@@ -1463,7 +1713,7 @@ fn set_internal_override(config: &mut Config, event_type: &str, value: &str) -> 
             _ => {
                 return Err(anyhow!(
                     "events.internalOverrides value must be low, medium, high, off, or null"
-                ))
+                ));
             }
         };
         events
@@ -1538,5 +1788,67 @@ fn set_email_send_policy(config: &mut Config, value: &str) -> Result<()> {
 fn set_email_trash_policy(config: &mut Config, value: &str) -> Result<()> {
     config.email.trash_policy =
         serde_json::from_value(serde_json::Value::String(value.to_string()))?;
+    Ok(())
+}
+
+fn set_room_secret_enabled(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.enabled = value.parse::<bool>()?;
+    Ok(())
+}
+
+fn set_room_secret_server_url(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.server_url = value.to_string();
+    Ok(())
+}
+
+fn set_room_secret_account(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.account = value.to_string();
+    Ok(())
+}
+
+fn set_room_secret_client_id(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.client_id = value.to_string();
+    Ok(())
+}
+
+fn set_room_secret_client_secret(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.client_secret = value.to_string();
+    Ok(())
+}
+
+fn set_room_secret_master_password(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.master_password = value.to_string();
+    Ok(())
+}
+
+fn set_room_secret_get_policy(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.get_policy = match value {
+        "allow" => config::SecretPolicy::Allow,
+        "confirm" => config::SecretPolicy::Confirm,
+        _ => return Err(anyhow!("room_secret_policy_invalid")),
+    };
+    Ok(())
+}
+
+fn set_room_secret_upsert_policy(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.upsert_policy = match value {
+        "allow" => config::SecretPolicy::Allow,
+        "confirm" => config::SecretPolicy::Confirm,
+        _ => return Err(anyhow!("room_secret_policy_invalid")),
+    };
+    Ok(())
+}
+
+fn set_room_secret_delete_policy(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.delete_policy = match value {
+        "allow" => config::SecretPolicy::Allow,
+        "confirm" => config::SecretPolicy::Confirm,
+        _ => return Err(anyhow!("room_secret_policy_invalid")),
+    };
+    Ok(())
+}
+
+fn set_room_secret_sync_wait_timeout_ms(config: &mut Config, value: &str) -> Result<()> {
+    config.room.secret.sync_wait_timeout_ms = value.parse::<u64>()?;
     Ok(())
 }

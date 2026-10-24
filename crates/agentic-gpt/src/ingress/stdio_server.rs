@@ -169,6 +169,9 @@ impl AgentMcpServer {
     async fn current_tools(&self) -> Vec<Tool> {
         let config = self.state.config.read().await;
         tool_descriptors(&config.toolsets)
+            .into_iter()
+            .filter(|tool| !tool.name.starts_with("room.secret.") || config.room.secret.enabled)
+            .collect()
     }
 
     async fn tool_is_available(&self, name: &str) -> bool {
@@ -177,6 +180,9 @@ impl AgentMcpServer {
         }
         if name == "privateevent.inject" {
             return self.ingress == RequestIngress::LocalUnix;
+        }
+        if name.starts_with("room.secret.") && !self.state.config.read().await.room.secret.enabled {
+            return false;
         }
         let Some(namespace) = tool_namespace(name) else {
             return false;
@@ -242,7 +248,9 @@ impl AgentMcpServer {
         let report_request_id = task_id("req");
         let started_at = Utc::now();
         let terminal_tracker = Arc::new(HumanTerminalTracker::default());
-        let reported_arguments = if name == "browser.repl" {
+        let reported_arguments = if name.starts_with("room.secret.") {
+            json!({"redacted": true})
+        } else if name == "browser.repl" {
             browser_report_arguments(&arguments)
         } else {
             arguments.clone()
@@ -376,7 +384,7 @@ impl AgentMcpServer {
                 "completed"
             },
             started_at,
-            if name == "browser.repl" {
+            if name == "browser.repl" || name.starts_with("room.secret.") {
                 None
             } else {
                 Some(value.clone())
@@ -973,6 +981,58 @@ impl AgentMcpServer {
                 .await
             }
             "skills.run" => self.dispatch_skill_run(arguments, terminal_tracker).await,
+            "room.secret.list" => {
+                let payload: agentic_gpt_protocol::RoomSecretListRequest =
+                    serde_json::from_value(arguments)
+                        .map_err(|_| anyhow::anyhow!("secret_invalid_parameters"))?;
+                dispatch(
+                    self,
+                    HubCommand::RoomSecretList {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
+            "room.secret.get" => {
+                let payload: agentic_gpt_protocol::RoomSecretGetRequest =
+                    serde_json::from_value(arguments)
+                        .map_err(|_| anyhow::anyhow!("secret_invalid_parameters"))?;
+                dispatch(
+                    self,
+                    HubCommand::RoomSecretGet {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
+            "room.secret.upsert" => {
+                let payload: agentic_gpt_protocol::RoomSecretUpsertRequest =
+                    serde_json::from_value(arguments)
+                        .map_err(|_| anyhow::anyhow!("secret_invalid_parameters"))?;
+                dispatch(
+                    self,
+                    HubCommand::RoomSecretUpsert {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
+            "room.secret.delete" => {
+                let payload: agentic_gpt_protocol::RoomSecretDeleteRequest =
+                    serde_json::from_value(arguments)
+                        .map_err(|_| anyhow::anyhow!("secret_invalid_parameters"))?;
+                dispatch(
+                    self,
+                    HubCommand::RoomSecretDelete {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
             "room.email.list" => {
                 let payload: agentic_gpt_protocol::RoomEmailListRequest = from_value(arguments)?;
                 dispatch(
@@ -1267,7 +1327,7 @@ impl AgentMcpServer {
             Err(error) => {
                 return Ok(json!({
                     "error": { "code": "skills_list_failed", "message": error.to_string() }
-                }))
+                }));
             }
         };
         let mut warnings = active.warnings.clone();

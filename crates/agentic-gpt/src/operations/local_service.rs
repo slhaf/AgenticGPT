@@ -372,6 +372,30 @@ async fn dispatch_inner(
         HubCommand::UserNotifyDeliver { payload, .. } => Ok(serde_json::to_value(
             notify::deliver_freedesktop_notification(payload).await,
         )?),
+        HubCommand::RoomSecretList { payload, .. } => {
+            Ok(
+                crate::secret::dispatch(&state, "room.secret.list", serde_json::to_value(payload)?)
+                    .await,
+            )
+        }
+        HubCommand::RoomSecretGet { payload, .. } => {
+            Ok(
+                crate::secret::dispatch(&state, "room.secret.get", serde_json::to_value(payload)?)
+                    .await,
+            )
+        }
+        HubCommand::RoomSecretUpsert { payload, .. } => Ok(crate::secret::dispatch(
+            &state,
+            "room.secret.upsert",
+            serde_json::to_value(payload)?,
+        )
+        .await),
+        HubCommand::RoomSecretDelete { payload, .. } => Ok(crate::secret::dispatch(
+            &state,
+            "room.secret.delete",
+            serde_json::to_value(payload)?,
+        )
+        .await),
         HubCommand::RoomEmailList { payload, .. } => {
             Ok(
                 crate::email::dispatch(&state, "room.email.list", serde_json::to_value(payload)?)

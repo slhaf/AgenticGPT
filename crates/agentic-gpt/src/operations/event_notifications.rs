@@ -495,6 +495,7 @@ mod tests {
             crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
         let state = AppState {
             email: crate::email::EmailService::open(&private_state).expect("email store"),
+            secret: crate::secret::SecretService::open(&private_state).expect("secret service"),
             config_path: root.join("config.json"),
             transport_agent_id: config.agent_id.clone(),
             config: Arc::new(tokio::sync::RwLock::new(config)),

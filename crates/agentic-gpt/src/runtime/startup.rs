@@ -70,12 +70,14 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
     state.skill_installs.recover(state.clone()).await?;
     crate::event_notifications::recover_event_notifications(&state).await?;
     tokio::spawn(watch_live_config(state.clone(), false, None));
+    let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
     let result = tokio::select! {
         result = hub::connect_loop(state) => result,
         result = wait_for_local_shutdown_signal() => result,
     };
     email.stop().await;
+    secret.shutdown().await;
     result
 }
 
@@ -136,6 +138,7 @@ pub(crate) async fn run_stdio_worker(
         http_config,
         http_shutdown.clone(),
     ));
+    let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
     let stdio = stdio_server::serve_stdio(state);
     tokio::pin!(stdio);
@@ -164,6 +167,7 @@ pub(crate) async fn run_stdio_worker(
         }
     };
     email.stop().await;
+    secret.shutdown().await;
     result
 }
 
@@ -219,6 +223,7 @@ pub(crate) fn build_app_state_with_private_state(
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
     let event_store = crate::event_store::EventStore::open(&private_state)?;
     let email = crate::email::EmailService::open(&private_state)?;
+    let secret = crate::secret::SecretService::open(&private_state)?;
     let process_history = process_history::ProcessHistoryStore::open(&private_state);
     if let Err(error) = process_history.recover_active(chrono::Utc::now()) {
         log_warn(format!("process history recovery failed: {error}"));
@@ -235,6 +240,7 @@ pub(crate) fn build_app_state_with_private_state(
         private_state,
         event_store,
         email,
+        secret,
         process_history,
         browser_runtime: browser_runtime_cell,
         runtime,
@@ -293,6 +299,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         listener.path().display()
     ));
     let hub_task = hub_enabled.then(|| tokio::spawn(hub::connect_loop(state.clone())));
+    let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
     let mut local_task = tokio::spawn(listener.serve(state));
     let result = tokio::select! {
@@ -311,6 +318,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         let _ = task.await;
     }
     email.stop().await;
+    secret.shutdown().await;
     result
 }
 

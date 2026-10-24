@@ -7,6 +7,7 @@ mod mcp;
 mod notification_tmux;
 mod process;
 mod room;
+mod secret;
 mod skill_bootstrap;
 
 pub use acquire_confirmation::*;
@@ -18,6 +19,7 @@ pub use mcp::*;
 pub use notification_tmux::*;
 pub use process::*;
 pub use room::*;
+pub use secret::*;
 pub use skill_bootstrap::*;
 
 #[cfg(test)]

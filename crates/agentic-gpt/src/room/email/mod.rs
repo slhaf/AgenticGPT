@@ -715,7 +715,7 @@ async fn send(
                 "email_send_outcome_persistence_failed",
                 &id,
                 "unknown",
-            ))
+            ));
         }
         Err(error) => return Ok(send_failure(error, &id, "unknown")),
     };

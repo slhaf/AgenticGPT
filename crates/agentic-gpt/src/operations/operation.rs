@@ -146,6 +146,10 @@ pub(crate) const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("mcp.list", ToolNamespace::Mcp),
     ("process.batch", ToolNamespace::Process),
     ("process.exec", ToolNamespace::Process),
+    ("room.secret.list", ToolNamespace::Room),
+    ("room.secret.get", ToolNamespace::Room),
+    ("room.secret.upsert", ToolNamespace::Room),
+    ("room.secret.delete", ToolNamespace::Room),
     ("room.email.list", ToolNamespace::Room),
     ("room.email.read", ToolNamespace::Room),
     ("room.email.search", ToolNamespace::Room),
@@ -184,7 +188,9 @@ pub(crate) fn tool_namespace(name: &str) -> Option<ToolNamespace> {
 pub(crate) fn tool_is_read_only(name: &str) -> bool {
     !matches!(
         name,
-        "process.exec"
+        "room.secret.upsert"
+            | "room.secret.delete"
+            | "process.exec"
             | "browser.acquire"
             | "browser.repl"
             | "browser.reset"
@@ -216,7 +222,9 @@ pub(crate) fn tool_is_read_only(name: &str) -> bool {
 pub(crate) fn tool_is_destructive(name: &str) -> bool {
     matches!(
         name,
-        "file.edit"
+        "room.secret.upsert"
+            | "room.secret.delete"
+            | "file.edit"
             | "browser.repl"
             | "browser.reset"
             | "browser.release"
@@ -243,7 +251,11 @@ pub(crate) fn tool_is_destructive(name: &str) -> bool {
 pub(crate) fn tool_is_open_world(name: &str) -> bool {
     matches!(
         name,
-        "process.exec"
+        "room.secret.list"
+            | "room.secret.get"
+            | "room.secret.upsert"
+            | "room.secret.delete"
+            | "process.exec"
             | "browser.repl"
             | "process.batch"
             | "tmux.sessions"
@@ -282,7 +294,11 @@ fn operation_namespace(operation: &str) -> Option<ToolNamespace> {
 fn is_current_room_operation(operation: &str) -> bool {
     matches!(
         operation,
-        "room.email.list"
+        "room.secret.list"
+            | "room.secret.get"
+            | "room.secret.upsert"
+            | "room.secret.delete"
+            | "room.email.list"
             | "room.email.read"
             | "room.email.search"
             | "room.email.attachment"
@@ -392,6 +408,10 @@ pub(crate) fn hub_command_name(command: &HubCommand) -> &'static str {
         HubCommand::McpCallTool { .. } => "mcp.callTool",
         HubCommand::McpBatch { .. } => "mcp.batch",
         HubCommand::UserNotifyDeliver { .. } => "user.notify.deliver",
+        HubCommand::RoomSecretList { .. } => "room.secret.list",
+        HubCommand::RoomSecretGet { .. } => "room.secret.get",
+        HubCommand::RoomSecretUpsert { .. } => "room.secret.upsert",
+        HubCommand::RoomSecretDelete { .. } => "room.secret.delete",
         HubCommand::RoomEmailList { .. } => "room.email.list",
         HubCommand::RoomEmailRead { .. } => "room.email.read",
         HubCommand::RoomEmailSearch { .. } => "room.email.search",

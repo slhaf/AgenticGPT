@@ -4,7 +4,7 @@
 
 确定性的 Agent 语料集和 `scripts/check_contract_parity.py` 是当前行为的运行时/schema 权威依据。本矩阵仅作说明：`scripts/evaluate_tool_contracts.py` 的形状预测探针不能证明 schema 有效，也不能证明请求会被派发。
 
-当前远程 Room 调用方应协调配对的 Hub 和 Agent 工件，并从 [`../openapi/hub.yaml`](../openapi/hub.yaml) 刷新导入的 schema。当前九项 Room 操作使用现有语义 Agent DTO 和 camelCase JSON 请求体：`room.diary.active`/`room.diary.read`、`room.notebook.recent`/`room.notebook.search`/`room.notebook.read`、`room.state.list`/`room.state.read`，以及 `room.maintenance.status`/`room.maintenance.submit`。空请求使用 `{}`；远程 Room 操作均不接受 `agentId`。`room.notebook.recent` 和 `room.notebook.search` 现在返回当前 Markdown 预览/结果，不再返回已退役的 passage 型 JSONL 格式。
+当前远程 Room 调用方应协调配对的 Hub 和 Agent 工件，并从 [`../openapi/hub.yaml`](../openapi/hub.yaml) 刷新导入的 schema。当前九项 Room 文档／维护操作使用现有语义 Agent DTO 和 camelCase JSON 请求体：`room.diary.active`/`room.diary.read`、`room.notebook.recent`/`room.notebook.search`/`room.notebook.read`、`room.state.list`/`room.state.read`，以及 `room.maintenance.status`/`room.maintenance.submit`。空请求使用 `{}`；远程 Room 操作均不接受 `agentId`。`room.notebook.recent` 和 `room.notebook.search` 现在返回当前 Markdown 预览/结果，不再返回已退役的 passage 型 JSONL 格式。
 
 ## Agent 准入与副作用边界（WP2）
 
@@ -71,7 +71,20 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `room.maintenance.status` | 检查 Room 仓库、脚手架、执行器、工作流、远端、同步和 slot 就绪状态；不修改内容。 | 空 JSON 对象。 | 状态、heads、缺失路径和五 slot 占用情况均有界。 | 只读；就绪状态的各个维度保持独立，失败会以类型化错误返回。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
 | `room.maintenance.submit` | 通过仓库所有者的执行器应用一至五项经过验证的 Room 维护请求。 | `items`，各项含唯一 `slot`/`payload`；可选 `mode` 和 `waitSeconds`。 | items 数量为 1–5；mode 为 `local` 或 `workflow`；wait 默认为 0 秒，上限为 30 秒。 | 分别报告准入、本地应用、语义提交和远端/工作流同步；操作具有破坏性，但限于仓库范围。等待超时不会取消维护操作，也没有单独的等待 API。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
 
-当前九个 Room 名称在本地 Agent MCP、Hub Full MCP 以及九个 `/v1/room/<namespace>/<action>` POST 路由上构成同一套语义契约。Hub 只选择已捕获的活动 Room 租约，并负责路由/回执，不拥有 Room 文件或内容。通用运行回执可能含有有界操作结果，但不是 Room 内容的权威来源。
+当前九个 Room 文档／维护名称在本地 Agent MCP、Hub Full MCP 以及九个 `/v1/room/<namespace>/<action>` POST 路由上构成同一套语义契约。Hub 只选择已捕获的活动 Room 租约，并负责路由/回执，不拥有 Room 文件或内容。通用运行回执可能含有有界操作结果，但不是 Room 内容的权威来源。
+
+## Room 密钥接口
+
+四项操作共用 Agent 本地 Vaultwarden 服务，要求 `room` 工具集与 `room.secret.enabled=true`。Standalone／Local 使用本地入口；Hub Full 经活动 Room 路由，不接收 `agentId`，HTTP 为 `/v1/room/secret/<action>` POST。Coordinator 隐藏并拒绝。配置和部署边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
+
+| 名称 | 用途与输入 | 结果与副作用 |
+| --- | --- | --- |
+| `room.secret.list` | 可选 `filter`、`field=site/account`；不读取密码或 seed。 | 仅返回账号组 `site/account`，按匹配质量和使用权重排序；无分页，超容量要求收紧过滤；不确认。 |
+| `room.secret.get` | `site`、`account`、`type=password/totp`。 | 返回密码或当前 TOTP；按 `getPolicy` 直接读取或严格确认；成功后更新本地权重。 |
+| `room.secret.upsert` | `site/account`，至少提供非空 `password/totp` 之一；不接受 null 清空。 | 成功同步后精确定位并创建或合并更新；按 `upsertPolicy` 严格确认，返回 created/updated，不回显内容。 |
+| `room.secret.delete` | `site/account`。 | 成功同步后将唯一匹配的完整 Login item 移入回收站；按 `deletePolicy` 严格确认，返回 deleted。 |
+
+查询同步等待默认 3000 毫秒，范围 0–30000；预算耗尽不取消同步。仅明确网络失败或预算耗尽允许读取可用本地库，并附加 `stale:true/lastSyncedAt`；过期未命中为 `secret_presence_unknown`。写入不按查询预算降级。密码、seed、验证码、session 和含密钥的请求／结果不进入普通工具上报、Hub 持久回执或 Agent 重放账本；未知写入结果不自动重放。
 
 ## Room 邮件接口
 

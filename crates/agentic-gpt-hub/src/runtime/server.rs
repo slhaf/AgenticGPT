@@ -93,6 +93,16 @@ pub(crate) async fn serve(
             "/v1/notify/android/register",
             post(notify::android_notify_register),
         )
+        .route("/v1/room/secret/list", post(room::http::room_secret_list))
+        .route("/v1/room/secret/get", post(room::http::room_secret_get))
+        .route(
+            "/v1/room/secret/upsert",
+            post(room::http::room_secret_upsert),
+        )
+        .route(
+            "/v1/room/secret/delete",
+            post(room::http::room_secret_delete),
+        )
         .route("/v1/room/email/list", post(room::http::room_email_list))
         .route("/v1/room/email/read", post(room::http::room_email_read))
         .route("/v1/room/email/search", post(room::http::room_email_search))

@@ -140,6 +140,9 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                             };
                             if let Ok(message) = serde_json::from_value::<HubMessage>(value.clone()) {
                                 match message {
+                                    HubMessage::SecretCommand { dispatch_id, command } => {
+                                        handle_secret_command(&state, &tx, dispatch_id, *command);
+                                    }
                                     HubMessage::HeartbeatAck { .. } => {
                                         last_heartbeat_ack = Instant::now();
                                     }
@@ -157,8 +160,8 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                             }
                             let envelope: HubCommandEnvelope = match serde_json::from_value(value) {
                                 Ok(envelope) => envelope,
-                                Err(error) => {
-                                    log_warn(format!("ignored unknown reliable hub envelope: {error}"));
+                                Err(_) => {
+                                    log_warn("ignored invalid reliable hub envelope".to_string());
                                     continue;
                                 }
                             };
@@ -421,6 +424,9 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
 async fn handle_reporting_inbound(state: &AppState, text: &str) {
     if let Ok(message) = serde_json::from_str::<HubMessage>(text) {
         match message {
+            HubMessage::SecretCommand { .. } => {
+                log_warn("ignored execution command on reporting-only connection".to_string());
+            }
             HubMessage::HeartbeatAck { .. } => {}
             HubMessage::ConfirmationResponse {
                 request_id,
@@ -690,6 +696,7 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
     let agent_secret = config.hub.agent_secret.clone();
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
+            let secret_response = matches!(message, AgentMessage::SecretResponse { .. });
             let mut delay = Duration::from_millis(250);
             loop {
                 let response = post_client
@@ -711,6 +718,10 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
                         log_warn(format!("sse post failed; status={}", response.status()));
                     }
                     Err(error) => log_warn(format!("sse post failed: {error}")),
+                }
+                if secret_response {
+                    // Secret results have no replay contract, including in-memory POST retries.
+                    break;
                 }
                 sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(10));
@@ -813,6 +824,12 @@ pub(crate) fn classify_sse_post_status(status: reqwest::StatusCode) -> SsePostSt
 async fn handle_sse_data(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>, data: String) {
     if let Ok(message) = serde_json::from_str::<HubMessage>(&data) {
         match message {
+            HubMessage::SecretCommand {
+                dispatch_id,
+                command,
+            } => {
+                handle_secret_command(state, tx, dispatch_id, *command);
+            }
             HubMessage::HeartbeatAck { .. } => {}
             HubMessage::ConfirmationResponse {
                 request_id,
@@ -832,12 +849,45 @@ async fn handle_sse_data(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessa
     }
     let envelope = match serde_json::from_str::<HubCommandEnvelope>(&data) {
         Ok(envelope) => envelope,
-        Err(error) => {
-            log_warn(format!("ignored invalid sse envelope: {error}"));
+        Err(_) => {
+            log_warn("ignored invalid sse envelope".to_string());
             return;
         }
     };
     handle_reliable_envelope(state, tx, envelope).await;
+}
+
+fn handle_secret_command(
+    state: &AppState,
+    tx: &mpsc::UnboundedSender<AgentMessage>,
+    dispatch_id: String,
+    command: HubCommand,
+) {
+    let state = state.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let request_id = command.request_id().to_owned();
+        let mut data = if command.is_room_secret() {
+            let operation = hub_command_name(&command);
+            let context = crate::operation::RequestContext::new(
+                crate::operation::RequestIngress::Hub,
+                operation,
+            );
+            crate::local_service::dispatch(state.clone(), command, context, None).await
+                .unwrap_or_else(|_| serde_json::json!({"error":{"code":"secret_operation_failed","message":"Secret operation failed"}}))
+        } else {
+            serde_json::json!({"error":{"code":"secret_command_required","message":"Secret command required"}})
+        };
+        if let Ok(panel) = state.event_store.panel() {
+            let _ = crate::operation_result::attach_event_panel(&mut data, &panel);
+        }
+        // Use the originating connection. A reconnect must not deliver an old secret response.
+        let _ = tx.send(AgentMessage::SecretResponse {
+            dispatch_id,
+            request_id,
+            data,
+        });
+    });
 }
 
 async fn handle_reliable_envelope(
@@ -845,6 +895,10 @@ async fn handle_reliable_envelope(
     tx: &mpsc::UnboundedSender<AgentMessage>,
     envelope: HubCommandEnvelope,
 ) {
+    if envelope.command.is_room_secret() {
+        log_warn("rejected persistent secret command".to_string());
+        return;
+    }
     let agent_id = state.config.read().await.agent_id.clone();
     let outcome = match transport_ledger::accept(&envelope, &agent_id) {
         Ok(outcome) => outcome,
@@ -1412,6 +1466,7 @@ mod reporting_tests {
             crate::event_store::EventStore::open(&private_state).expect("event store");
         AppState {
             email: crate::email::EmailService::open(&private_state).expect("email store"),
+            secret: crate::secret::SecretService::open(&private_state).expect("secret service"),
             transport_agent_id: config.agent_id.clone(),
             config_path: root.join("agent.json"),
             config: Arc::new(tokio::sync::RwLock::new(config)),
@@ -1525,7 +1580,7 @@ mod reporting_tests {
                             _ => {
                                 return Err(anyhow!(
                                     "auxiliary connection sent reporting or execution output"
-                                ))
+                                ));
                             }
                         }
                     }

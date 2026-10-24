@@ -190,6 +190,26 @@ pub(super) async fn call_app_tool(
                 .user_notify_send(Parameters(decode_args(arguments)?))
                 .await
         }
+        "room.secret.list" => {
+            server
+                .room_secret_list(Parameters(decode_secret_args(arguments)?))
+                .await
+        }
+        "room.secret.get" => {
+            server
+                .room_secret_get(Parameters(decode_secret_args(arguments)?))
+                .await
+        }
+        "room.secret.upsert" => {
+            server
+                .room_secret_upsert(Parameters(decode_secret_args(arguments)?))
+                .await
+        }
+        "room.secret.delete" => {
+            server
+                .room_secret_delete(Parameters(decode_secret_args(arguments)?))
+                .await
+        }
         "room.email.list" => {
             server
                 .room_email_list(Parameters(decode_args(arguments)?))
@@ -319,10 +339,15 @@ pub(super) async fn call_app_tool(
             return Err(ErrorData::invalid_params(
                 format!("Unknown tool: {name}"),
                 None,
-            ))
+            ));
         }
     }?;
     serde_json::to_value(result).map_err(|error| ErrorData::internal_error(error.to_string(), None))
+}
+
+fn decode_secret_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, ErrorData> {
+    serde_json::from_value(value)
+        .map_err(|_| ErrorData::invalid_params("Invalid secret tool arguments", None))
 }
 
 fn decode_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, ErrorData> {

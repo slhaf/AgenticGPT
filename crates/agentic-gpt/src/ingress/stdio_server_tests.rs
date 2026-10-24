@@ -3382,6 +3382,7 @@ fn test_state(profile: CapabilityProfile) -> AppState {
     let event_store = crate::event_store::EventStore::open(&private_state).expect("event store");
     AppState {
         email: crate::email::EmailService::open(&private_state).expect("email store"),
+        secret: crate::secret::SecretService::open(&private_state).expect("secret service"),
         config_path: PathBuf::from("stdio-test-config.json"),
         transport_agent_id: config.agent_id.clone(),
         config: Arc::new(RwLock::new(config)),

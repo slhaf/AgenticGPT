@@ -343,7 +343,7 @@ fn notebook_paths(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let notebook_root = room_repository::repository_path(root, "Notebook")?;
     match fs::symlink_metadata(&notebook_root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), Vec::new()))
+            return Ok((Vec::new(), Vec::new()));
         }
         Err(error) => return Err(error.into()),
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -534,6 +534,7 @@ mod tests {
         let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
         AppState {
             email: crate::email::EmailService::open(&private_state).expect("email store"),
+            secret: crate::secret::SecretService::open(&private_state).expect("secret service"),
             config_path: PathBuf::from("room-reads-test-config.json"),
             transport_agent_id: config.agent_id.clone(),
             config: Arc::new(RwLock::new(config)),

@@ -116,6 +116,8 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "skills.install" => &["id", "source"],
         "skills.install.get" | "skills.install.cancel" => &["installId"],
         "skills.run" => &["id", "path"],
+        "room.secret.get" => &["site", "account", "type"],
+        "room.secret.upsert" | "room.secret.delete" => &["site", "account"],
         "room.email.read" => &["id"],
         "room.email.search" => &["query"],
         "room.email.attachment" => &["id", "attachmentId"],
@@ -139,6 +141,47 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
     let number = |description: &str| json!({"type": "integer", "description": description});
     let boolean = |description: &str| json!({"type": "boolean", "description": description});
     let strings = |description: &str| json!({"type": "array", "items": {"type": "string"}, "description": description});
+
+    if name.starts_with("room.secret.") {
+        if name == "room.secret.list" {
+            add(
+                "filter",
+                string("可选字面包含过滤，不区分大小写；省略时返回全部账号元数据。"),
+            );
+            add(
+                "field",
+                json!({"type":"string","enum":["site","account"],"description":"过滤字段；省略时同时匹配 site/account。"}),
+            );
+        } else {
+            add(
+                "site",
+                string("站点稳定名称，裁剪首尾空白后不区分大小写精确定位。"),
+            );
+            add(
+                "account",
+                string("账号标识，裁剪首尾空白后区分大小写精确定位。"),
+            );
+        }
+        if name == "room.secret.get" {
+            add(
+                "type",
+                json!({"type":"string","enum":["password","totp"],"description":"只返回密码或当前 TOTP 验证码；不返回 seed。"}),
+            );
+        }
+        if name == "room.secret.upsert" {
+            add(
+                "password",
+                string(
+                    "本次写入的密码；与 totp 至少提供一个，省略保留原值，不接受 null 或空字符串清空。",
+                ),
+            );
+            add(
+                "totp",
+                string("Base32 seed 或 otpauth://totp URI；不接受 null 或空字符串清空。"),
+            );
+        }
+        return properties;
+    }
     if matches!(
         name,
         "tmux.listPanes"
@@ -346,7 +389,9 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         "event.list" => {
             add(
                 "agentId",
-                string("当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。"),
+                string(
+                    "当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。",
+                ),
             );
             add(
                 "status",
@@ -377,13 +422,17 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             );
             add(
                 "cursor",
-                string("上一页 event.list 返回的 nextCursor；原样续页并保持同一 Agent、status、severity，limit 可调整。非法或筛选不匹配的游标会报错。"),
+                string(
+                    "上一页 event.list 返回的 nextCursor；原样续页并保持同一 Agent、status、severity，limit 可调整。非法或筛选不匹配的游标会报错。",
+                ),
             );
         }
         "event.get" => {
             add(
                 "agentId",
-                string("当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。"),
+                string(
+                    "当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。",
+                ),
             );
             add(
                 "eventId",
@@ -393,7 +442,9 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         "event.mark" => {
             add(
                 "agentId",
-                string("当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。"),
+                string(
+                    "当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。",
+                ),
             );
             add(
                 "eventIds",
@@ -430,7 +481,12 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             string("可选 server ID；省略列服务器，提供时列工具。"),
         ),
         "process.exec" => {
-            add("command", string("普通非登录/非交互 Bash 原样执行；pipefail 生效，不设 set -e。cwd 在初始化后应用。策略只分析提交内容；不检查可信初始化文件中的 PATH/函数，非运行时安全边界。"));
+            add(
+                "command",
+                string(
+                    "普通非登录/非交互 Bash 原样执行；pipefail 生效，不设 set -e。cwd 在初始化后应用。策略只分析提交内容；不检查可信初始化文件中的 PATH/函数，非运行时安全边界。",
+                ),
+            );
             add(
                 "group",
                 json!({
@@ -498,7 +554,9 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             );
             add(
                 "cursor",
-                string("auto 视图的非消费式输出续读游标；原样复用 output.nextCursor，仅用于 kind=command 或 skill。status 或 kind=mcp 不接受输出 cursor。"),
+                string(
+                    "auto 视图的非消费式输出续读游标；原样复用 output.nextCursor，仅用于 kind=command 或 skill。status 或 kind=mcp 不接受输出 cursor。",
+                ),
             );
             add(
                 "maxBytes",
@@ -730,7 +788,9 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         "skills.search" => {
             add(
                 "query",
-                string("非空、不区分大小写；匹配 ID、SKILL.md 正文/frontmatter、tags，不扫描其他包文件。"),
+                string(
+                    "非空、不区分大小写；匹配 ID、SKILL.md 正文/frontmatter、tags，不扫描其他包文件。",
+                ),
             );
             add(
                 "limit",
@@ -858,7 +918,12 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 "download",
                 json!({"type":"boolean","default":false,"description":"保存原始附件到 workspace；提供 path 时强制为 true。"}),
             );
-            add("path", string("可选 workspace-relative 目标路径，禁止绝对路径、逃逸和覆盖；提供即采用下载模式。"));
+            add(
+                "path",
+                string(
+                    "可选 workspace-relative 目标路径，禁止绝对路径、逃逸和覆盖；提供即采用下载模式。",
+                ),
+            );
         }
         "room.email.send" => {
             add(
@@ -977,7 +1042,9 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
         "room.state.read" => {
             add(
                 "entity",
-                string("State/entities/ 下单个文件名 stem（不含 .md）；不可含路径分隔符，先用 room.state.list 发现。"),
+                string(
+                    "State/entities/ 下单个文件名 stem（不含 .md）；不可含路径分隔符，先用 room.state.list 发现。",
+                ),
             );
         }
         _ => {}
@@ -1055,6 +1122,10 @@ fn tool_description(name: &str) -> String {
         "skills.run" => "运行已激活、可写本地 skill 的 scripts/ 下可执行文件，作为受管理进程返回统一紧凑观察；后续用 process.read 查看或 process.cancel 请求取消。脚本可产生真实副作用；inactive、路径或可执行性错误会拒绝。".to_string(),
         "room.maintenance.status" => "检查 Room 仓库、schema/scaffold、本地执行器、配置模式、workflow/remote/sync heads 和五个槽位占用；返回各 readiness/status 字段。只读；仓库不可检查时返回 error。".to_string(),
         "room.maintenance.submit" => "按槽位 payload 更新 Room 日记、Notebook 或实体；local 写入目标文档并提交本地 commit，workflow 提交请求并可能等待消费。返回 mode/state/localApplied/sync/revision；不会覆盖已占用槽，仓库未就绪、重复槽或 payload 错误会拒绝。".to_string(),
+        "room.secret.list" => "发现共享密码库账号组；仅返回 site/account，按匹配质量和使用权重排序，无确认。查询前尝试同步，等待预算耗尽不取消同步；旧本地结果附 stale/lastSyncedAt，不分页不截断，超容量返回 secret_result_too_large，需收紧 filter。".to_string(),
+        "room.secret.get" => "按 site/account 和 type=password|totp 获取密码或当前验证码，不返回 seed。遵守 room.secret.getPolicy 的 allow/严格 confirm；旧数据未命中返回 secret_presence_unknown，成功同步后才返回 secret_not_found。明文仅交付，不持久化或重放，响应丢失需重新调用授权。".to_string(),
+        "room.secret.upsert" => "按 site/account 创建或更新账号组；password/totp 至少一个，省略保留，不接受空值清除。写前必须同步成功，遵守 upsertPolicy；重复身份报 ambiguous_secret。返回 created 或 updated；secret_write_outcome_unknown 表示写入成败未知，不自动重放，再次调用前需核对。".to_string(),
+        "room.secret.delete" => "按 site/account 精确将整个账号组移入 Vaultwarden 回收站，不永久删除。必须同步成功并遵守 deletePolicy；返回 deleted。重复身份拒绝，secret_write_outcome_unknown 表示成败未知，不自动重放。".to_string(),
         "room.email.list" => "从活动 Room 的本地邮件索引列出当前 INBOX，按接收时间从新到旧；limit 为 1–100、默认 20。filter 的 receivedAfter 含边界、receivedBefore 不含边界；cursor 必须沿用原 filter，可改变 limit。返回 items、hasMore、可选 nextCursor 和 sync 同步状态；不会触发手动同步或标为已读，不接受 agentId。".to_string(),
         "room.email.read" => "按稳定邮件 id 读取活动 Room 邮件；view 默认 text，返回规范化正文和 plain/markdown 格式；image 返回不联网的图片分片，imageWithRemote 仅额外下载邮件引用的远程图片，不加载远程 CSS，不执行脚本或提交表单。返回邮件详情、附件清单、hasMore 和可选 nextCursor；续读保持 id/view，不会标为已读。sent/unknown 等本地发送记录可回看；内容已清理或不存在时返回明确 error。不接受 agentId。".to_string(),
         "room.email.search" => "在活动 Room 已保存的收件及发送记录（含 unknown）中做不区分大小写的字面子串搜索。未传 id 时 field 默认 all，匹配主题、发件人与正文；传 id 时无论 field 如何均规范化为 body。返回 items(ref/text)、truncated 和 sync；邮箱命中的 ref 为邮件 id，正文命中的 ref 可直接作为 read(view=text) 的 cursor。不接受 agentId，不修改邮件。".to_string(),

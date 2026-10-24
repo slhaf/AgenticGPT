@@ -25,6 +25,9 @@ use super::room::{
     RoomMaintenanceSubmitRequest, RoomNotebookReadRequest, RoomNotebookRecentRequest,
     RoomNotebookSearchRequest, RoomStateListRequest, RoomStateReadRequest,
 };
+use super::secret::{
+    RoomSecretDeleteRequest, RoomSecretGetRequest, RoomSecretListRequest, RoomSecretUpsertRequest,
+};
 use super::skill_bootstrap::{
     BootstrapReadRequest, SkillActivationRequest, SkillInstallCancelRequest,
     SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest, SkillRunRequest,
@@ -177,6 +180,26 @@ pub enum HubCommand {
         request_id: String,
         payload: RoomEmailOperateRequest,
     },
+    #[serde(rename = "room.secret.list")]
+    RoomSecretList {
+        request_id: String,
+        payload: RoomSecretListRequest,
+    },
+    #[serde(rename = "room.secret.get")]
+    RoomSecretGet {
+        request_id: String,
+        payload: RoomSecretGetRequest,
+    },
+    #[serde(rename = "room.secret.upsert")]
+    RoomSecretUpsert {
+        request_id: String,
+        payload: RoomSecretUpsertRequest,
+    },
+    #[serde(rename = "room.secret.delete")]
+    RoomSecretDelete {
+        request_id: String,
+        payload: RoomSecretDeleteRequest,
+    },
     #[serde(rename = "room.diary.active")]
     RoomDiaryActive {
         request_id: String,
@@ -283,6 +306,16 @@ pub enum HubCommand {
 }
 
 impl HubCommand {
+    pub fn is_room_secret(&self) -> bool {
+        matches!(
+            self,
+            Self::RoomSecretList { .. }
+                | Self::RoomSecretGet { .. }
+                | Self::RoomSecretUpsert { .. }
+                | Self::RoomSecretDelete { .. }
+        )
+    }
+
     pub fn request_id(&self) -> &str {
         match self {
             Self::Exec { request_id, .. }
@@ -313,6 +346,10 @@ impl HubCommand {
             | Self::RoomEmailAttachment { request_id, .. }
             | Self::RoomEmailSend { request_id, .. }
             | Self::RoomEmailOperate { request_id, .. }
+            | Self::RoomSecretList { request_id, .. }
+            | Self::RoomSecretGet { request_id, .. }
+            | Self::RoomSecretUpsert { request_id, .. }
+            | Self::RoomSecretDelete { request_id, .. }
             | Self::RoomDiaryActive { request_id, .. }
             | Self::RoomDiaryRead { request_id, .. }
             | Self::RoomNotebookRecent { request_id, .. }
@@ -350,9 +387,16 @@ pub struct HubCommandEnvelope {
     pub command: HubCommand,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentMessage {
+    SecretResponse {
+        #[serde(rename = "dispatchId")]
+        dispatch_id: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        data: serde_json::Value,
+    },
     Hello {
         role: AgentRole,
         #[serde(rename = "bootGeneration")]
@@ -425,6 +469,11 @@ pub enum AgentMessage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HubMessage {
+    SecretCommand {
+        #[serde(rename = "dispatchId")]
+        dispatch_id: String,
+        command: Box<HubCommand>,
+    },
     HeartbeatAck {
         #[serde(rename = "sentAt")]
         sent_at: DateTime<Utc>,
@@ -437,4 +486,28 @@ pub enum HubMessage {
         decision: ConfirmationDecision,
         reason: String,
     },
+}
+
+impl std::fmt::Debug for AgentMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SecretResponse {
+                dispatch_id,
+                request_id,
+                ..
+            } => formatter
+                .debug_struct("SecretResponse")
+                .field("dispatch_id", dispatch_id)
+                .field("request_id", request_id)
+                .field("data", &"[REDACTED]")
+                .finish(),
+            message => formatter
+                .debug_struct("AgentMessage")
+                .field(
+                    "message",
+                    &serde_json::to_value(message).map_err(|_| std::fmt::Error)?,
+                )
+                .finish(),
+        }
+    }
 }

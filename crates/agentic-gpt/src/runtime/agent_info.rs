@@ -151,6 +151,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             },
             "localMcp": local_mcp,
         },
+        "secret": state.secret.info(),
         "mcp": {
             "configRevision": mcp_config_revision,
             "configuredServerCount": config.mcp_servers.len(),
@@ -281,7 +282,7 @@ fn config_health(state: &AppState, effective: &Config) -> ConfigHealth {
                 restart_required_fields: Vec::new(),
                 error_code: Some("config_missing".to_string()),
                 issues: vec!["config_missing"],
-            }
+            };
         }
         Err(_) => {
             return ConfigHealth {
@@ -291,7 +292,7 @@ fn config_health(state: &AppState, effective: &Config) -> ConfigHealth {
                 restart_required_fields: Vec::new(),
                 error_code: Some("config_unreadable".to_string()),
                 issues: vec!["config_unreadable"],
-            }
+            };
         }
     };
     let modified_at = metadata
@@ -383,6 +384,7 @@ mod tests {
         let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
         AppState {
             email: crate::email::EmailService::open(&private_state).expect("email store"),
+            secret: crate::secret::SecretService::open(&private_state).expect("secret service"),
             config_path: std::env::temp_dir().join("agent-info-missing-config.json"),
             transport_agent_id: config.agent_id.clone(),
             config: Arc::new(RwLock::new(config)),

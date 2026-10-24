@@ -152,6 +152,10 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
                 | "tmux.closeSession"
                 | "skills.install"
                 | "skills.run"
+                | "room.secret.list"
+                | "room.secret.get"
+                | "room.secret.upsert"
+                | "room.secret.delete"
                 | "room.email.read"
                 | "room.email.send"
                 | "room.email.operate"
@@ -167,6 +171,8 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
                 | "tmux.closeSession"
                 | "mcp.batch"
                 | "mcp.callTool"
+                | "room.secret.upsert"
+                | "room.secret.delete"
                 | "room.maintenance.submit"
                 | "room.email.operate"
                 | "skills.deactivate"
@@ -204,6 +210,8 @@ fn tool_is_read_only(name: &str) -> bool {
             | "mcp.batch"
             | "mcp.callTool"
             | "user.notify.send"
+            | "room.secret.upsert"
+            | "room.secret.delete"
             | "room.maintenance.submit"
             | "room.email.send"
             | "room.email.operate"
@@ -250,7 +258,7 @@ fn parse_process_state(value: Option<&str>) -> Result<Option<ProcessState>, Erro
             return Err(mcp_invalid_params(
                 "process_state_invalid",
                 "unknown process state",
-            ))
+            ));
         }
     };
     Ok(Some(state))
@@ -1092,6 +1100,98 @@ impl AgenticMcpServer {
                 }))
             })
             .unwrap_or_else(|error| json!({ "error": { "code": "serialization_error", "message": error.to_string() } }));
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.secret.list",
+        description = "列出活动 Room 密码库的站点与账号，适合发现登录身份。可选 filter 不区分大小写包含匹配；field=site/account 仅在有 filter 时生效，省略时匹配两者。返回 items（仅 site/account），过期本地结果附 stale=true 与可用的 lastSyncedAt；结果过大返回 secret_result_too_large，需收紧过滤。不披露密码或验证码，不请求确认，不接受 agentId。"
+    )]
+    async fn room_secret_list(
+        &self,
+        params: Parameters<agentic_gpt_protocol::RoomSecretListRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomSecretList {
+                request_id: random_id("req"),
+                payload: params.0,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_secret_list_timeout")
+        });
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.secret.get",
+        description = "按 site/account 精确读取活动 Room 密钥，type=password 返回密码，type=totp 返回当前验证码，不返回 seed；account 区分大小写。返回 value，过期本地读取附 stale=true 与可用的 lastSyncedAt。遵守 getPolicy，confirm 须明确批准；重复身份返回 ambiguous_secret，过期未命中返回 secret_presence_unknown。响应不持久化或重放，丢失需重新调用并重新授权；不接受 agentId。"
+    )]
+    async fn room_secret_get(
+        &self,
+        params: Parameters<agentic_gpt_protocol::RoomSecretGetRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomSecretGet {
+                request_id: random_id("req"),
+                payload: params.0,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_secret_get_timeout")
+        });
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.secret.upsert",
+        description = "在活动 Room 密码库创建或更新一个 site/account 身份。password/totp 至少提供一个，省略字段保留原值，空串或 null 无效；totp 接受受支持的 Base32 seed 或 otpauth TOTP URI。同步成功后写入，遵守 upsertPolicy，确认只展示身份与字段类型。成功仅返回 created=true 或 updated=true；重复身份报 ambiguous_secret，写入成败不明报 secret_write_outcome_unknown，不能自动重试。不接受 agentId。"
+    )]
+    async fn room_secret_upsert(
+        &self,
+        params: Parameters<agentic_gpt_protocol::RoomSecretUpsertRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomSecretUpsert {
+                request_id: random_id("req"),
+                payload: params.0,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_secret_upsert_timeout")
+        });
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.secret.delete",
+        description = "将活动 Room 密码库中 site/account 精确匹配的整个账号条目移入回收站，包含密码与 TOTP，不永久删除。同步成功后按 deletePolicy 执行或严格确认；重复身份不删除，成功返回 deleted=true，写入成败不明返回 secret_write_outcome_unknown，不能自动重试。不接受 agentId。"
+    )]
+    async fn room_secret_delete(
+        &self,
+        params: Parameters<agentic_gpt_protocol::RoomSecretDeleteRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomSecretDelete {
+                request_id: random_id("req"),
+                payload: params.0,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_secret_delete_timeout")
+        });
         Ok(result_from_value(value))
     }
 

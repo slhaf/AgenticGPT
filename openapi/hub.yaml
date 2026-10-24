@@ -914,6 +914,182 @@ paths:
           $ref: "#/components/responses/NotFound"
         "502":
           $ref: "#/components/responses/BadGateway"
+  /v1/room/secret/list:
+    post:
+      operationId: roomSecretList
+      description: 列出活动 Room 密码库的站点与账号；filter 执行不区分大小写的包含过滤，field 仅在提供 filter 时生效。结果仅含 site/account，不分页、不截断；容量超限返回 secret_result_too_large，需收紧过滤。不请求确认，不接受 agentId。
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomSecretListRequest"
+      responses:
+        "200":
+          description: 活动 Room 的密钥结果；沿用 events 封套。过期读取使用 stale=true 标记，正常结果省略新鲜程度字段。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomSecretListResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: 请求 JSON 无效；错误消息不回显密钥或原始载荷，尚未派发至 Room。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentErrorResponse"
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
+  /v1/room/secret/get:
+    post:
+      operationId: roomSecretGet
+      description: 按 site/account 精确读取密码或当前 TOTP 验证码；account 区分大小写，type 为 password 或 totp，不返回 seed。遵守 getPolicy，confirm 须明确批准；过期未命中返回 secret_presence_unknown。明文响应不持久化或重放，丢失后须重新调用并按当前策略授权。不接受 agentId。
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomSecretGetRequest"
+      responses:
+        "200":
+          description: 活动 Room 的密钥结果；沿用 events 封套。过期读取使用 stale=true 标记，正常结果省略新鲜程度字段。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomSecretGetResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: 请求 JSON 无效；错误消息不回显密钥或原始载荷，尚未派发至 Room。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentErrorResponse"
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
+  /v1/room/secret/upsert:
+    post:
+      operationId: roomSecretUpsert
+      description: 同步成功后按 site/account 创建或更新密码库条目，遵守 upsertPolicy。password/totp 至少一个，省略字段保留，空串或 null 无效；totp 支持 Base32 seed 或受支持的 otpauth TOTP URI。返回 created=true 或 updated=true；写入成败不明返回 secret_write_outcome_unknown，不能自动重试。不接受 agentId。
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomSecretUpsertRequest"
+      responses:
+        "200":
+          description: 活动 Room 的密钥结果；沿用 events 封套。过期读取使用 stale=true 标记，正常结果省略新鲜程度字段。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomSecretUpsertResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: 请求 JSON 无效；错误消息不回显密钥或原始载荷，尚未派发至 Room。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentErrorResponse"
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
+  /v1/room/secret/delete:
+    post:
+      operationId: roomSecretDelete
+      description: 同步成功后将按 site/account 精确定位的整个账号条目移入回收站，遵守 deletePolicy，不永久删除。重复身份返回 ambiguous_secret，不执行删除；成功返回 deleted=true，写入成败不明返回 secret_write_outcome_unknown，不能自动重试。不接受 agentId。
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomSecretDeleteRequest"
+      responses:
+        "200":
+          description: 活动 Room 的密钥结果；沿用 events 封套。过期读取使用 stale=true 标记，正常结果省略新鲜程度字段。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomSecretDeleteResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: 请求 JSON 无效；错误消息不回显密钥或原始载荷，尚未派发至 Room。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentErrorResponse"
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
   /v1/room/email/list:
     post:
       operationId: roomEmailList
@@ -2962,6 +3138,147 @@ components:
           description: Bounded Markdown content when available.
         issue:
           $ref: "#/components/schemas/RoomDiaryLayerIssue"
+    RoomSecretListField:
+      type: string
+      enum: [site, account]
+    RoomSecretType:
+      type: string
+      enum: [password, totp]
+    RoomSecretListRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        filter:
+          type: string
+          description: 不区分大小写的包含过滤；省略时按使用权重列出全部账号组。
+        field:
+          $ref: "#/components/schemas/RoomSecretListField"
+          description: 仅在提供 filter 时生效；省略时同时匹配 site/account。
+    RoomSecretGetRequest:
+      type: object
+      additionalProperties: false
+      required: [site, account, type]
+      properties:
+        site:
+          type: string
+          minLength: 1
+        account:
+          type: string
+          minLength: 1
+          description: 精确定位，区分大小写。
+        type:
+          $ref: "#/components/schemas/RoomSecretType"
+    RoomSecretUpsertRequest:
+      type: object
+      additionalProperties: false
+      required: [site, account]
+      anyOf:
+        - required: [password]
+        - required: [totp]
+      properties:
+        site:
+          type: string
+          minLength: 1
+        account:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: 省略时保留原值；不接受 null 或空字符串。
+        totp:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: Base32 seed 或受支持的 otpauth TOTP URI；省略时保留原值，不接受 null 或空字符串。
+    RoomSecretDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [site, account]
+      properties:
+        site:
+          type: string
+          minLength: 1
+        account:
+          type: string
+          minLength: 1
+    RoomSecretListItem:
+      type: object
+      additionalProperties: false
+      required: [site, account]
+      properties:
+        site:
+          type: string
+        account:
+          type: string
+    RoomSecretListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoomSecretListItem"
+        stale:
+          type: boolean
+          const: true
+          description: 仅使用过期本地密码库读取时出现。
+        lastSyncedAt:
+          type: string
+          format: date-time
+          description: 过期读取时来自 bw 的最后成功同步时间；无法取得时省略。
+        events:
+          $ref: "#/components/schemas/EventPanel"
+    RoomSecretGetResponse:
+      type: object
+      additionalProperties: false
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: 密码或本次读取生成的 TOTP 验证码，不保证稍后仍有效。
+        stale:
+          type: boolean
+          const: true
+          description: 仅使用过期本地密码库读取时出现。
+        lastSyncedAt:
+          type: string
+          format: date-time
+          description: 过期读取时来自 bw 的最后成功同步时间；无法取得时省略。
+        events:
+          $ref: "#/components/schemas/EventPanel"
+    RoomSecretUpsertResponse:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [created]
+          properties:
+            created:
+              type: boolean
+              const: true
+            events:
+              $ref: "#/components/schemas/EventPanel"
+        - type: object
+          additionalProperties: false
+          required: [updated]
+          properties:
+            updated:
+              type: boolean
+              const: true
+            events:
+              $ref: "#/components/schemas/EventPanel"
+    RoomSecretDeleteResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted]
+      properties:
+        deleted:
+          type: boolean
+          const: true
+        events:
+          $ref: "#/components/schemas/EventPanel"
     RoomEmailFilter:
       {"type": "object", "additionalProperties": false, "properties": {"unread": {"type": "boolean"}, "receivedAfter": {"type": "string", "format": "date-time", "description": "接收时间下界，包含该时刻。"}, "receivedBefore": {"type": "string", "format": "date-time", "description": "接收时间上界，不包含该时刻。"}}}
     RoomEmailListRequest:

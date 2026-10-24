@@ -267,6 +267,9 @@ pub(crate) fn latest_records() -> Result<HashMap<String, LedgerRecord>> {
 }
 
 pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<AcceptOutcome> {
+    if envelope.command.is_room_secret() {
+        return Err(anyhow!("secret_persistence_forbidden"));
+    }
     validate_identity(
         &envelope.run_id,
         &envelope.request_id,

@@ -210,6 +210,12 @@ impl ReviewItem {
                 &["allow", "confirm", "deny"]
             }
             Some(SetupField::EmailEnabled) => &["false", "true"],
+            Some(
+                SetupField::RoomSecretGetPolicy
+                | SetupField::RoomSecretUpsertPolicy
+                | SetupField::RoomSecretDeletePolicy,
+            ) => &["allow", "confirm"],
+            Some(SetupField::RoomSecretEnabled) => &["false", "true"],
             Some(SetupField::RoomMaintenanceMode) => &["local", "workflow"],
             Some(
                 SetupField::ProvisionTunnelSecret
@@ -857,43 +863,73 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
             ),
         ],
         OptionalSectionDraft::Room(RoomDraft {
+            secret,
             timezone,
             diary_boundary_hour,
             repository_root,
             maintenance_mode,
             maintenance_auto_push,
-        }) => vec![
-            ReviewItem::field(
-                SetupField::RoomTimezone,
-                "room_timezone",
-                timezone,
-                ReviewEditorKind::Text,
-            ),
-            ReviewItem::field(
-                SetupField::DiaryBoundaryHour,
-                "diary_boundary_hour",
-                diary_boundary_hour,
-                ReviewEditorKind::Text,
-            ),
-            ReviewItem::field(
-                SetupField::RepositoryRoot,
-                "repository_root",
-                repository_root,
-                ReviewEditorKind::Text,
-            ),
-            ReviewItem::field(
-                SetupField::RoomMaintenanceMode,
-                "room_maintenance_mode",
-                maintenance_mode,
-                ReviewEditorKind::Choice,
-            ),
-            ReviewItem::field(
-                SetupField::RoomMaintenanceAutoPush,
-                "room_maintenance_auto_push",
-                maintenance_auto_push.to_string(),
-                ReviewEditorKind::Choice,
-            ),
-        ],
+        }) => {
+            let mut items = vec![
+                ReviewItem::field(
+                    SetupField::RoomTimezone,
+                    "room_timezone",
+                    timezone,
+                    ReviewEditorKind::Text,
+                ),
+                ReviewItem::field(
+                    SetupField::DiaryBoundaryHour,
+                    "diary_boundary_hour",
+                    diary_boundary_hour,
+                    ReviewEditorKind::Text,
+                ),
+                ReviewItem::field(
+                    SetupField::RepositoryRoot,
+                    "repository_root",
+                    repository_root,
+                    ReviewEditorKind::Text,
+                ),
+                ReviewItem::field(
+                    SetupField::RoomMaintenanceMode,
+                    "room_maintenance_mode",
+                    maintenance_mode,
+                    ReviewEditorKind::Choice,
+                ),
+                ReviewItem::field(
+                    SetupField::RoomMaintenanceAutoPush,
+                    "room_maintenance_auto_push",
+                    maintenance_auto_push.to_string(),
+                    ReviewEditorKind::Choice,
+                ),
+            ];
+            for field in super::model::RoomSecretDraft::FIELDS {
+                let sensitive = field.room_secret_is_sensitive();
+                let editor = if sensitive {
+                    ReviewEditorKind::Secret
+                } else if matches!(
+                    field,
+                    SetupField::RoomSecretEnabled
+                        | SetupField::RoomSecretGetPolicy
+                        | SetupField::RoomSecretUpsertPolicy
+                        | SetupField::RoomSecretDeletePolicy
+                ) {
+                    ReviewEditorKind::Choice
+                } else {
+                    ReviewEditorKind::Text
+                };
+                items.push(ReviewItem::field(
+                    *field,
+                    field.room_secret_key().expect("Room Secret field"),
+                    if sensitive {
+                        "[REDACTED]".to_string()
+                    } else {
+                        secret.value(*field)
+                    },
+                    editor,
+                ));
+            }
+            items
+        }
         OptionalSectionDraft::TunnelClient(TunnelClientDraft {
             version,
             cache_dir,

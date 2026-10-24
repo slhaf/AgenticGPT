@@ -20,7 +20,7 @@ Agent 通过一个范围狭窄的内部准入边界处理请求，不引入新�
 - 通知投递继续检查通知能力。
 
 其余普通操作先检查工具集，再检查既有能力条件。Skills 仍要求运行时 Skills 能力，Hub 的
-Room 语义读取及维护仍要求 Room Profile，Bootstrap 不追加该 Profile 条件。如果开关与能力
+Room 语义读取、维护、邮件与密钥操作仍要求 Room Profile，Bootstrap 不追加该 Profile 条件。如果开关与能力
 同时不满足，普通操作先返回工具集拒绝。共享操作层普通工具集的错误码为
 `toolset_required`，Room 为 `room_toolset_required`；本地 MCP 的调用时可用性过滤仍保留
 自己的协议错误封套。
@@ -114,6 +114,7 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 - `POST /v1/room/diary/active` 和 `POST /v1/room/diary/read`：通过捕获的活动 Room 租约读取当前或一个经过验证的 Diary 层。请求分别使用 `RoomDiaryActiveRequest` 或 `RoomDiaryReadRequest`；响应分别为 `RoomDiaryActiveResponse` 或 `RoomDiaryReadResponse`。
 - `POST /v1/room/notebook/recent`、`POST /v1/room/notebook/search` 和 `POST /v1/room/notebook/read`：读取有界的当前 Markdown 预览、搜索当前 Markdown，或读取一份经过验证的 Notebook 文档。`recent` 和 `search` 使用 `RoomNotebookResultsResponse`；`read` 使用 `RoomNotebookReadResponse`。
 - `POST /v1/room/state/list` 和 `POST /v1/room/state/read`：列出或读取有界的 `State/entities` Markdown 文档，分别使用 `RoomStateListResponse` 或 `RoomStateReadResponse`。
+- `POST /v1/room/secret/list`、`get`、`upsert` 和 `delete`：通过活动 Room Agent 查询账号组、读取密码／当前 TOTP、创建或更新、移入回收站。请求不接收 `agentId`，并要求 Agent 的 `room.secret.enabled=true`；敏感内容不走持久回执／重放路径，见下方[Room 密钥](#room-密钥)。
 - `POST /v1/room/maintenance/status` 和 `POST /v1/room/maintenance/submit`：检查由仓库所有者负责的就绪状态，或提交明确的语义维护请求。响应分别为 `RoomMaintenanceStatusResponse` 和 `RoomMaintenanceSubmitResponse`；submit 使用现有 local/workflow 模式及有界等待契约。
 
 Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirmation` 对象：
@@ -137,7 +138,7 @@ Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirm
 - 需要确认的文件修改返回 `file_confirmation_unavailable`，不会应用文件变更；确认拒绝仍使用
   `file_confirmation_denied`。
 
-这九个 Room 端点在 JSON 请求体中使用当前的 camelCase Agent 请求/响应 DTO。
+上述九个 Room 文档／维护端点在 JSON 请求体中使用当前的 camelCase Agent 请求/响应 DTO。
 空请求 DTO 仍须传入 `{}`；没有端点接受 `agentId` 选择器。它们解析并捕获活动
 Room 租约：Room 不存在时返回 `room_not_active`（404），租约不一致/已替换时返回
 `room_state_conflict`（409），Hub 派发错误按上述原因返回 500/502/503/504。Agent 输入错误返回 400，资源缺失和冲突分别返回 404/409，内部读取、写入或维护失败返回 500。Full MCP 以当前描述符公布相同的九个名称；
@@ -184,7 +185,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 ### 当前 Room 边界与协调请求投影
 
-当前 Agent 语义 Room 接口面是上述九项远程操作的权威来源。Hub Full 通过捕获的活动 Room 租约转发这些操作；它不会读取仓库、拥有 Room 文件、解释 Git 状态，也不会创建第二份内容存储。通用 Hub 运行回执可能为状态/迟到结果检查保留有界操作结果，但该回执不是 Room 内容的权威来源。
+当前 Agent 文档／维护 Room 接口面是上述九项远程操作的权威来源。Hub Full 通过捕获的活动 Room 租约转发这些操作；它不会读取仓库、拥有 Room 文件、解释 Git 状态，也不会创建第二份内容存储。通用 Hub 运行回执可能为状态/迟到结果检查保留有界操作结果，但该回执不是 Room 内容的权威来源。
 
 读取范围属于当前契约：
 
@@ -207,6 +208,18 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 4. 在移除旧调用前验证实时活动 Room 路径。
 
 历史发布/迁移记录仍是历史记录，不是当前错误或兼容性契约。
+
+## Room 密钥
+
+`room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete` 由同一 Agent 本地服务执行。Standalone／Local 要求 `room` 工具集与 `room.secret.enabled=true`；Hub Full 使用活动 Room 租约，对应 `POST /v1/room/secret/<action>`，请求不含 `agentId`。Coordinator 隐藏并拒绝这些工具。Secret 子开关的修改需要重启，运行中工具集关闭则按现有实时准入生效。
+
+`list` 只返回 `site/account`，可按 `site` 或 `account` 过滤；`get` 必须指定 `site/account/type`，`type` 为 `password` 或 `totp`，后者返回当前验证码；`upsert` 至少提供非空 `password/totp` 之一，省略字段保留原值；`delete` 将整个账号组移入回收站。相同身份重复时返回 `ambiguous_secret`，不猜测或批量修改。
+
+每次请求触发或复用进行中的同步。查询默认等待 3000 毫秒；明确网络故障或预算耗尽时，可读的本地库结果带 `stale:true` 与来自 `bw` 的 `lastSyncedAt`，无同步记录时为 `null`。过期数据未命中返回 `secret_presence_unknown`；认证、TLS、解锁、数据及无法归类的失败不降级。写操作必须观察同步成功。`confirm` 策略要求明确批准，不能因确认不可用或全局命令策略关闭而继续。
+
+四项操作的普通工具 reporting 仅保留脱敏状态，不保存请求和结果正文；Hub 持久运行回执与 Agent 重放账本不保存这些操作，不能通过 run 查询取回密码或旧验证码。响应丢失后重新调用 `get`，按当时策略重新授权；写入返回 `secret_write_outcome_unknown` 时不得盲目重发。各入口保留现有错误与 `events` 封套；同步终态另产生一条 `low` 事件。`agent.info.secret.sync` 只观察 `status` 和 `lastTriggeredAt`，不主动同步或返回密码库内容。
+
+配置、请求示例、固定 `bw` 版本及实际部署验证边界见[Room 密钥使用指南](room-secret.zh-CN.md)；HTTP schema 以 [OpenAPI](../openapi/hub.yaml) 为准。
 
 ## Room 邮件
 
