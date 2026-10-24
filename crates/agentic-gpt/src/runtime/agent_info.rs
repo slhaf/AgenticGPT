@@ -356,6 +356,12 @@ fn live_subset(config: &Config) -> Value {
         "toolsets": config.toolsets,
         "httpMcp": config.http_mcp,
         "shell": config.shell,
+        "roomSecret": {
+            "getPolicy": config.room.secret.get_policy,
+            "upsertPolicy": config.room.secret.upsert_policy,
+            "deletePolicy": config.room.secret.delete_policy,
+            "syncWaitTimeoutMs": config.room.secret.sync_wait_timeout_ms,
+        },
     })
 }
 

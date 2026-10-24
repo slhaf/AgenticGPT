@@ -25,7 +25,7 @@ agentic-gpt config set room.secret.enabled true
 
 也可在 `agentic-gpt config init` 的 Room 页填写上述字段，再在 Review 编辑和提交。配置显示、Review、JSON 预览和 Debug 隐藏服务地址、账号与凭据引用。完整默认值和长度要求见[Room 密钥配置](configuration.zh-CN.md#room-密钥配置)。
 
-整个 `room.secret` 修改后需要重启 Agent，包括启停、后端账号、策略与等待预算。重启前继续使用原配置。`room` 工具集使用既有实时准入：关闭它会拒绝后续全部 Room 操作。Secret 子开关只控制四项密钥操作；关闭时不会影响其他 Room 工具，也不能通过直接调用已知工具名绕过。
+`room.secret.getPolicy`、`upsertPolicy`、`deletePolicy` 与 `syncWaitTimeoutMs` 支持热更新，配置重载后用于新请求。已接纳的请求保留原策略和等待预算；调整预算不会取消正在运行的同步。启停、服务地址、后端账号和凭据引用修改后仍需重启 Agent，重启前继续使用原配置。`room` 工具集使用既有实时准入：关闭它会拒绝后续全部 Room 操作。Secret 子开关只控制四项密钥操作；关闭时不会影响其他 Room 工具，也不能通过直接调用已知工具名绕过。
 
 Agent 本地 MCP 在 Secret 关闭时隐藏四个工具。Hub Full MCP 沿用固定工具列表，未启用时实际调用返回错误。Standalone／Local 从本地 MCP 入口调用；Hub Full 路由到活动 Room Agent，HTTP 使用 `POST /v1/room/secret/list`、`get`、`upsert`、`delete`，请求均不含 `agentId`。Coordinator 不提供这些操作。
 

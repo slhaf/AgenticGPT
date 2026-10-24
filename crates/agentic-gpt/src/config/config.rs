@@ -1650,6 +1650,10 @@ impl Config {
 }
 
 pub(crate) fn restart_required_fields(effective: &Config, disk: &Config) -> Vec<String> {
+    let mut restart_room = disk.room.clone();
+    restart_room
+        .secret
+        .apply_live_settings(&effective.room.secret);
     let pairs = [
         ("mode", effective.mode != disk.mode),
         ("profile", effective.profile != disk.profile),
@@ -1693,7 +1697,7 @@ pub(crate) fn restart_required_fields(effective: &Config, disk: &Config) -> Vec<
         ),
         (
             "room",
-            serde_json::json!(effective.room) != serde_json::json!(disk.room),
+            serde_json::json!(effective.room) != serde_json::json!(restart_room),
         ),
         (
             "email.account",

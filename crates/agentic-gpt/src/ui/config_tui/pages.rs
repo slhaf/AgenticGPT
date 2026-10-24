@@ -1571,8 +1571,8 @@ fn render_optional_form(
             );
             lines.push(Line::raw(t(
                 language,
-                "Room changes require restart.",
-                "Room 配置修改后需重启。",
+                "Room changes require restart, except secret policies and sync wait budget.",
+                "Room 配置修改后需重启，密钥策略和同步等待预算支持热更新。",
             )));
             push_boolean_field(
                 &mut lines,
@@ -3377,7 +3377,7 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::Room => &[
                     "Set Room timezone, diary boundary, repository, maintenance and Secret settings.",
-                    "All Room changes require restart. Secret credentials use env:NAME or file:PATH references.",
+                    "Secret policies and sync wait budget support hot reload; other Room settings require restart. Credentials use env:NAME or file:PATH references.",
                     "The repository defaults to <workspace>/room; maintenance is local with auto-push off.",
                     "Only available when the Room toolset namespace is enabled.",
                 ],
@@ -3454,7 +3454,7 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::Room => &[
                     "设置 Room 的时区、日记日界线、仓库、维护行为和密钥服务。",
-                    "所有 Room 配置修改后均需重启；密钥凭据使用 env:NAME 或 file:PATH 引用。",
+                    "密钥策略和同步等待预算支持热更新；其余 Room 设置需重启。凭据使用 env:NAME 或 file:PATH 引用。",
                     "仓库默认使用 <workspace>/room；维护默认为 local 且关闭自动推送。",
                     "仅在启用 Room 工具集命名空间时可用。",
                 ],
@@ -3602,34 +3602,34 @@ fn optional_form_inspector_body(
                 SetupField::RoomSecretEnabled => &[
                     "Enable Room Secret on the active Room toolset.",
                     "Configure the server, account and all three credential references first.",
-                    "All Room changes require restart.",
+                    "Changes to this setting require restart.",
                 ],
                 SetupField::RoomSecretServerUrl => &[
                     "Vaultwarden HTTP(S) server URL, without credentials, query or fragment.",
-                    "All Room changes require restart.",
+                    "Changes to this setting require restart.",
                 ],
                 SetupField::RoomSecretAccount => &[
                     "Dedicated Vaultwarden account used to verify the logged-in identity.",
-                    "All Room changes require restart.",
+                    "Changes to this setting require restart.",
                 ],
                 SetupField::RoomSecretClientId
                 | SetupField::RoomSecretClientSecret
                 | SetupField::RoomSecretMasterPassword => &[
                     "Use env:NAME or file:PATH; plaintext is rejected.",
                     "File paths support ~ expansion. The reference is masked in Review.",
-                    "All Room changes require restart.",
+                    "Changes to this setting require restart.",
                 ],
                 SetupField::RoomSecretGetPolicy
                 | SetupField::RoomSecretUpsertPolicy
                 | SetupField::RoomSecretDeletePolicy => &[
                     "allow executes directly; confirm requires explicit approval.",
                     "Rejection, timeout and unavailable confirmation never disclose or modify secrets.",
-                    "All Room changes require restart.",
+                    "Hot reload applies to new requests; admitted requests retain their policy.",
                 ],
                 SetupField::RoomSecretSyncWaitTimeoutMs => &[
                     "Query sync wait budget: 0 through 30000 milliseconds; default 3000.",
                     "Zero reads without waiting. Budget expiry does not cancel synchronization.",
-                    "All Room changes require restart.",
+                    "Hot reload applies to new requests; existing waits retain their budget.",
                 ],
                 SetupField::RoomTimezone => &[
                     "Timezone used to assign Room diary and Notebook dates.",
@@ -3827,34 +3827,34 @@ fn optional_form_inspector_body(
                 SetupField::RoomSecretEnabled => &[
                     "在已启用的 Room 工具集中开启密钥服务。",
                     "请先填写服务地址、账号和三个凭据引用。",
-                    "所有 Room 配置修改后均需重启。",
+                    "此设置修改后需重启。",
                 ],
                 SetupField::RoomSecretServerUrl => &[
                     "Vaultwarden HTTP(S) 服务地址，不含凭据、查询参数或片段。",
-                    "所有 Room 配置修改后均需重启。",
+                    "此设置修改后需重启。",
                 ],
                 SetupField::RoomSecretAccount => &[
                     "用于核对登录身份的 Vaultwarden 专用账号。",
-                    "所有 Room 配置修改后均需重启。",
+                    "此设置修改后需重启。",
                 ],
                 SetupField::RoomSecretClientId
                 | SetupField::RoomSecretClientSecret
                 | SetupField::RoomSecretMasterPassword => &[
                     "仅接受 env:NAME 或 file:PATH 引用，不接受明文。",
                     "文件路径支持 ~ 展开；Review 隐藏引用内容。",
-                    "所有 Room 配置修改后均需重启。",
+                    "此设置修改后需重启。",
                 ],
                 SetupField::RoomSecretGetPolicy
                 | SetupField::RoomSecretUpsertPolicy
                 | SetupField::RoomSecretDeletePolicy => &[
                     "allow 直接执行；confirm 要求明确批准。",
                     "拒绝、超时或确认不可用时，不披露或修改密钥。",
-                    "所有 Room 配置修改后均需重启。",
+                    "热更新后用于新请求；已接纳请求保留原策略。",
                 ],
                 SetupField::RoomSecretSyncWaitTimeoutMs => &[
                     "查询等待同步的预算：0 到 30000 毫秒，默认 3000。",
                     "0 表示不等待；预算耗尽不会取消同步。",
-                    "所有 Room 配置修改后均需重启。",
+                    "热更新后用于新请求；已有等待保留原预算。",
                 ],
                 SetupField::RoomTimezone => &[
                     "Room 日记和 Notebook 日期归属使用的时区。",

@@ -145,6 +145,102 @@ else:sys.exit(2)
 "#;
 
 #[tokio::test]
+async fn secret_disk_reload_updates_policy_and_wait_without_switching_backend() {
+    // Tiers ④/⑤: protect disclosure/write authorization and waiting behavior
+    // through disk reload and the native subprocess owner, including a pending
+    // backend change. Helper tests cannot detect an omitted reload consumer.
+    let fixture = Fixture::new();
+    let result = AssertUnwindSafe(async {
+        {
+            let mut live = fixture.state.config.write().await;
+            live.mode = crate::config::RuntimeMode::Local;
+            live.profile = crate::config::WorkerProfile::Room;
+        }
+        let first = fixture.call("room.secret.list", json!({})).await;
+        assert_eq!(first["stale"], true);
+
+        let mut candidate = fixture.state.config.read().await.clone();
+        candidate.room.secret.get_policy = SecretPolicy::Confirm;
+        candidate.room.secret.upsert_policy = SecretPolicy::Confirm;
+        candidate.room.secret.delete_policy = SecretPolicy::Confirm;
+        candidate.room.secret.sync_wait_timeout_ms = 5000;
+        std::fs::write(
+            &fixture.state.config_path,
+            serde_json::to_vec(&candidate).unwrap(),
+        )
+        .unwrap();
+        let pending = crate::agent_info::collect(&fixture.state).await;
+        assert_eq!(pending["config"]["liveSubsetMatchesDisk"], false);
+        assert_eq!(pending["config"]["restartRequiredFields"], json!([]));
+        crate::startup::reload_live_config_once(&fixture.state)
+            .await
+            .unwrap();
+        let health = crate::agent_info::collect(&fixture.state).await;
+        assert_eq!(health["config"]["liveSubsetMatchesDisk"], true);
+        assert_eq!(health["config"]["restartRequiredFields"], json!([]));
+
+        let waiting = fixture.call("room.secret.list", json!({}));
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+                .await
+                .is_err()
+        );
+        fixture.complete_sync().await;
+        let listed = waiting.await;
+        assert_eq!(listed["items"][0]["account"], "Alice");
+        assert!(listed.get("stale").is_none());
+
+        for (operation, args) in [
+            (
+                "room.secret.get",
+                json!({"site":"Example","account":"Alice","type":"password"}),
+            ),
+            (
+                "room.secret.upsert",
+                json!({"site":"Example","account":"Alice","password":"new-test-value"}),
+            ),
+            (
+                "room.secret.delete",
+                json!({"site":"Example","account":"Alice"}),
+            ),
+        ] {
+            let denied = fixture.call(operation, args).await;
+            assert_eq!(denied["error"]["code"], "secret_confirmation_unavailable");
+            assert!(!denied.to_string().contains("old-test-value"));
+        }
+
+        candidate.room.secret.server_url = "https://other-vault.example.invalid".into();
+        candidate.room.secret.account = "other@example.invalid".into();
+        candidate.room.secret.get_policy = SecretPolicy::Allow;
+        std::fs::write(
+            &fixture.state.config_path,
+            serde_json::to_vec(&candidate).unwrap(),
+        )
+        .unwrap();
+        crate::startup::reload_live_config_once(&fixture.state)
+            .await
+            .unwrap();
+        let disclosed = fixture
+            .call(
+                "room.secret.get",
+                json!({"site":"Example","account":"Alice","type":"password"}),
+            )
+            .await;
+        assert_eq!(disclosed["value"], "old-test-value");
+        let health = crate::agent_info::collect(&fixture.state).await;
+        assert_eq!(health["config"]["liveSubsetMatchesDisk"], true);
+        assert_eq!(health["config"]["restartRequiredFields"], json!(["room"]));
+    })
+    .catch_unwind()
+    .await;
+    fixture.cleanup().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
 async fn secret_queries_share_sync_preserve_budget_and_fail_closed_confirmation() {
     let fixture = Fixture::new();
     let result = AssertUnwindSafe(async {

@@ -460,6 +460,7 @@ pub(crate) fn apply_live_config_subset(
     live.toolsets = candidate.toolsets;
     live.events = candidate.events;
     live.http_mcp = candidate.http_mcp;
+    live.room.secret.apply_live_settings(&candidate.room.secret);
     let account = live.email.account.take();
     live.email = candidate.email;
     live.email.account = account;

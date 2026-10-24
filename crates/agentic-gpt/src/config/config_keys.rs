@@ -287,8 +287,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Room,
         SecretPolicy,
         false,
-        "Secret retrieval policy; allow or confirm. Requires restart.",
-        "密钥读取策略：allow 或 confirm；修改后需重启。",
+        "Secret retrieval policy; allow or confirm. Hot reload applies to new requests.",
+        "密钥读取策略：allow 或 confirm；热更新后用于新请求。",
         "allow",
         set_room_secret_get_policy
     ),
@@ -297,8 +297,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Room,
         SecretPolicy,
         false,
-        "Secret creation/update policy; allow or confirm. Requires restart.",
-        "密钥创建与更新策略：allow 或 confirm；修改后需重启。",
+        "Secret creation/update policy; allow or confirm. Hot reload applies to new requests.",
+        "密钥创建与更新策略：allow 或 confirm；热更新后用于新请求。",
         "confirm",
         set_room_secret_upsert_policy
     ),
@@ -307,8 +307,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Room,
         SecretPolicy,
         false,
-        "Secret deletion policy; allow or confirm. Requires restart.",
-        "密钥删除策略：allow 或 confirm；修改后需重启。",
+        "Secret deletion policy; allow or confirm. Hot reload applies to new requests.",
+        "密钥删除策略：allow 或 confirm；热更新后用于新请求。",
         "confirm",
         set_room_secret_delete_policy
     ),
@@ -317,8 +317,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Room,
         NonNegativeInteger,
         false,
-        "Query sync wait in milliseconds, 0..30000; restart required. Zero does not wait.",
-        "查询等待同步的毫秒数，0..30000；修改后需重启，0 表示不等待。",
+        "Query sync wait in milliseconds, 0..30000; hot reload applies to new requests. Zero does not wait.",
+        "查询等待同步的毫秒数，0..30000；热更新后用于新请求，0 表示不等待。",
         "3000",
         set_room_secret_sync_wait_timeout_ms
     ),

@@ -795,7 +795,7 @@ JavaScript 不属于受管理 Process 的 bubblewrap 范围。
 
 CLI 支持上述全部键，TUI 的 Room 页和 Review 提供对应编辑入口。`config show`、JSON 预览、Review 和 Debug 隐藏服务地址、账号及三个凭据引用；`agent.info` 的配置摘要不包含这些内容。引用在使用时按现有 secret reference 机制解析，文件引用支持 `~` 展开。
 
-`getPolicy=confirm`、`upsertPolicy=confirm` 或 `deletePolicy=confirm` 均要求明确批准；拒绝、超时或确认不可用时不披露或修改密钥，不受 `policy.enabled=false` 绕过。`list` 不请求确认。整个 `room.secret` 沿用 Room 的重启生效边界，磁盘修改不代表运行中能力已经切换。
+`getPolicy=confirm`、`upsertPolicy=confirm` 或 `deletePolicy=confirm` 均要求明确批准；拒绝、超时或确认不可用时不披露或修改密钥，不受 `policy.enabled=false` 绕过。`list` 不请求确认。`room.secret.getPolicy`、`upsertPolicy`、`deletePolicy` 与 `syncWaitTimeoutMs` 支持热更新，配置重载后用于新请求；已接纳请求保留原策略和等待预算，正在运行的同步不受影响。其余 `room.secret` 设置仍需重启，磁盘修改不代表运行中后端或启停状态已经切换。
 
 ## Room 邮件配置
 
@@ -901,7 +901,8 @@ live subset。无效候选会保留上一份有效状态；候选修改需要重
 | `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |
 | `email.account` | 需要重启；运行中保持原账户连接配置 |
 | `email.enabled`、`syncIntervalSeconds`、`retentionDays`、`maxStorageBytes`、`sendPolicy`、`trashPolicy` | 热加载；后续同步/请求采用新值，已接纳操作保留原策略 |
-| `room.*` 仓库、时区、日界线、maintenance 和 secret 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |
+| `room.secret.getPolicy`、`upsertPolicy`、`deletePolicy`、`syncWaitTimeoutMs` | 热加载；新请求采用新值，已接纳请求保留原策略和等待预算，不取消同步 |
+| 其余 `room.*`：仓库、时区、日界线、maintenance 和 secret 后端／启停设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |
 | `tunnel.*` client identity/source/secret | 需要重启 |
 | `hub`、reporting mode | 相关连接需要重启 |
 | Skill install 并发等 startup-owned 设置 | 需要重启 |

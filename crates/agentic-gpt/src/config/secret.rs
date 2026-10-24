@@ -62,6 +62,13 @@ impl fmt::Debug for RoomSecretConfig {
 }
 
 impl RoomSecretConfig {
+    pub(crate) fn apply_live_settings(&mut self, candidate: &Self) {
+        self.get_policy = candidate.get_policy;
+        self.upsert_policy = candidate.upsert_policy;
+        self.delete_policy = candidate.delete_policy;
+        self.sync_wait_timeout_ms = candidate.sync_wait_timeout_ms;
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if self.sync_wait_timeout_ms > 30_000 {
             return Err(anyhow!("room_secret_sync_wait_timeout_ms_invalid"));
