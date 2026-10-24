@@ -23,7 +23,7 @@ const DEFAULT_HUB_TRANSPORT: &str = "websocket";
 const DEFAULT_AGENT_ID: &str = "laptop";
 const DEFAULT_WORKSPACE_ROOT: &str = "~/.agentic_gpt/workspace";
 const DEFAULT_TUNNEL_CACHE_DIR: &str = "~/.agentic_gpt/cache/tunnel-client";
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SetupField {
     Mode,
     Profile,
@@ -65,6 +65,21 @@ pub(crate) enum SetupField {
     McpServerEndpoint,
     McpServerBearerAuth,
     McpServerBearerToken,
+    EmailEnabled,
+    EmailImapHost,
+    EmailImapPort,
+    EmailImapTls,
+    EmailSmtpHost,
+    EmailSmtpPort,
+    EmailSmtpTls,
+    EmailUsername,
+    EmailPassword,
+    EmailFrom,
+    EmailSyncInterval,
+    EmailRetentionDays,
+    EmailMaxStorageBytes,
+    EmailSendPolicy,
+    EmailTrashPolicy,
     RoomTimezone,
     DiaryBoundaryHour,
     RepositoryRoot,
@@ -302,6 +317,140 @@ pub(crate) struct McpServersDraft {
     pub(crate) servers: Vec<McpServerDraft>,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct EmailDraft {
+    pub(crate) values: BTreeMap<SetupField, String>,
+}
+impl fmt::Debug for EmailDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut values = self.values.clone();
+        values.insert(SetupField::EmailPassword, "[REDACTED]".to_string());
+        formatter
+            .debug_struct("EmailDraft")
+            .field("values", &values)
+            .finish()
+    }
+}
+impl EmailDraft {
+    const FIELDS: &'static [(SetupField, &'static str, &'static str)] = &[
+        (SetupField::EmailEnabled, "/enabled", ""),
+        (SetupField::EmailImapHost, "/account/imapHost", ""),
+        (SetupField::EmailImapPort, "/account/imapPort", "993"),
+        (SetupField::EmailImapTls, "/account/imapTls", "implicit"),
+        (SetupField::EmailSmtpHost, "/account/smtpHost", ""),
+        (SetupField::EmailSmtpPort, "/account/smtpPort", "465"),
+        (SetupField::EmailSmtpTls, "/account/smtpTls", "implicit"),
+        (SetupField::EmailUsername, "/account/username", ""),
+        (SetupField::EmailPassword, "/account/password", ""),
+        (SetupField::EmailFrom, "/account/from", ""),
+        (SetupField::EmailSyncInterval, "/syncIntervalSeconds", ""),
+        (SetupField::EmailRetentionDays, "/retentionDays", ""),
+        (SetupField::EmailMaxStorageBytes, "/maxStorageBytes", ""),
+        (SetupField::EmailSendPolicy, "/sendPolicy", ""),
+        (SetupField::EmailTrashPolicy, "/trashPolicy", ""),
+    ];
+    pub(crate) fn from_config(config: &crate::config::EmailConfig) -> Self {
+        let value = serde_json::to_value(config).expect("email configuration serializes");
+        let values = Self::FIELDS
+            .iter()
+            .map(|(field, pointer, fallback)| {
+                let text = value
+                    .pointer(pointer)
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| value.to_string())
+                    })
+                    .unwrap_or_else(|| (*fallback).to_string());
+                (*field, text)
+            })
+            .collect();
+        Self { values }
+    }
+    pub(crate) fn value(&self, field: SetupField) -> String {
+        self.values.get(&field).cloned().unwrap_or_default()
+    }
+    pub(crate) fn to_config(
+        &self,
+    ) -> Result<crate::config::EmailConfig, (SetupField, &'static str)> {
+        let mut value = serde_json::to_value(crate::config::EmailConfig::default())
+            .expect("email configuration serializes");
+        let mut account = serde_json::Map::new();
+        for (field, pointer, _) in Self::FIELDS {
+            let text = self.value(*field);
+            let parsed = match field {
+                SetupField::EmailEnabled => serde_json::Value::Bool(
+                    text.parse().map_err(|_| (*field, "email_config_invalid"))?,
+                ),
+                SetupField::EmailImapPort
+                | SetupField::EmailSmtpPort
+                | SetupField::EmailSyncInterval
+                | SetupField::EmailRetentionDays
+                | SetupField::EmailMaxStorageBytes => serde_json::Value::from(
+                    text.parse::<u64>()
+                        .map_err(|_| (*field, "config_init_number_invalid"))?,
+                ),
+                _ => serde_json::Value::String(text),
+            };
+            if let Some(key) = pointer.strip_prefix("/account/") {
+                account.insert(key.to_string(), parsed);
+            } else {
+                value[&pointer[1..]] = parsed;
+            }
+        }
+        if [
+            SetupField::EmailImapHost,
+            SetupField::EmailSmtpHost,
+            SetupField::EmailUsername,
+            SetupField::EmailPassword,
+            SetupField::EmailFrom,
+        ]
+        .iter()
+        .any(|field| !self.value(*field).is_empty())
+        {
+            value["account"] = serde_json::Value::Object(account);
+        }
+        let config: crate::config::EmailConfig = serde_json::from_value(value)
+            .map_err(|_| (SetupField::EmailEnabled, "email_config_invalid"))?;
+        config.validate().map_err(|error| {
+            let (field, code) = match error.to_string().as_str() {
+                "email_sync_interval_seconds_invalid" => (
+                    SetupField::EmailSyncInterval,
+                    "email_sync_interval_seconds_invalid",
+                ),
+                "email_retention_days_invalid" => (
+                    SetupField::EmailRetentionDays,
+                    "email_retention_days_invalid",
+                ),
+                "email_max_storage_bytes_invalid" => (
+                    SetupField::EmailMaxStorageBytes,
+                    "email_max_storage_bytes_invalid",
+                ),
+                "email_account_password_reference_invalid" => (
+                    SetupField::EmailPassword,
+                    "email_account_password_reference_invalid",
+                ),
+                "email_account_from_invalid" => {
+                    (SetupField::EmailFrom, "email_account_from_invalid")
+                }
+                "email_account_username_invalid" => {
+                    (SetupField::EmailUsername, "email_account_username_invalid")
+                }
+                "email_account_host_invalid" => {
+                    (SetupField::EmailImapHost, "email_account_host_invalid")
+                }
+                "email_account_port_invalid" => {
+                    (SetupField::EmailImapPort, "email_account_port_invalid")
+                }
+                _ => (SetupField::EmailEnabled, "email_account_required"),
+            };
+            (field, code)
+        })?;
+        Ok(config)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RoomDraft {
     pub(crate) timezone: String,
@@ -369,6 +518,7 @@ pub(crate) struct OptionalDrafts {
     pub(crate) shell: Option<ShellDraft>,
     pub(crate) mcp_servers: Option<McpServersDraft>,
     pub(crate) room: Option<RoomDraft>,
+    pub(crate) email: Option<EmailDraft>,
     pub(crate) tunnel_client: Option<TunnelClientDraft>,
     pub(crate) hub_reporting: Option<HubReportingDraft>,
     pub(crate) events: Option<EventsDraft>,
@@ -384,6 +534,7 @@ pub(crate) enum OptionalSectionDraft {
     Toolsets(ToolsetsDraft),
     McpServers(McpServersDraft),
     Room(RoomDraft),
+    Email(EmailDraft),
     TunnelClient(TunnelClientDraft),
     HubReporting(HubReportingDraft),
     Shell(ShellDraft),
@@ -413,6 +564,7 @@ impl OptionalSectionDraft {
             Self::Toolsets(_) => OptionalSection::Toolsets,
             Self::McpServers(_) => OptionalSection::McpServers,
             Self::Room(_) => OptionalSection::Room,
+            Self::Email(_) => OptionalSection::Email,
             Self::TunnelClient(_) => OptionalSection::TunnelClient,
             Self::HubReporting(_) => OptionalSection::HubReporting,
             Self::Events(_) => OptionalSection::Events,
@@ -792,6 +944,7 @@ impl OptionalDrafts {
             OptionalSection::Toolsets => self.toolsets.is_some(),
             OptionalSection::McpServers => self.mcp_servers.is_some(),
             OptionalSection::Room => self.room.is_some(),
+            OptionalSection::Email => self.email.is_some(),
             OptionalSection::TunnelClient => self.tunnel_client.is_some(),
             OptionalSection::HubReporting => self.hub_reporting.is_some(),
             OptionalSection::Events => self.events.is_some(),
@@ -817,6 +970,7 @@ impl OptionalDrafts {
                 .clone()
                 .map(OptionalSectionDraft::McpServers),
             OptionalSection::Room => self.room.clone().map(OptionalSectionDraft::Room),
+            OptionalSection::Email => self.email.clone().map(OptionalSectionDraft::Email),
             OptionalSection::TunnelClient => self
                 .tunnel_client
                 .clone()
@@ -840,6 +994,7 @@ impl OptionalDrafts {
             OptionalSectionDraft::Toolsets(value) => self.toolsets = Some(value),
             OptionalSectionDraft::McpServers(value) => self.mcp_servers = Some(value),
             OptionalSectionDraft::Room(value) => self.room = Some(value),
+            OptionalSectionDraft::Email(value) => self.email = Some(value),
             OptionalSectionDraft::TunnelClient(value) => self.tunnel_client = Some(value),
             OptionalSectionDraft::HubReporting(value) => self.hub_reporting = Some(value),
             OptionalSectionDraft::Events(value) => self.events = Some(value),
@@ -896,6 +1051,9 @@ pub(crate) fn default_optional_draft_for_profile(
             &ToolsetConfig::for_profile(profile),
         )),
         OptionalSection::McpServers => OptionalSectionDraft::McpServers(McpServersDraft::default()),
+        OptionalSection::Email => OptionalSectionDraft::Email(EmailDraft::from_config(
+            &crate::config::EmailConfig::default(),
+        )),
         OptionalSection::Room => OptionalSectionDraft::Room(RoomDraft {
             timezone: "Asia/Shanghai".to_string(),
             diary_boundary_hour: "5".to_string(),
@@ -988,6 +1146,7 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
                 })
                 .collect(),
         }),
+        email: Some(EmailDraft::from_config(&config.email)),
         room: Some(RoomDraft {
             timezone: config.room.timezone.clone(),
             diary_boundary_hour: config.room.diary_day_boundary_hour.to_string(),

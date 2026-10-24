@@ -117,6 +117,16 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "config_init_toolsets_invalid" => {
             ("Toolset namespace selection is invalid.", "工具集命名空间选择无效。")
         }
+        "email_sync_interval_seconds_invalid" => ("Sync interval must be from 10 through 86400 seconds.", "同步间隔必须在 10 到 86400 秒之间。"),
+        "email_retention_days_invalid" => ("Retention must be from 1 through 36500 days.", "保存天数必须在 1 到 36500 之间。"),
+        "email_max_storage_bytes_invalid" => ("Storage limit must be at least 1048576 bytes.", "容量上限至少为 1048576 字节。"),
+        "email_account_password_reference_invalid" => ("Use env:NAME or file:/absolute/path for the password.", "密码必须使用 env:NAME 或 file:/绝对路径引用。"),
+        "email_account_from_invalid" => ("Enter a single email address without a display name.", "请输入不含显示名的单个发件邮箱地址。"),
+        "email_account_host_invalid" => ("Enter IMAP and SMTP server hostnames without a URL scheme.", "请填写 IMAP 和 SMTP 服务器地址，不带协议前缀或路径。"),
+        "email_account_port_invalid" => ("Ports must be between 1 and 65535.", "端口必须在 1 到 65535 之间。"),
+        "email_account_username_invalid" => ("Enter an account username.", "请填写账户用户名。"),
+        "email_config_invalid" => ("Use implicit/starttls for TLS and allow/confirm/deny for policies.", "加密方式使用 implicit/starttls，策略使用 allow/confirm/deny。"),
+        "email_account_required" => ("Configure the email account before enabling email.", "启用邮件前请先填写完整账户信息。"),
         "room_config_requires_room_toolset" => (
             "Room settings require the Room toolset namespace to be enabled.",
             "Room 配置需要启用 Room 工具集命名空间。",
@@ -1413,6 +1423,53 @@ fn render_optional_form(
             errors,
             language,
         ),
+        OptionalSection::Email => {
+            for field in [
+                SetupField::EmailEnabled,
+                SetupField::EmailImapHost,
+                SetupField::EmailImapPort,
+                SetupField::EmailImapTls,
+                SetupField::EmailSmtpHost,
+                SetupField::EmailSmtpPort,
+                SetupField::EmailSmtpTls,
+                SetupField::EmailUsername,
+                SetupField::EmailPassword,
+                SetupField::EmailFrom,
+                SetupField::EmailSyncInterval,
+                SetupField::EmailRetentionDays,
+                SetupField::EmailMaxStorageBytes,
+                SetupField::EmailSendPolicy,
+                SetupField::EmailTrashPolicy,
+            ] {
+                if field == SetupField::EmailEnabled {
+                    push_boolean_field(
+                        &mut lines,
+                        &mut focused_line,
+                        section,
+                        draft,
+                        state,
+                        field,
+                        language,
+                        theme,
+                        errors,
+                    );
+                } else {
+                    push_long_form_field(
+                        &mut lines,
+                        &mut focused_line,
+                        session,
+                        section,
+                        draft,
+                        state,
+                        field,
+                        language,
+                        theme,
+                        errors,
+                        left.width,
+                    );
+                }
+            }
+        }
         OptionalSection::Room => {
             for field in [
                 SetupField::RoomTimezone,
@@ -1736,7 +1793,7 @@ fn push_long_form_field(
             focused,
             cursor.is_some(),
             cursor,
-            false,
+            field == SetupField::EmailPassword,
             is_default,
             width,
             theme,
@@ -2759,6 +2816,23 @@ pub(super) fn optional_focus_items(
                 .collect(),
             _ => Vec::new(),
         },
+        OptionalSection::Email => vec![
+            OptionalFocusItem::Field(SetupField::EmailEnabled),
+            OptionalFocusItem::Field(SetupField::EmailImapHost),
+            OptionalFocusItem::Field(SetupField::EmailImapPort),
+            OptionalFocusItem::Field(SetupField::EmailImapTls),
+            OptionalFocusItem::Field(SetupField::EmailSmtpHost),
+            OptionalFocusItem::Field(SetupField::EmailSmtpPort),
+            OptionalFocusItem::Field(SetupField::EmailSmtpTls),
+            OptionalFocusItem::Field(SetupField::EmailUsername),
+            OptionalFocusItem::Field(SetupField::EmailPassword),
+            OptionalFocusItem::Field(SetupField::EmailFrom),
+            OptionalFocusItem::Field(SetupField::EmailSyncInterval),
+            OptionalFocusItem::Field(SetupField::EmailRetentionDays),
+            OptionalFocusItem::Field(SetupField::EmailMaxStorageBytes),
+            OptionalFocusItem::Field(SetupField::EmailSendPolicy),
+            OptionalFocusItem::Field(SetupField::EmailTrashPolicy),
+        ],
         OptionalSection::Room => vec![
             OptionalFocusItem::Field(SetupField::RoomTimezone),
             OptionalFocusItem::Field(SetupField::DiaryBoundaryHour),
@@ -3151,6 +3225,7 @@ fn optional_center_inspector_body(
                     "• streamable-http",
                     "• stdio",
                 ],
+                OptionalSection::Email => &["Configure IMAP/SMTP, synchronization, local storage, and sending/trash permissions.", "Account connection changes require restart; other changes apply immediately.", "Password: env:NAME or file:/absolute/path. TLS: implicit or starttls. Policies: allow, confirm, deny."],
                 OptionalSection::Room => &[
                     "Set Room timezone, diary day boundary, repository root, and maintenance behavior.",
                     "The repository defaults to <workspace>/room; maintenance is local with auto-push off.",
@@ -3222,6 +3297,7 @@ fn optional_center_inspector_body(
                     "",
                     "Normal 启用除 Room 外的所有命名空间；Room 启用全部命名空间。",
                 ],
+                OptionalSection::Email => &["配置 IMAP/SMTP、同步、本地保存及发送和移入垃圾箱权限。", "账户连接修改后需重启；其他修改立即生效。", "密码使用 env:NAME 或 file:/绝对路径。加密方式：implicit 或 starttls；策略：allow、confirm、deny。"],
                 OptionalSection::Room => &[
                     "设置 Room 的时区、日记日界线、仓库根目录和维护行为。",
                     "仓库默认使用 <workspace>/room；维护默认为 local 且关闭自动推送。",
@@ -3652,7 +3728,7 @@ fn editing_cursor(state: &TuiState, field: SetupField) -> Option<usize> {
         .map(|editing| editing.cursor)
 }
 
-fn all_optional_sections() -> [OptionalSection; 12] {
+fn all_optional_sections() -> [OptionalSection; 13] {
     [
         OptionalSection::Identity,
         OptionalSection::Workspace,
@@ -3663,6 +3739,7 @@ fn all_optional_sections() -> [OptionalSection; 12] {
         OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
+        OptionalSection::Email,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
         OptionalSection::Events,
@@ -3680,6 +3757,7 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
         OptionalSection::Toolsets => t(language, "Toolsets", "工具集"),
         OptionalSection::McpServers => t(language, "MCP servers", "MCP 服务"),
         OptionalSection::Room => t(language, "Room", "Room"),
+        OptionalSection::Email => t(language, "Email", "邮件"),
         OptionalSection::TunnelClient => t(language, "Tunnel client", "隧道客户端"),
         OptionalSection::HubReporting => t(language, "Hub reporting", "Hub 报告"),
         OptionalSection::Events => t(language, "Events", "事件"),
@@ -3688,6 +3766,23 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
 
 fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str {
     match field {
+        SetupField::EmailEnabled => t(language, "Enabled", "启用邮件"),
+        SetupField::EmailImapHost => t(language, "IMAP host", "IMAP 服务器"),
+        SetupField::EmailImapPort => t(language, "IMAP port", "IMAP 端口"),
+        SetupField::EmailImapTls => t(language, "IMAP TLS", "IMAP 加密方式"),
+        SetupField::EmailSmtpHost => t(language, "SMTP host", "SMTP 服务器"),
+        SetupField::EmailSmtpPort => t(language, "SMTP port", "SMTP 端口"),
+        SetupField::EmailSmtpTls => t(language, "SMTP TLS", "SMTP 加密方式"),
+        SetupField::EmailUsername => t(language, "Username", "用户名"),
+        SetupField::EmailPassword => t(language, "Password reference", "密码引用"),
+        SetupField::EmailFrom => t(language, "From address", "发件邮箱"),
+        SetupField::EmailSyncInterval => t(language, "Sync interval (seconds)", "同步间隔（秒）"),
+        SetupField::EmailRetentionDays => t(language, "Retention (days)", "内容保存天数"),
+        SetupField::EmailMaxStorageBytes => {
+            t(language, "Storage limit (bytes)", "容量上限（字节）")
+        }
+        SetupField::EmailSendPolicy => t(language, "Send policy", "发信策略"),
+        SetupField::EmailTrashPolicy => t(language, "Trash policy", "移入垃圾箱策略"),
         SetupField::DisplayName => t(language, "Display name", "显示名称"),
         SetupField::WorkspaceRoot => t(language, "Workspace root", "工作区根目录"),
         SetupField::PathDefaultAction => t(language, "Unmatched paths", "未匹配路径"),
@@ -3767,6 +3862,7 @@ pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
             | SetupField::TunnelAutoDownload
             | SetupField::HubReportingEnabled
             | SetupField::RoomMaintenanceAutoPush
+            | SetupField::EmailEnabled
     )
 }
 
@@ -3810,6 +3906,7 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             _ => String::new(),
         },
         OptionalSectionDraft::McpServers(_) => String::new(),
+        OptionalSectionDraft::Email(value) => value.value(field),
         OptionalSectionDraft::Room(value) => match field {
             SetupField::RoomTimezone => value.timezone.clone(),
             SetupField::DiaryBoundaryHour => value.diary_boundary_hour.clone(),
@@ -3884,6 +3981,9 @@ pub(super) fn set_optional_field(
             SetupField::ShellInitFilePath => draft.init_file_path = value,
             _ => {}
         },
+        OptionalSectionDraft::Email(draft) => {
+            draft.values.insert(field, value);
+        }
         OptionalSectionDraft::Room(draft) => match field {
             SetupField::RoomTimezone => draft.timezone = value,
             SetupField::DiaryBoundaryHour => draft.diary_boundary_hour = value,
@@ -3929,6 +4029,10 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
         }
         OptionalSectionDraft::HubReporting(draft) if field == SetupField::HubReportingEnabled => {
             draft.enabled = !draft.enabled
+        }
+        OptionalSectionDraft::Email(draft) if field == SetupField::EmailEnabled => {
+            let value = draft.value(field) != "true";
+            draft.values.insert(field, value.to_string());
         }
         OptionalSectionDraft::Room(draft) if field == SetupField::RoomMaintenanceAutoPush => {
             draft.maintenance_auto_push = !draft.maintenance_auto_push
@@ -4753,6 +4857,21 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "shell_init_file_mode" => t(language, "Init file mode", "初始化文件模式"),
         "shell_init_file_path" => t(language, "Init file path", "初始化文件路径"),
         "mcp_server" => t(language, "MCP server", "MCP 服务"),
+        "email_enabled" => t(language, "Enabled", "启用邮件"),
+        "email_imapHost" => t(language, "IMAP host", "IMAP 服务器"),
+        "email_imapPort" => t(language, "IMAP port", "IMAP 端口"),
+        "email_imapTls" => t(language, "IMAP TLS", "IMAP 加密方式"),
+        "email_smtpHost" => t(language, "SMTP host", "SMTP 服务器"),
+        "email_smtpPort" => t(language, "SMTP port", "SMTP 端口"),
+        "email_smtpTls" => t(language, "SMTP TLS", "SMTP 加密方式"),
+        "email_username" => t(language, "Username", "用户名"),
+        "email_password" => t(language, "Password reference", "密码引用"),
+        "email_from" => t(language, "From address", "发件邮箱"),
+        "email_syncIntervalSeconds" => t(language, "Sync interval (seconds)", "同步间隔（秒）"),
+        "email_retentionDays" => t(language, "Retention (days)", "内容保存天数"),
+        "email_maxStorageBytes" => t(language, "Storage limit (bytes)", "容量上限（字节）"),
+        "email_sendPolicy" => t(language, "Send policy", "发信策略"),
+        "email_trashPolicy" => t(language, "Trash policy", "移入垃圾箱策略"),
         "room_timezone" => t(language, "Timezone", "时区"),
         "diary_boundary_hour" => t(language, "Diary boundary hour", "日记边界小时"),
         "repository_root" => t(language, "Repository root", "仓库根目录"),

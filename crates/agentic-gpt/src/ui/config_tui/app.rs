@@ -2659,6 +2659,21 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         SetupField::ShellInitFileMode | SetupField::ShellInitFilePath => {
             crate::config_templates::OptionalSection::Shell
         }
+        SetupField::EmailEnabled
+        | SetupField::EmailImapHost
+        | SetupField::EmailImapPort
+        | SetupField::EmailImapTls
+        | SetupField::EmailSmtpHost
+        | SetupField::EmailSmtpPort
+        | SetupField::EmailSmtpTls
+        | SetupField::EmailUsername
+        | SetupField::EmailPassword
+        | SetupField::EmailFrom
+        | SetupField::EmailSyncInterval
+        | SetupField::EmailRetentionDays
+        | SetupField::EmailMaxStorageBytes
+        | SetupField::EmailSendPolicy
+        | SetupField::EmailTrashPolicy => crate::config_templates::OptionalSection::Email,
         SetupField::RoomTimezone
         | SetupField::DiaryBoundaryHour
         | SetupField::RepositoryRoot

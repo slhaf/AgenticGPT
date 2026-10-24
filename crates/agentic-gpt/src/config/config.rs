@@ -1,5 +1,8 @@
+#[path = "email.rs"]
+mod email;
 #[path = "mcp_servers.rs"]
 pub(crate) mod mcp_servers;
+pub(crate) use email::{EmailAccountConfig, EmailConfig, EmailPolicy, EmailTls};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -550,6 +553,8 @@ pub(crate) struct Config {
     pub(crate) skills: RoomSkillsConfig,
     #[serde(default = "default_room_config")]
     pub(crate) room: RoomConfig,
+    #[serde(default)]
+    pub(crate) email: EmailConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tunnel: Option<TunnelConfig>,
     #[serde(flatten)]
@@ -1143,6 +1148,7 @@ impl Config {
             },
             skills: RoomSkillsConfig::default(),
             room: default_room_config(),
+            email: EmailConfig::default(),
             tunnel: None,
             extra: BTreeMap::new(),
         })
@@ -1228,6 +1234,7 @@ impl Config {
         config.room.skills = config.skills.clone();
         config.validate_policies()?;
         config.events.validate()?;
+        config.email.validate()?;
         Ok(config)
     }
 
@@ -1563,6 +1570,7 @@ impl Config {
 
     pub(crate) fn validate_local(&self) -> Result<()> {
         self.events.validate()?;
+        self.email.validate()?;
         self.validate_policies()?;
         self.validate_mcp_servers()?;
         if self.auxiliary_hub_enabled() {
@@ -1681,6 +1689,10 @@ pub(crate) fn restart_required_fields(effective: &Config, disk: &Config) -> Vec<
             serde_json::json!(effective.room) != serde_json::json!(disk.room),
         ),
         (
+            "email.account",
+            effective.email.account != disk.email.account,
+        ),
+        (
             "tunnel",
             serde_json::json!(effective.tunnel) != serde_json::json!(disk.tunnel),
         ),
@@ -1727,6 +1739,7 @@ fn materialize_import_value(value: &Value) -> Result<Config> {
     config.workspace_root = crate::exec::expand_pathbuf(&config.workspace_root)?;
     config.room.skills = config.skills.clone();
     config.validate_policies()?;
+    config.email.validate()?;
     Ok(config)
 }
 
@@ -1794,6 +1807,9 @@ fn prune_sparse_value(value: &mut Value, defaults: &Value, root: bool) {
 }
 
 fn redact_config_secrets(value: &mut Value) {
+    if let Some(password) = value.pointer_mut("/email/account/password") {
+        *password = Value::String("[REDACTED]".to_string());
+    }
     let Some(object) = value.as_object_mut() else {
         return;
     };

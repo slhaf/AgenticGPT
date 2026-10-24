@@ -205,6 +205,11 @@ impl ReviewItem {
             Some(SetupField::ShellInitFileMode) => &["default", "disabled", "path"],
             Some(SetupField::ConfirmationLanguage) => &["zh-CN", "en"],
             Some(SetupField::PathDefaultAction) => &["allow", "deny"],
+            Some(SetupField::EmailImapTls | SetupField::EmailSmtpTls) => &["implicit", "starttls"],
+            Some(SetupField::EmailSendPolicy | SetupField::EmailTrashPolicy) => {
+                &["allow", "confirm", "deny"]
+            }
+            Some(SetupField::EmailEnabled) => &["false", "true"],
             Some(SetupField::RoomMaintenanceMode) => &["local", "workflow"],
             Some(
                 SetupField::ProvisionTunnelSecret
@@ -327,6 +332,7 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
+        OptionalSection::Email,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
         OptionalSection::Events,
@@ -758,6 +764,98 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 .collect();
             items
         }
+        OptionalSectionDraft::Email(value) => vec![
+            ReviewItem::field(
+                SetupField::EmailEnabled,
+                "email_enabled",
+                value.value(SetupField::EmailEnabled),
+                ReviewEditorKind::Choice,
+            ),
+            ReviewItem::field(
+                SetupField::EmailImapHost,
+                "email_imapHost",
+                value.value(SetupField::EmailImapHost),
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::EmailImapPort,
+                "email_imapPort",
+                value.value(SetupField::EmailImapPort),
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::EmailImapTls,
+                "email_imapTls",
+                value.value(SetupField::EmailImapTls),
+                ReviewEditorKind::Choice,
+            ),
+            ReviewItem::field(
+                SetupField::EmailSmtpHost,
+                "email_smtpHost",
+                value.value(SetupField::EmailSmtpHost),
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::EmailSmtpPort,
+                "email_smtpPort",
+                value.value(SetupField::EmailSmtpPort),
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::EmailSmtpTls,
+                "email_smtpTls",
+                value.value(SetupField::EmailSmtpTls),
+                ReviewEditorKind::Choice,
+            ),
+            ReviewItem::field(
+                SetupField::EmailUsername,
+                "email_username",
+                value.value(SetupField::EmailUsername),
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::EmailPassword,
+                "email_password",
+                "[REDACTED]".to_string(),
+                ReviewEditorKind::Secret,
+            ),
+            ReviewItem::field(
+                SetupField::EmailFrom,
+                "email_from",
+                value.value(SetupField::EmailFrom),
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::EmailSyncInterval,
+                "email_syncIntervalSeconds",
+                value.value(SetupField::EmailSyncInterval),
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::EmailRetentionDays,
+                "email_retentionDays",
+                value.value(SetupField::EmailRetentionDays),
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::EmailMaxStorageBytes,
+                "email_maxStorageBytes",
+                value.value(SetupField::EmailMaxStorageBytes),
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::EmailSendPolicy,
+                "email_sendPolicy",
+                value.value(SetupField::EmailSendPolicy),
+                ReviewEditorKind::Choice,
+            ),
+            ReviewItem::field(
+                SetupField::EmailTrashPolicy,
+                "email_trashPolicy",
+                value.value(SetupField::EmailTrashPolicy),
+                ReviewEditorKind::Choice,
+            ),
+        ],
         OptionalSectionDraft::Room(RoomDraft {
             timezone,
             diary_boundary_hour,

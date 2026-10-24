@@ -321,6 +321,7 @@ pub(super) fn available_optional_sections(
         OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
+        OptionalSection::Email,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
         OptionalSection::Events,
@@ -609,6 +610,24 @@ pub(super) fn validate_field(
             OptionalSection::McpServers,
             &session.optional_draft(OptionalSection::McpServers),
         ),
+        SetupField::EmailEnabled
+        | SetupField::EmailImapHost
+        | SetupField::EmailImapPort
+        | SetupField::EmailImapTls
+        | SetupField::EmailSmtpHost
+        | SetupField::EmailSmtpPort
+        | SetupField::EmailSmtpTls
+        | SetupField::EmailUsername
+        | SetupField::EmailPassword
+        | SetupField::EmailFrom
+        | SetupField::EmailSyncInterval
+        | SetupField::EmailRetentionDays
+        | SetupField::EmailMaxStorageBytes
+        | SetupField::EmailSendPolicy
+        | SetupField::EmailTrashPolicy => validate_optional(
+            OptionalSection::Email,
+            &session.optional_draft(OptionalSection::Email),
+        ),
         SetupField::RoomTimezone
         | SetupField::DiaryBoundaryHour
         | SetupField::RepositoryRoot
@@ -806,6 +825,11 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
         (OptionalSection::McpServers, OptionalSectionDraft::McpServers(value)) => {
             if let Err(mcp_errors) = mcp_servers_from_draft(&value.servers) {
                 errors.extend(mcp_errors);
+            }
+        }
+        (OptionalSection::Email, OptionalSectionDraft::Email(value)) => {
+            if let Err((field, code)) = value.to_config() {
+                errors.push(error(field, code));
             }
         }
         (OptionalSection::Room, OptionalSectionDraft::Room(value)) => {
@@ -1115,6 +1139,7 @@ fn configured_draft(
             .clone()
             .map(OptionalSectionDraft::McpServers),
         OptionalSection::Room => drafts.room.clone().map(OptionalSectionDraft::Room),
+        OptionalSection::Email => drafts.email.clone().map(OptionalSectionDraft::Email),
         OptionalSection::TunnelClient => drafts
             .tunnel_client
             .clone()
@@ -1309,6 +1334,13 @@ fn apply_optional_draft(
         (OptionalSection::McpServers, OptionalSectionDraft::McpServers(value)) => {
             input.mcp_servers = Some(mcp_servers_from_draft(&value.servers)?);
         }
+        (OptionalSection::Email, OptionalSectionDraft::Email(value)) => {
+            input.email = Some(
+                value
+                    .to_config()
+                    .map_err(|(field, code)| vec![error(field, code)])?,
+            );
+        }
         (OptionalSection::Room, OptionalSectionDraft::Room(value)) => {
             let diary_day_boundary_hour =
                 value.diary_boundary_hour.trim().parse().map_err(|_| {
@@ -1473,6 +1505,7 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::Toolsets => SetupField::Toolsets,
         OptionalSection::McpServers => SetupField::McpServerId,
         OptionalSection::Room => SetupField::RoomTimezone,
+        OptionalSection::Email => SetupField::EmailEnabled,
         OptionalSection::TunnelClient => SetupField::TunnelClientVersion,
         OptionalSection::HubReporting => SetupField::HubReportingDetail,
         OptionalSection::Events => SetupField::EventsLowTtlSeconds,

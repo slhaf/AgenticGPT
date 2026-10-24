@@ -32,6 +32,7 @@ pub(crate) enum OptionalSection {
     McpServers,
     Toolsets,
     Room,
+    Email,
     TunnelClient,
     HubReporting,
     Events,
@@ -97,6 +98,7 @@ pub(crate) struct InitInput {
     pub(crate) bubblewrap: Option<bool>,
     pub(crate) shell: Option<ShellConfig>,
     pub(crate) room: Option<RoomConfig>,
+    pub(crate) email: Option<crate::config::EmailConfig>,
     pub(crate) tunnel_client: Option<TunnelClientConfig>,
     pub(crate) hub_reporting: Option<HubReportingConfig>,
     pub(crate) mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
@@ -133,6 +135,7 @@ impl InitInput {
             bubblewrap: None,
             shell: None,
             room: None,
+            email: None,
             tunnel_client: None,
             hub_reporting: None,
             mcp_servers: None,
@@ -199,6 +202,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         bubblewrap,
         shell,
         room,
+        email,
         tunnel_client,
         hub_reporting,
         events,
@@ -209,6 +213,10 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     let has_imported_base = imported_base.is_some();
     let explicit_confirmation = confirmation_provider.is_some();
     let mut config = imported_base.unwrap_or(Config::default_config()?);
+    if let Some(email) = email {
+        config.email = email;
+    }
+    config.email.validate()?;
     if let Some(events) = events {
         config.events = events;
     }
@@ -404,7 +412,8 @@ pub(crate) fn optional_section_is_legal(
         | OptionalSection::Shell
         | OptionalSection::McpServers
         | OptionalSection::Toolsets
-        | OptionalSection::Events => true,
+        | OptionalSection::Events
+        | OptionalSection::Email => true,
         OptionalSection::Room => toolsets.is_enabled(ToolNamespace::Room),
         OptionalSection::TunnelClient | OptionalSection::HubReporting => {
             mode == RuntimeMode::Standalone

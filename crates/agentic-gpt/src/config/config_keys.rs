@@ -34,6 +34,7 @@ pub(crate) enum ConfigValueKind {
     WorkerProfile,
     RoomMaintenanceMode,
     PolicyAction,
+    EmailAccount,
     PathDefaultAction,
 }
 
@@ -59,6 +60,7 @@ impl ConfigValueKind {
             Self::WorkerProfile => "worker-profile",
             Self::RoomMaintenanceMode => "room-maintenance-mode",
             Self::PolicyAction => "policy-action",
+            Self::EmailAccount => "email-account-object-or-null",
             Self::PathDefaultAction => "path-default-action",
             Self::EventNotificationLevel => "event-notification-level",
         }
@@ -92,6 +94,7 @@ pub(crate) enum ConfigSection {
     Limits,
     Skills,
     Room,
+    Email,
     Tunnel,
     Events,
 }
@@ -109,6 +112,7 @@ impl ConfigSection {
             Self::Limits => "limits",
             Self::Skills => "skills",
             Self::Room => "room",
+            Self::Email => "email",
             Self::Tunnel => "tunnel",
             Self::Events => "events",
         }
@@ -134,6 +138,8 @@ impl ConfigSection {
             (Self::Limits, UiLanguage::ZhCn) => "限制",
             (Self::Skills, UiLanguage::En) => "Skills",
             (Self::Skills, UiLanguage::ZhCn) => "技能",
+            (Self::Email, UiLanguage::En) => "Email",
+            (Self::Email, UiLanguage::ZhCn) => "邮件",
             (Self::Room, UiLanguage::En) => "Room",
             (Self::Room, UiLanguage::ZhCn) => "Room",
             (Self::Tunnel, UiLanguage::En) => "Tunnel",
@@ -603,6 +609,13 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         r#"["skills.example.com"]"#,
         set_skills_allowed_hosts
     ),
+    config_key!("email.enabled", Email, Boolean, false, "Enable email synchronization while Room is enabled.", "启用邮件同步；同时需要启用 Room。", "false", set_email_enabled),
+    config_key!("email.account", Email, EmailAccount, true, "Account connection object or null; changes require restart. Password must be an env:/file: reference.", "账户连接 JSON 对象或 null；修改后重启生效。密码必须使用 env:/file: 引用。", "null", set_email_account),
+    config_key!("email.syncIntervalSeconds", Email, NonNegativeInteger, false, "Synchronization interval in seconds, from 10 through 86400.", "同步间隔秒数，范围 10 到 86400。", "60", set_email_sync_interval_seconds),
+    config_key!("email.retentionDays", Email, NonNegativeInteger, false, "Local content retention in days, from 1 through 36500.", "本地邮件内容保存天数，范围 1 到 36500。", "90", set_email_retention_days),
+    config_key!("email.maxStorageBytes", Email, NonNegativeInteger, false, "Local email storage limit in bytes, at least 1048576.", "本地邮件容量上限字节数，至少 1048576。", "2147483648", set_email_max_storage_bytes),
+    config_key!("email.sendPolicy", Email, PolicyAction, false, "Email sending policy: allow, confirm, or deny.", "发信策略：allow、confirm 或 deny。", "confirm", set_email_send_policy),
+    config_key!("email.trashPolicy", Email, PolicyAction, false, "Email trash policy: allow, confirm, or deny.", "移入垃圾箱策略：allow、confirm 或 deny。", "confirm", set_email_trash_policy),
     config_key!(
         "room.repositoryRoot",
         Room,
@@ -881,6 +894,9 @@ pub(crate) fn apply_config_key(config: &mut Config, key: &str, value: &str) -> R
         .find(|spec| spec.key == key)
         .ok_or_else(|| anyhow!("unsupported config key: {key}"))?;
     (spec.apply)(config, value)?;
+    if spec.section == ConfigSection::Email {
+        config.email.validate()?;
+    }
     if spec.section == ConfigSection::HttpMcp {
         config.validate_http_mcp()?;
     }
@@ -926,7 +942,7 @@ struct ConfigDescriptionOutput {
     zh_cn: &'static str,
 }
 
-const CONFIG_SECTION_ORDER: [ConfigSection; 12] = [
+const CONFIG_SECTION_ORDER: [ConfigSection; 13] = [
     ConfigSection::Runtime,
     ConfigSection::Identity,
     ConfigSection::Hub,
@@ -937,6 +953,7 @@ const CONFIG_SECTION_ORDER: [ConfigSection; 12] = [
     ConfigSection::Limits,
     ConfigSection::Skills,
     ConfigSection::Room,
+    ConfigSection::Email,
     ConfigSection::Tunnel,
     ConfigSection::Events,
 ];
@@ -1485,4 +1502,41 @@ fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
     config
         .tunnel
         .get_or_insert_with(config::TunnelConfig::default)
+}
+
+fn set_email_account(config: &mut Config, value: &str) -> Result<()> {
+    config.email.account = serde_json::from_str(value)?;
+    Ok(())
+}
+
+fn set_email_enabled(config: &mut Config, value: &str) -> Result<()> {
+    config.email.enabled = value.parse()?;
+    Ok(())
+}
+
+fn set_email_sync_interval_seconds(config: &mut Config, value: &str) -> Result<()> {
+    config.email.sync_interval_seconds = value.parse()?;
+    Ok(())
+}
+
+fn set_email_retention_days(config: &mut Config, value: &str) -> Result<()> {
+    config.email.retention_days = value.parse()?;
+    Ok(())
+}
+
+fn set_email_max_storage_bytes(config: &mut Config, value: &str) -> Result<()> {
+    config.email.max_storage_bytes = value.parse()?;
+    Ok(())
+}
+
+fn set_email_send_policy(config: &mut Config, value: &str) -> Result<()> {
+    config.email.send_policy =
+        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
+    Ok(())
+}
+
+fn set_email_trash_policy(config: &mut Config, value: &str) -> Result<()> {
+    config.email.trash_policy =
+        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
+    Ok(())
 }
