@@ -180,6 +180,7 @@ pub(crate) struct AppState {
     pub(crate) config: Arc<RwLock<Config>>,
     pub(crate) private_state: crate::private_state::PrivateStatePaths,
     pub(crate) event_store: Arc<crate::event_store::EventStore>,
+    pub(crate) email: Arc<crate::email::EmailService>,
     #[allow(dead_code)]
     pub(crate) process_history: std::sync::Arc<crate::process_history::ProcessHistoryStore>,
     pub(crate) browser_runtime: Arc<OnceCell<Option<Arc<BrowserRuntimeContext>>>>,

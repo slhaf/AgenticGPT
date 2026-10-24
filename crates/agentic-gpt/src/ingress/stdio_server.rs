@@ -35,8 +35,6 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-#[cfg(test)]
-use crate::config::ToolNamespace;
 use crate::{
     local_service,
     operation::{self, tool_namespace, AdmissionError, RequestContext, RequestIngress},
@@ -975,6 +973,73 @@ impl AgentMcpServer {
                 .await
             }
             "skills.run" => self.dispatch_skill_run(arguments, terminal_tracker).await,
+            "room.email.list" => {
+                let payload: agentic_gpt_protocol::RoomEmailListRequest = from_value(arguments)?;
+                dispatch(
+                    self,
+                    HubCommand::RoomEmailList {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
+            "room.email.read" => {
+                let payload: agentic_gpt_protocol::RoomEmailReadRequest = from_value(arguments)?;
+                dispatch(
+                    self,
+                    HubCommand::RoomEmailRead {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
+            "room.email.search" => {
+                let payload: agentic_gpt_protocol::RoomEmailSearchRequest = from_value(arguments)?;
+                dispatch(
+                    self,
+                    HubCommand::RoomEmailSearch {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
+            "room.email.attachment" => {
+                let payload: agentic_gpt_protocol::RoomEmailAttachmentRequest =
+                    from_value(arguments)?;
+                dispatch(
+                    self,
+                    HubCommand::RoomEmailAttachment {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
+            "room.email.send" => {
+                let payload: agentic_gpt_protocol::RoomEmailSendRequest = from_value(arguments)?;
+                dispatch(
+                    self,
+                    HubCommand::RoomEmailSend {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
+            "room.email.operate" => {
+                let payload: agentic_gpt_protocol::RoomEmailOperateRequest = from_value(arguments)?;
+                dispatch(
+                    self,
+                    HubCommand::RoomEmailOperate {
+                        request_id,
+                        payload,
+                    },
+                )
+                .await
+            }
             "room.diary.active" => {
                 let request: agentic_gpt_protocol::RoomDiaryActiveRequest = from_value(arguments)?;
                 let response = crate::room_reads::diary_active(&self.state, request).await?;
@@ -1588,16 +1653,57 @@ impl ServerHandler for AgentMcpServer {
         request: CallToolRequestParams,
         _context: McpRequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (value, special_result) = self.call_with_result(request).await?;
+        let email_result = request.name.starts_with("room.email.");
+        let email_images = matches!(
+            request.name.as_ref(),
+            "room.email.read" | "room.email.attachment"
+        );
+        let (mut value, special_result) = self.call_with_result(request).await?;
         if let Some(result) = special_result {
             return Ok(result);
         }
+        let images = if email_images {
+            value
+                .as_object_mut()
+                .and_then(|value| value.remove("images"))
+        } else {
+            None
+        };
         let is_error = value.get("error").is_some();
-        let result = if is_error {
+        let mut result = if is_error {
             CallToolResult::structured_error(value)
         } else {
             CallToolResult::structured(value)
         };
+        if let Some(images) = images.and_then(|images| images.as_array().cloned()) {
+            for image in images {
+                if let (Some(data), Some(mime_type)) =
+                    (image["data"].as_str(), image["mimeType"].as_str())
+                {
+                    result
+                        .content
+                        .push(Content::image(data.to_owned(), mime_type.to_owned()));
+                }
+            }
+        }
+        if email_result
+            && serde_json::to_vec(&result)
+                .map(|bytes| bytes.len() > crate::file_ops::MAX_IMAGE_RESPONSE_BYTES)
+                .unwrap_or(true)
+        {
+            let mut error = json!({"error": {
+                "code": "email_response_too_large",
+                "message": "邮件响应超出 8 MiB 的 MCP 结果上限。"
+            }});
+            if let Some(events) = result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("events"))
+            {
+                error["events"] = events.clone();
+            }
+            return Ok(CallToolResult::structured_error(error));
+        }
         Ok(result)
     }
 

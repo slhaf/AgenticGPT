@@ -116,6 +116,11 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "skills.install" => &["id", "source"],
         "skills.install.get" | "skills.install.cancel" => &["installId"],
         "skills.run" => &["id", "path"],
+        "room.email.read" => &["id"],
+        "room.email.search" => &["query"],
+        "room.email.attachment" => &["id", "attachmentId"],
+        "room.email.send" => &["to", "subject", "text"],
+        "room.email.operate" => &["id", "action"],
         "room.diary.read" => &["layer", "period"],
         "room.notebook.search" => &["query"],
         "room.notebook.read" => &["path"],
@@ -812,6 +817,67 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 wait_seconds_schema(5, "启动后等待终态的秒数；不取消进程。"),
             );
         }
+        "room.email.list" => {
+            add("cursor", string("上一响应的 nextCursor；沿用相同 filter。"));
+            add(
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":100,"default":20}),
+            );
+            add(
+                "filter",
+                json!({"type":"object","additionalProperties":false,"properties":{
+                    "unread":{"type":"boolean","description":"省略全部，true 仅未读，false 仅已读。"},
+                    "receivedAfter":{"type":"string","format":"date-time","description":"接收时间下界，包含。"},
+                    "receivedBefore":{"type":"string","format":"date-time","description":"接收时间上界，不包含。"}
+                }}),
+            );
+        }
+        "room.email.read" => {
+            add("id", string("邮件稳定 ID。"));
+            add(
+                "view",
+                json!({"type":"string","enum":["text","image","imageWithRemote"],"default":"text","description":"text 为规范化正文；image 离线渲染；imageWithRemote 仅允许额外下载远程图片。三者都不执行脚本或加载远程 CSS。"}),
+            );
+            add(
+                "cursor",
+                string("上一响应的 nextCursor，保持 id/view 不变。"),
+            );
+        }
+        "room.email.search" => {
+            add("query", string("不区分大小写的字面子串查询；不能为空。"));
+            add("id", string("可选邮件 ID；提供时仅搜索该邮件正文。"));
+            add(
+                "field",
+                json!({"type":"string","enum":["all","subject","body","from"],"default":"all","description":"提供 id 时无论 field 如何都规范化为 body。"}),
+            );
+        }
+        "room.email.attachment" => {
+            add("id", string("附件所属邮件稳定 ID。"));
+            add("attachmentId", string("read 返回的附件 ID。"));
+            add(
+                "download",
+                json!({"type":"boolean","default":false,"description":"保存原始附件到 workspace；提供 path 时强制为 true。"}),
+            );
+            add("path", string("可选 workspace-relative 目标路径，禁止绝对路径、逃逸和覆盖；提供即采用下载模式。"));
+        }
+        "room.email.send" => {
+            add(
+                "to",
+                json!({"type":"array","minItems":1,"items":{"type":"string"}}),
+            );
+            add("cc", strings("可选抄送地址。"));
+            add("bcc", strings("可选密送地址。"));
+            add("subject", string("邮件主题。"));
+            add("text", string("纯文本正文。"));
+            add("replyToId", string("可选本地原邮件 ID，用于生成回复头。"));
+        }
+        "room.email.operate" => {
+            add("id", string("邮件稳定 ID。"));
+            add(
+                "action",
+                json!({"type":"string","enum":["markRead","markUnread","flag","unflag","trash"]}),
+            );
+        }
         "room.maintenance.status" => {}
         "room.maintenance.submit" => {
             add(
@@ -989,6 +1055,12 @@ fn tool_description(name: &str) -> String {
         "skills.run" => "运行已激活、可写本地 skill 的 scripts/ 下可执行文件，作为受管理进程返回统一紧凑观察；后续用 process.read 查看或 process.cancel 请求取消。脚本可产生真实副作用；inactive、路径或可执行性错误会拒绝。".to_string(),
         "room.maintenance.status" => "检查 Room 仓库、schema/scaffold、本地执行器、配置模式、workflow/remote/sync heads 和五个槽位占用；返回各 readiness/status 字段。只读；仓库不可检查时返回 error。".to_string(),
         "room.maintenance.submit" => "按槽位 payload 更新 Room 日记、Notebook 或实体；local 写入目标文档并提交本地 commit，workflow 提交请求并可能等待消费。返回 mode/state/localApplied/sync/revision；不会覆盖已占用槽，仓库未就绪、重复槽或 payload 错误会拒绝。".to_string(),
+        "room.email.list" => "从活动 Room 的本地邮件索引列出当前 INBOX，按接收时间从新到旧；limit 为 1–100、默认 20。filter 的 receivedAfter 含边界、receivedBefore 不含边界；cursor 必须沿用原 filter，可改变 limit。返回 items、hasMore、可选 nextCursor 和 sync 同步状态；不会触发手动同步或标为已读，不接受 agentId。".to_string(),
+        "room.email.read" => "按稳定邮件 id 读取活动 Room 邮件；view 默认 text，返回规范化正文和 plain/markdown 格式；image 返回不联网的图片分片，imageWithRemote 仅额外下载邮件引用的远程图片，不加载远程 CSS，不执行脚本或提交表单。返回邮件详情、附件清单、hasMore 和可选 nextCursor；续读保持 id/view，不会标为已读。sent/unknown 等本地发送记录可回看；内容已清理或不存在时返回明确 error。不接受 agentId。".to_string(),
+        "room.email.search" => "在活动 Room 已保存的收件及发送记录（含 unknown）中做不区分大小写的字面子串搜索。未传 id 时 field 默认 all，匹配主题、发件人与正文；传 id 时无论 field 如何均规范化为 body。返回 items(ref/text)、truncated 和 sync；邮箱命中的 ref 为邮件 id，正文命中的 ref 可直接作为 read(view=text) 的 cursor。不接受 agentId，不修改邮件。".to_string(),
+        "room.email.attachment" => "读取或下载活动 Room 邮件附件，id 和 attachmentId 来自 read。download 默认 false，可内联图片或小型 UTF-8 文本；其他格式/超预算应下载后处理。提供 path 时无论 download 如何均采用下载模式；path 必须相对 workspace，禁止逃逸和覆盖；省略目标时保存到 downloads/email/<mail-id>/<附件名>。下载仅返回规范化相对 path，内联图片返回 image blocks。不接受 agentId。".to_string(),
+        "room.email.send" => "使用活动 Room 配置账户发送纯文本邮件，to 至少一个地址；cc/bcc 可省略，replyToId 引用本地原邮件以生成回复头。遵守 email.sendPolicy：allow 直接发、confirm 必须明确批准、deny 拒绝；请求不能覆盖策略。返回稳定 id 和 sent/unknown；unknown 表示是否被 SMTP 接受尚不确定，不会自动重试，再次调用可能重复发送。可通过 search/read 查回记录。不接受 agentId。".to_string(),
+        "room.email.operate" => "对活动 Room 邮件显式执行 markRead、markUnread、flag、unflag 或 trash。前四项直接执行；trash 仅移入服务器垃圾箱并遵守 email.trashPolicy，confirm 拒绝/超时/通道不可用不得移动，不支持永久删除。服务器成功后更新本地状态；本地发送记录不支持服务器操作。返回 id、action、status=applied 或明确 error。不接受 agentId。".to_string(),
         "room.diary.active" => "读取 daily/weekly/monthly 三个 current.md；每层返回 period/path/available 与 content 或 missing、unreadable、invalid_utf8 issue。语义化只读，不接受任意路径。".to_string(),
         "room.diary.read" => "按 layer/period 读取精确日记文档；返回 document 的路径、可用状态、内容或 issue。daily 接 current/日期，weekly/monthly 接日期范围；非法日期/范围报错，缺失文档以 issue 表示。".to_string(),
         "room.notebook.recent" => "按有效时间列出最近 Notebook Markdown 预览；返回 documents（path/title/contentPreview/truncated/effectiveAt）和 warnings。缺少 Notebook 时为空结果；只读。".to_string(),

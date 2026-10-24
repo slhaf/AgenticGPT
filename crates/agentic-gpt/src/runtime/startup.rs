@@ -70,7 +70,13 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
     state.skill_installs.recover(state.clone()).await?;
     crate::event_notifications::recover_event_notifications(&state).await?;
     tokio::spawn(watch_live_config(state.clone(), false, None));
-    hub::connect_loop(state).await
+    let email = EmailBackground::start(state.clone());
+    let result = tokio::select! {
+        result = hub::connect_loop(state) => result,
+        result = wait_for_local_shutdown_signal() => result,
+    };
+    email.stop().await;
+    result
 }
 
 pub(crate) async fn run_stdio_worker(
@@ -130,9 +136,10 @@ pub(crate) async fn run_stdio_worker(
         http_config,
         http_shutdown.clone(),
     ));
+    let email = EmailBackground::start(state.clone());
     let stdio = stdio_server::serve_stdio(state);
     tokio::pin!(stdio);
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut stdio => {
             local_task.abort();
             let _ = local_task.await;
@@ -154,6 +161,30 @@ pub(crate) async fn run_stdio_worker(
             match result {
                 Ok(Ok(())) | Ok(Err(_)) | Err(_) => Err(anyhow!("http_mcp_server_task_failed")),
             }
+        }
+    };
+    email.stop().await;
+    result
+}
+
+struct EmailBackground {
+    shutdown: CancellationToken,
+    task: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl EmailBackground {
+    fn start(state: AppState) -> Self {
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(crate::email::run(state, shutdown.clone()));
+        Self { shutdown, task }
+    }
+
+    async fn stop(self) {
+        self.shutdown.cancel();
+        match self.task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log_warn(format!("email service failed: {error}")),
+            Err(error) => log_warn(format!("email service shutdown failed: {error}")),
         }
     }
 }
@@ -187,6 +218,7 @@ pub(crate) fn build_app_state_with_private_state(
     }
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
     let event_store = crate::event_store::EventStore::open(&private_state)?;
+    let email = crate::email::EmailService::open(&private_state)?;
     let process_history = process_history::ProcessHistoryStore::open(&private_state);
     if let Err(error) = process_history.recover_active(chrono::Utc::now()) {
         log_warn(format!("process history recovery failed: {error}"));
@@ -202,6 +234,7 @@ pub(crate) fn build_app_state_with_private_state(
         config: Arc::new(RwLock::new(config)),
         private_state,
         event_store,
+        email,
         process_history,
         browser_runtime: browser_runtime_cell,
         runtime,
@@ -260,6 +293,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         listener.path().display()
     ));
     let hub_task = hub_enabled.then(|| tokio::spawn(hub::connect_loop(state.clone())));
+    let email = EmailBackground::start(state.clone());
     let mut local_task = tokio::spawn(listener.serve(state));
     let result = tokio::select! {
         result = &mut local_task => match result {
@@ -276,6 +310,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         task.abort();
         let _ = task.await;
     }
+    email.stop().await;
     result
 }
 

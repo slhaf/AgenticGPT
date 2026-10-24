@@ -533,6 +533,7 @@ mod tests {
         );
         let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
         AppState {
+            email: crate::email::EmailService::open(&private_state).expect("email store"),
             config_path: PathBuf::from("room-reads-test-config.json"),
             transport_agent_id: config.agent_id.clone(),
             config: Arc::new(RwLock::new(config)),

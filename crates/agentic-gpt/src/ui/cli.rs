@@ -39,6 +39,17 @@ pub(crate) async fn run() -> Result<()> {
         }
         Commands::Tui { config } => handle_tui(config_path(config), language).await,
         Commands::Tmux { config, command } => handle_tmux(config_path(config), command).await,
+        Commands::Email { config, command } => {
+            let path = config_path(config);
+            let _lock = crate::instance_lock::InstanceLock::acquire(&path, ".run.lock", "agent")?;
+            let config = Config::load(&path)?;
+            let EmailCommand::Recover {
+                notify_existing, ..
+            } = command;
+            let result = crate::email::recover(&config, notify_existing).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
     }
 }
 
@@ -57,6 +68,13 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
+    /// 邮件服务器身份变化后，停止 Agent 再显式重建收件箱关联。
+    Email {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[command(subcommand)]
+        command: EmailCommand,
+    },
     Run {
         #[arg(long)]
         config: Option<PathBuf>,
@@ -91,6 +109,18 @@ pub(crate) enum Commands {
         config: Option<PathBuf>,
         #[command(subcommand)]
         command: TmuxCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum EmailCommand {
+    /// 保留旧邮件副本，重新导入当前 INBOX；明确选择是否提醒现有邮件。
+    #[command(group(clap::ArgGroup::new("notifications").required(true).args(["notify_existing", "skip_existing_notifications"])))]
+    Recover {
+        #[arg(long, conflicts_with = "skip_existing_notifications")]
+        notify_existing: bool,
+        #[arg(long, conflicts_with = "notify_existing")]
+        skip_existing_notifications: bool,
     },
 }
 

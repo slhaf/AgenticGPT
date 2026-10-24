@@ -153,6 +153,63 @@ pub(crate) async fn authorize_operation(
     .await
 }
 
+/// Email decisions come from the email policy snapshot. Keep the complete
+/// bounded, multiline envelope/body preview visible through existing providers;
+/// the generic automatic reason is deliberately a much shorter summary.
+pub(crate) async fn authorize_email_operation(
+    state: &AppState,
+    config: &Config,
+    decision: crate::policy::PolicyDecision,
+    operation: &str,
+    preview: &str,
+) -> Result<OperationAuthorization, String> {
+    use crate::policy::PolicyDecision;
+    match decision {
+        PolicyDecision::Deny => return Err("policy_denied".to_owned()),
+        PolicyDecision::Allow => {
+            return Ok(OperationAuthorization {
+                approved: false,
+                result: None,
+            })
+        }
+        PolicyDecision::Confirm => {}
+    }
+    let mut content = confirmation_content(config, None, operation, "");
+    content.title = match (confirmation_language_is_zh(config), operation) {
+        (true, "room.email.send") => "确认发送邮件",
+        (true, _) => "确认移入邮件垃圾箱",
+        (false, "room.email.send") => "Confirm email send",
+        (false, _) => "Confirm moving email to Trash",
+    }
+    .to_owned();
+    let normalized = preview.replace("\r\n", "\n").replace('\r', "\n");
+    let mut characters = normalized
+        .chars()
+        .filter(|c| !c.is_control() || matches!(*c, '\n' | '\t'));
+    content.body = characters.by_ref().take(4096).collect();
+    if characters.next().is_some() {
+        content.body.push('…');
+    }
+    let result = request_confirmation_cancellable(
+        state,
+        config,
+        None,
+        operation,
+        &[content.body.clone()],
+        &content,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await;
+    if result == "allow_once" {
+        Ok(OperationAuthorization {
+            approved: true,
+            result: Some(result),
+        })
+    } else {
+        Err(result)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn authorize_operation_cancellable(
     state: &AppState,

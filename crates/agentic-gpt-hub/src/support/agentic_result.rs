@@ -26,6 +26,49 @@ impl AgenticResult {
         }
     }
 
+    pub(crate) fn from_native_email_value(mut value: Value) -> Self {
+        let images = value
+            .as_object_mut()
+            .and_then(|value| value.remove("images"));
+        let mut content = vec![Content::text(content_text(&value))];
+        if let Some(images) = images.and_then(|images| images.as_array().cloned()) {
+            for image in images {
+                if let (Some(data), Some(mime_type)) =
+                    (image["data"].as_str(), image["mimeType"].as_str())
+                {
+                    content.push(Content::image(data.to_owned(), mime_type.to_owned()));
+                }
+            }
+        }
+        let is_error = value.get("error").is_some();
+        let result = Self {
+            content,
+            structured_content: Some(value),
+            is_error: Some(is_error),
+            meta: None,
+        };
+        // These fields serialize exactly as the CallToolResult built below.
+        // Count the escaped JSON in text content, metadata and image blocks.
+        if serde_json::to_vec(&result)
+            .map(|bytes| bytes.len() > 8 * 1024 * 1024)
+            .unwrap_or(true)
+        {
+            let mut error = serde_json::json!({"error": {
+                "code": "email_response_too_large",
+                "message": "邮件响应超出 8 MiB 的 MCP 结果上限。"
+            }});
+            if let Some(events) = result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("events"))
+            {
+                error["events"] = events.clone();
+            }
+            return Self::from_native_value(error);
+        }
+        result
+    }
+
     pub(crate) fn into_call_tool_result(self) -> CallToolResult {
         let mut result = CallToolResult::default();
         result.content = self.content;

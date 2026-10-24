@@ -20,6 +20,114 @@ use crate::REQUEST_TIMEOUT_SECS;
 
 const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
+pub(crate) async fn room_email_list(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<agentic_gpt_protocol::RoomEmailListRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomEmailList {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_email_list_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_email_read(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<agentic_gpt_protocol::RoomEmailReadRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomEmailRead {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_email_read_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_email_search(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<agentic_gpt_protocol::RoomEmailSearchRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomEmailSearch {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_email_search_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_email_attachment(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<agentic_gpt_protocol::RoomEmailAttachmentRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomEmailAttachment {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_email_attachment_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_email_send(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<agentic_gpt_protocol::RoomEmailSendRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomEmailSend {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_email_send_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_email_operate(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<agentic_gpt_protocol::RoomEmailOperateRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomEmailOperate {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_email_operate_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
 pub(crate) async fn room_diary_active(
     State(state): State<HubState>,
     headers: HeaderMap,
@@ -421,6 +529,24 @@ pub(super) fn room_value_response(value: Value) -> Response {
         return Json(value).into_response();
     };
     let status = match code {
+        "email_not_found" | "email_attachment_not_found" => StatusCode::NOT_FOUND,
+        "email_disabled" | "email_policy_denied" => StatusCode::FORBIDDEN,
+        code if code.starts_with("email_confirmation_") => StatusCode::FORBIDDEN,
+        "email_identity_recovery_required"
+        | "email_remote_message_unavailable"
+        | "email_remote_operation_unsupported"
+        | "email_content_expired"
+        | "email_render_cache_expired" => StatusCode::CONFLICT,
+        "email_renderer_unavailable" | "email_renderer_busy" | "email_password_unavailable" => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        code if code.starts_with("email_imap_") => StatusCode::SERVICE_UNAVAILABLE,
+        "email_renderer_timeout" => StatusCode::GATEWAY_TIMEOUT,
+        "email_worker_failed"
+        | "email_operation_failed"
+        | "email_renderer_worker_failed"
+        | "email_renderer_io_failed"
+        | "email_renderer_response_invalid" => StatusCode::INTERNAL_SERVER_ERROR,
         "target_exists"
         | "idempotency_conflict"
         | "room_state_conflict"

@@ -190,6 +190,36 @@ pub(super) async fn call_app_tool(
                 .user_notify_send(Parameters(decode_args(arguments)?))
                 .await
         }
+        "room.email.list" => {
+            server
+                .room_email_list(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.email.read" => {
+            server
+                .room_email_read(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.email.search" => {
+            server
+                .room_email_search(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.email.attachment" => {
+            server
+                .room_email_attachment(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.email.send" => {
+            server
+                .room_email_send(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.email.operate" => {
+            server
+                .room_email_operate(Parameters(decode_args(arguments)?))
+                .await
+        }
         "room.diary.active" => {
             server
                 .room_diary_active(Parameters(decode_args(arguments)?))

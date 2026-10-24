@@ -152,6 +152,8 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
                 | "tmux.closeSession"
                 | "skills.install"
                 | "skills.run"
+                | "room.email.send"
+                | "room.email.operate"
         );
         let read_only = tool_is_read_only(name);
         let destructive = matches!(
@@ -165,6 +167,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
                 | "mcp.batch"
                 | "mcp.callTool"
                 | "room.maintenance.submit"
+                | "room.email.operate"
                 | "skills.deactivate"
                 | "skills.install"
                 | "skills.install.cancel"
@@ -201,6 +204,9 @@ fn tool_is_read_only(name: &str) -> bool {
             | "mcp.callTool"
             | "user.notify.send"
             | "room.maintenance.submit"
+            | "room.email.send"
+            | "room.email.operate"
+            | "room.email.attachment"
             | "skills.activate"
             | "skills.deactivate"
             | "skills.install"
@@ -1085,6 +1091,174 @@ impl AgenticMcpServer {
                 }))
             })
             .unwrap_or_else(|error| json!({ "error": { "code": "serialization_error", "message": error.to_string() } }));
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.email.list",
+        description = "从活动 Room 的本地邮件索引列出当前 INBOX，按接收时间从新到旧；limit 为 1–100、默认 20。filter 的 receivedAfter 含边界、receivedBefore 不含边界；cursor 必须沿用原 filter，可改变 limit。返回 items、hasMore、可选 nextCursor 和 sync 同步状态；不会触发手动同步或标为已读，不接受 agentId。"
+    )]
+    async fn room_email_list(
+        &self,
+        params: Parameters<args::RoomEmailListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload: agentic_gpt_protocol::RoomEmailListRequest =
+            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
+                mcp_invalid_params("email_arguments_invalid", error.to_string())
+            })?)
+            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomEmailList {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_email_list_timeout")
+        });
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.email.read",
+        description = "按稳定邮件 id 读取活动 Room 邮件；view 默认 text，返回规范化正文和 plain/markdown 格式；image 返回不联网的图片分片，imageWithRemote 仅额外下载邮件引用的远程图片，不加载远程 CSS，不执行脚本或提交表单。返回邮件详情、附件清单、hasMore 和可选 nextCursor；续读保持 id/view，不会标为已读。sent/unknown 等本地发送记录可回看；内容已清理或不存在时返回明确 error。不接受 agentId。"
+    )]
+    async fn room_email_read(
+        &self,
+        params: Parameters<args::RoomEmailReadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload: agentic_gpt_protocol::RoomEmailReadRequest =
+            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
+                mcp_invalid_params("email_arguments_invalid", error.to_string())
+            })?)
+            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomEmailRead {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_email_read_timeout")
+        });
+        Ok(AgenticResult::from_native_email_value(value).into_call_tool_result())
+    }
+
+    #[tool(
+        name = "room.email.search",
+        description = "在活动 Room 已保存的收件及发送记录（含 unknown）中做不区分大小写的字面子串搜索。未传 id 时 field 默认 all，匹配主题、发件人与正文；传 id 时无论 field 如何均规范化为 body。返回 items(ref/text)、truncated 和 sync；邮箱命中的 ref 为邮件 id，正文命中的 ref 可直接作为 read(view=text) 的 cursor。不接受 agentId，不修改邮件。"
+    )]
+    async fn room_email_search(
+        &self,
+        params: Parameters<args::RoomEmailSearchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload: agentic_gpt_protocol::RoomEmailSearchRequest =
+            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
+                mcp_invalid_params("email_arguments_invalid", error.to_string())
+            })?)
+            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomEmailSearch {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_email_search_timeout")
+        });
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.email.attachment",
+        description = "读取或下载活动 Room 邮件附件，id 和 attachmentId 来自 read。download 默认 false，可内联图片或小型 UTF-8 文本；其他格式/超预算应下载后处理。提供 path 时无论 download 如何均采用下载模式；path 必须相对 workspace，禁止逃逸和覆盖；省略目标时保存到 downloads/email/<mail-id>/<附件名>。下载仅返回规范化相对 path，内联图片返回 image blocks。不接受 agentId。"
+    )]
+    async fn room_email_attachment(
+        &self,
+        params: Parameters<args::RoomEmailAttachmentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload: agentic_gpt_protocol::RoomEmailAttachmentRequest =
+            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
+                mcp_invalid_params("email_arguments_invalid", error.to_string())
+            })?)
+            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomEmailAttachment {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_email_attachment_timeout")
+        });
+        Ok(AgenticResult::from_native_email_value(value).into_call_tool_result())
+    }
+
+    #[tool(
+        name = "room.email.send",
+        description = "使用活动 Room 配置账户发送纯文本邮件，to 至少一个地址；cc/bcc 可省略，replyToId 引用本地原邮件以生成回复头。遵守 email.sendPolicy：allow 直接发、confirm 必须明确批准、deny 拒绝；请求不能覆盖策略。返回稳定 id 和 sent/unknown；unknown 表示是否被 SMTP 接受尚不确定，不会自动重试，再次调用可能重复发送。可通过 search/read 查回记录。不接受 agentId。"
+    )]
+    async fn room_email_send(
+        &self,
+        params: Parameters<args::RoomEmailSendArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload: agentic_gpt_protocol::RoomEmailSendRequest =
+            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
+                mcp_invalid_params("email_arguments_invalid", error.to_string())
+            })?)
+            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomEmailSend {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_email_send_timeout")
+        });
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.email.operate",
+        description = "对活动 Room 邮件显式执行 markRead、markUnread、flag、unflag 或 trash。前四项直接执行；trash 仅移入服务器垃圾箱并遵守 email.trashPolicy，confirm 拒绝/超时/通道不可用不得移动，不支持永久删除。服务器成功后更新本地状态；本地发送记录不支持服务器操作。返回 id、action、status=applied 或明确 error。不接受 agentId。"
+    )]
+    async fn room_email_operate(
+        &self,
+        params: Parameters<args::RoomEmailOperateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload: agentic_gpt_protocol::RoomEmailOperateRequest =
+            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
+                mcp_invalid_params("email_arguments_invalid", error.to_string())
+            })?)
+            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomEmailOperate {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_email_operate_timeout")
+        });
         Ok(result_from_value(value))
     }
 

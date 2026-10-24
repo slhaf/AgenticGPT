@@ -32,6 +32,14 @@ mod config_templates;
 mod config_tui;
 #[path = "operations/confirmation.rs"]
 mod confirmation;
+#[path = "room/email/mod.rs"]
+mod email;
+#[path = "room/email_files.rs"]
+mod email_files;
+#[path = "room/email_remote.rs"]
+mod email_remote;
+#[path = "room/email_render.rs"]
+mod email_render;
 #[path = "operations/event_notifications.rs"]
 mod event_notifications;
 #[path = "storage/event_store.rs"]
@@ -104,10 +112,16 @@ use anyhow::Result;
 
 pub(crate) use config::WorkerProfile;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Render untrusted HTML in a process with limits before starting Tokio threads.
+    if std::env::args().nth(1).as_deref() == Some("__email-render-worker") {
+        return email_render::worker();
+    }
     let _ = rustls::crypto::ring::default_provider().install_default();
-    cli::run().await
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(cli::run())
 }
 
 #[cfg(test)]

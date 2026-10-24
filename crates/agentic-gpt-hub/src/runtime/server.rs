@@ -93,6 +93,18 @@ pub(crate) async fn serve(
             "/v1/notify/android/register",
             post(notify::android_notify_register),
         )
+        .route("/v1/room/email/list", post(room::http::room_email_list))
+        .route("/v1/room/email/read", post(room::http::room_email_read))
+        .route("/v1/room/email/search", post(room::http::room_email_search))
+        .route(
+            "/v1/room/email/attachment",
+            post(room::http::room_email_attachment),
+        )
+        .route("/v1/room/email/send", post(room::http::room_email_send))
+        .route(
+            "/v1/room/email/operate",
+            post(room::http::room_email_operate),
+        )
         .route("/v1/room/diary/active", post(room::http::room_diary_active))
         .route("/v1/room/diary/read", post(room::http::room_diary_read))
         .route(

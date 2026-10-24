@@ -914,6 +914,270 @@ paths:
           $ref: "#/components/responses/NotFound"
         "502":
           $ref: "#/components/responses/BadGateway"
+  /v1/room/email/list:
+    post:
+      operationId: roomEmailList
+      description: List the active Room account INBOX from its local index, newest receivedAt first. Does not sync or mark read; unread and inclusive receivedAfter / exclusive receivedBefore filters are bound to the opaque cursor. No agentId is accepted.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomEmailListRequest"
+      responses:
+        "200":
+          description: Email result from the active Room Agent.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomEmailListResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
+  /v1/room/email/read:
+    post:
+      operationId: roomEmailRead
+      description: 读取本地邮件详情，默认 view=text；image 离线渲染图片分片，imageWithRemote 仅额外下载远程图片，不加载远程 CSS，不执行脚本或提交表单。不会标为已读；续读保持 id/view。HTTP 图片使用 mimeType/data Base64；MCP 返回原生图片内容，structuredContent 不重复携带图片数据。
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomEmailReadRequest"
+      responses:
+        "200":
+          description: Email result from the active Room Agent.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomEmailReadResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
+  /v1/room/email/search:
+    post:
+      operationId: roomEmailSearch
+      description: Case insensitive literal substring search over stored received and sent or unknown outgoing email. With id all field values normalize to body and refs are read text cursors; without id refs are mail IDs. No result cursor; truncated reports the response bound.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomEmailSearchRequest"
+      responses:
+        "200":
+          description: Email result from the active Room Agent.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomEmailSearchResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
+  /v1/room/email/attachment:
+    post:
+      operationId: roomEmailAttachment
+      description: Inline a small UTF-8 text or supported image attachment, or atomically download into workspace. Supplying path always normalizes download to true. Paths cannot escape workspace or overwrite existing files; default downloads/email/<mail-id>/<name>. Download returns only the relative path.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomEmailAttachmentRequest"
+      responses:
+        "200":
+          description: Email result from the active Room Agent.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomEmailAttachmentResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
+  /v1/room/email/send:
+    post:
+      operationId: roomEmailSend
+      description: Send plain text using the configured Room account and email.sendPolicy. Confirm requires explicit approval and deny cannot be overridden. Returns a stable local record ID and sent or unknown. Unknown is retained for search/read, never automatically retried; a new send may duplicate delivery.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomEmailSendRequest"
+      responses:
+        "200":
+          description: Email result from the active Room Agent.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomEmailSendResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
+  /v1/room/email/operate:
+    post:
+      operationId: roomEmailOperate
+      description: Explicitly markRead, markUnread, flag, unflag or trash an incoming mail. Trash moves to server trash subject to email.trashPolicy; no permanent deletion. Non-trash operations need no confirmation. Local outgoing records do not support remote operations.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomEmailOperateRequest"
+      responses:
+        "200":
+          description: Email result from the active Room Agent.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RoomEmailOperateResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AgentError"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "409":
+          $ref: "#/components/responses/AgentError"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "502":
+          $ref: "#/components/responses/AgentError"
+        "503":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/AgentError"
   /v1/room/diary/active:
     post:
       operationId: roomDiaryActive
@@ -2698,6 +2962,40 @@ components:
           description: Bounded Markdown content when available.
         issue:
           $ref: "#/components/schemas/RoomDiaryLayerIssue"
+    RoomEmailFilter:
+      {"type": "object", "additionalProperties": false, "properties": {"unread": {"type": "boolean"}, "receivedAfter": {"type": "string", "format": "date-time", "description": "Inclusive lower receivedAt bound."}, "receivedBefore": {"type": "string", "format": "date-time", "description": "Exclusive upper receivedAt bound."}}}
+    RoomEmailListRequest:
+      {"type": "object", "additionalProperties": false, "properties": {"cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}, "filter": {"$ref": "#/components/schemas/RoomEmailFilter"}}}
+    RoomEmailReadRequest:
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "view": {"type": "string", "enum": ["text", "image", "imageWithRemote"], "default": "text", "description": "text 为规范化正文；image 不联网；imageWithRemote 仅额外下载远程图片，不加载远程 CSS，不执行脚本或提交表单。"}, "cursor": {"type": "string"}}, "required": ["id"]}
+    RoomEmailSearchRequest:
+      {"type": "object", "additionalProperties": false, "properties": {"query": {"type": "string", "minLength": 1}, "id": {"type": "string"}, "field": {"type": "string", "enum": ["all", "subject", "body", "from"], "default": "all", "description": "When id is present all field values normalize to body."}}, "required": ["query"]}
+    RoomEmailAttachmentRequest:
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "attachmentId": {"type": "string"}, "download": {"type": "boolean", "default": false}, "path": {"type": "string", "description": "Workspace-relative destination; presence forces download=true."}}, "required": ["id", "attachmentId"]}
+    RoomEmailSendRequest:
+      {"type": "object", "additionalProperties": false, "properties": {"to": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "cc": {"type": "array", "items": {"type": "string"}}, "bcc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "text": {"type": "string"}, "replyToId": {"type": "string"}}, "required": ["to", "subject", "text"]}
+    RoomEmailOperateRequest:
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "action": {"type": "string", "enum": ["markRead", "markUnread", "flag", "unflag", "trash"]}}, "required": ["id", "action"]}
+    RoomEmailSync:
+      {"type": "object", "additionalProperties": false, "properties": {"initialSyncComplete": {"type": "boolean"}, "lastSuccessfulSyncAt": {"type": ["string", "null"]}, "lastError": {"type": ["string", "null"]}, "state": {"type": "string", "enum": ["disabled", "syncing", "ready", "recoveryRequired", "error"]}}, "required": ["initialSyncComplete"]}
+    RoomEmailListItem:
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "from": {"type": "string"}, "subject": {"type": "string"}, "receivedAt": {"type": "string", "format": "date-time"}, "unread": {"type": "boolean"}, "snippet": {"type": "string"}}, "required": ["id", "from", "subject", "receivedAt", "unread", "snippet"]}
+    RoomEmailListResponse:
+      {"type": "object", "additionalProperties": false, "properties": {"items": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailListItem"}}, "hasMore": {"type": "boolean"}, "nextCursor": {"type": ["string", "null"]}, "sync": {"$ref": "#/components/schemas/RoomEmailSync"}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["items", "hasMore", "sync"]}
+    RoomEmailSearchResponse:
+      {"type": "object", "additionalProperties": false, "properties": {"items": {"type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"ref": {"type": "string"}, "text": {"type": "string"}}, "required": ["ref", "text"]}}, "truncated": {"type": "boolean"}, "sync": {"$ref": "#/components/schemas/RoomEmailSync"}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["items", "truncated", "sync"]}
+    RoomEmailAttachmentInfo:
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "mimeType": {"type": "string"}, "size": {"type": "integer", "minimum": 0}}, "required": ["id", "name", "mimeType", "size"]}
+    RoomEmailImage:
+      {"type": "object", "additionalProperties": false, "properties": {"mimeType": {"type": "string"}, "data": {"type": "string", "contentEncoding": "base64"}}, "required": ["mimeType", "data"]}
+    RoomEmailReadResponse:
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "array", "items": {"type": "string"}}, "cc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "receivedAt": {"type": "string", "format": "date-time"}, "status": {"type": "string", "enum": ["received", "pending", "sent", "unknown", "failed", "denied"]}, "body": {"type": "string"}, "format": {"type": "string", "enum": ["plain", "markdown"]}, "attachments": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailAttachmentInfo"}}, "hasMore": {"type": "boolean"}, "nextCursor": {"type": ["string", "null"]}, "blockedRemoteImages": {"type": "integer", "minimum": 0, "description": "Distinct external image references refused by the offline renderer, including external CSS background images."}, "images": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailImage"}}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["id", "from", "to", "cc", "subject", "receivedAt", "status", "attachments", "hasMore"]}
+    RoomEmailAttachmentResponse:
+      {"oneOf": [{"type": "object", "additionalProperties": false, "properties": {"path": {"type": "string"}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["path"]}, {"type": "object", "additionalProperties": false, "properties": {"body": {"type": "string"}, "format": {"type": "string", "enum": ["plain"]}, "images": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailImage"}}, "events": {"$ref": "#/components/schemas/EventPanel"}}}]}
+    RoomEmailSendResponse:
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "status": {"type": "string", "enum": ["sent", "unknown"]}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["id", "status"]}
+    RoomEmailOperateResponse:
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "action": {"type": "string", "enum": ["markRead", "markUnread", "flag", "unflag", "trash"]}, "status": {"type": "string", "enum": ["applied"]}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["id", "action", "status"]}
     RoomDiaryActiveRequest:
       type: object
       additionalProperties: false

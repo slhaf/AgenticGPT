@@ -146,6 +146,12 @@ pub(crate) const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("mcp.list", ToolNamespace::Mcp),
     ("process.batch", ToolNamespace::Process),
     ("process.exec", ToolNamespace::Process),
+    ("room.email.list", ToolNamespace::Room),
+    ("room.email.read", ToolNamespace::Room),
+    ("room.email.search", ToolNamespace::Room),
+    ("room.email.attachment", ToolNamespace::Room),
+    ("room.email.send", ToolNamespace::Room),
+    ("room.email.operate", ToolNamespace::Room),
     ("room.diary.active", ToolNamespace::Room),
     ("room.diary.read", ToolNamespace::Room),
     ("room.maintenance.status", ToolNamespace::Room),
@@ -198,6 +204,9 @@ pub(crate) fn tool_is_read_only(name: &str) -> bool {
             | "skills.install"
             | "skills.install.cancel"
             | "room.maintenance.submit"
+            | "room.email.send"
+            | "room.email.operate"
+            | "room.email.attachment"
             | "skills.run"
             | "event.mark"
             | "file.edit"
@@ -224,6 +233,7 @@ pub(crate) fn tool_is_destructive(name: &str) -> bool {
             | "skills.install"
             | "skills.install.cancel"
             | "room.maintenance.submit"
+            | "room.email.operate"
             | "skills.setActive"
             | "skills.run"
             | "event.mark"
@@ -245,6 +255,9 @@ pub(crate) fn tool_is_open_world(name: &str) -> bool {
             | "tmux.closeSession"
             | "skills.install"
             | "skills.run"
+            | "room.email.read"
+            | "room.email.send"
+            | "room.email.operate"
     )
 }
 
@@ -269,7 +282,13 @@ fn operation_namespace(operation: &str) -> Option<ToolNamespace> {
 fn is_current_room_operation(operation: &str) -> bool {
     matches!(
         operation,
-        "room.diary.active"
+        "room.email.list"
+            | "room.email.read"
+            | "room.email.search"
+            | "room.email.attachment"
+            | "room.email.send"
+            | "room.email.operate"
+            | "room.diary.active"
             | "room.diary.read"
             | "room.notebook.recent"
             | "room.notebook.search"
@@ -373,6 +392,12 @@ pub(crate) fn hub_command_name(command: &HubCommand) -> &'static str {
         HubCommand::McpCallTool { .. } => "mcp.callTool",
         HubCommand::McpBatch { .. } => "mcp.batch",
         HubCommand::UserNotifyDeliver { .. } => "user.notify.deliver",
+        HubCommand::RoomEmailList { .. } => "room.email.list",
+        HubCommand::RoomEmailRead { .. } => "room.email.read",
+        HubCommand::RoomEmailSearch { .. } => "room.email.search",
+        HubCommand::RoomEmailAttachment { .. } => "room.email.attachment",
+        HubCommand::RoomEmailSend { .. } => "room.email.send",
+        HubCommand::RoomEmailOperate { .. } => "room.email.operate",
         HubCommand::RoomDiaryActive { .. } => "room.diary.active",
         HubCommand::RoomDiaryRead { .. } => "room.diary.read",
         HubCommand::RoomNotebookRecent { .. } => "room.notebook.recent",

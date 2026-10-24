@@ -1,3 +1,7 @@
+use super::email::{
+    RoomEmailAttachmentRequest, RoomEmailListRequest, RoomEmailOperateRequest,
+    RoomEmailReadRequest, RoomEmailSearchRequest, RoomEmailSendRequest,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +147,36 @@ pub enum HubCommand {
         request_id: String,
         payload: UserNotifyDeliveryRequest,
     },
+    #[serde(rename = "room.email.list")]
+    RoomEmailList {
+        request_id: String,
+        payload: RoomEmailListRequest,
+    },
+    #[serde(rename = "room.email.read")]
+    RoomEmailRead {
+        request_id: String,
+        payload: RoomEmailReadRequest,
+    },
+    #[serde(rename = "room.email.search")]
+    RoomEmailSearch {
+        request_id: String,
+        payload: RoomEmailSearchRequest,
+    },
+    #[serde(rename = "room.email.attachment")]
+    RoomEmailAttachment {
+        request_id: String,
+        payload: RoomEmailAttachmentRequest,
+    },
+    #[serde(rename = "room.email.send")]
+    RoomEmailSend {
+        request_id: String,
+        payload: RoomEmailSendRequest,
+    },
+    #[serde(rename = "room.email.operate")]
+    RoomEmailOperate {
+        request_id: String,
+        payload: RoomEmailOperateRequest,
+    },
     #[serde(rename = "room.diary.active")]
     RoomDiaryActive {
         request_id: String,
@@ -273,6 +307,12 @@ impl HubCommand {
             | Self::McpCallTool { request_id, .. }
             | Self::McpBatch { request_id, .. }
             | Self::UserNotifyDeliver { request_id, .. }
+            | Self::RoomEmailList { request_id, .. }
+            | Self::RoomEmailRead { request_id, .. }
+            | Self::RoomEmailSearch { request_id, .. }
+            | Self::RoomEmailAttachment { request_id, .. }
+            | Self::RoomEmailSend { request_id, .. }
+            | Self::RoomEmailOperate { request_id, .. }
             | Self::RoomDiaryActive { request_id, .. }
             | Self::RoomDiaryRead { request_id, .. }
             | Self::RoomNotebookRecent { request_id, .. }

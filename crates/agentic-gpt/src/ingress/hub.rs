@@ -1411,6 +1411,7 @@ mod reporting_tests {
         let event_store =
             crate::event_store::EventStore::open(&private_state).expect("event store");
         AppState {
+            email: crate::email::EmailService::open(&private_state).expect("email store"),
             transport_agent_id: config.agent_id.clone(),
             config_path: root.join("agent.json"),
             config: Arc::new(tokio::sync::RwLock::new(config)),

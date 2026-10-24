@@ -25,8 +25,11 @@ use crate::state::AppState;
 use agentic_gpt_protocol::AcquireConfirmation;
 #[path = "file_authorization.rs"]
 mod file_authorization;
+#[path = "file_binary.rs"]
+mod file_binary;
 use file_authorization::{authorize_file_targets, authorize_read_requests};
 pub(crate) use file_authorization::{read_request_with_images, search_request};
+pub(crate) use file_binary::create_binary_in_workspace;
 
 use image::{AnimationDecoder, ImageDecoder, ImageEncoder};
 
@@ -511,18 +514,13 @@ pub(crate) fn read_with_images(
             ));
         }
         metadata_value["encoding"] = json!("image");
-        return match format {
-            DetectedImageFormat::Gif => {
-                read_gif_image(bytes, metadata_value, include_metadata, image_budget_bytes)
-            }
-            _ => read_static_image(
-                bytes,
-                format,
-                metadata_value,
-                include_metadata,
-                image_budget_bytes,
-            ),
-        };
+        return decode_image_bytes(
+            bytes,
+            format,
+            metadata_value,
+            include_metadata,
+            image_budget_bytes,
+        );
     }
 
     let text = String::from_utf8(bytes)
@@ -592,6 +590,35 @@ impl DetectedImageFormat {
             Self::Webp => image::ImageFormat::WebP,
             Self::Gif => image::ImageFormat::Gif,
         }
+    }
+}
+
+/// Shared validation and decoding for file and in-memory attachment images.
+pub(crate) fn read_image_bytes(
+    bytes: &[u8],
+    budget: usize,
+) -> std::result::Result<Option<ReadOutput>, FileError> {
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(FileError::new(
+            "file_too_large",
+            "image exceeds the 8 MiB content bound",
+        ));
+    }
+    DetectedImageFormat::from_bytes(bytes)
+        .map(|format| decode_image_bytes(bytes.to_vec(), format, json!({}), false, budget))
+        .transpose()
+}
+
+fn decode_image_bytes(
+    bytes: Vec<u8>,
+    format: DetectedImageFormat,
+    metadata: Value,
+    include_metadata: bool,
+    budget: usize,
+) -> std::result::Result<ReadOutput, FileError> {
+    match format {
+        DetectedImageFormat::Gif => read_gif_image(bytes, metadata, include_metadata, budget),
+        _ => read_static_image(bytes, format, metadata, include_metadata, budget),
     }
 }
 
@@ -2226,10 +2253,18 @@ fn commit_create(change: &mut PlannedChange) -> std::result::Result<(), FileErro
         .temp
         .take()
         .ok_or_else(|| FileError::new("file_write_failed", "staged file is missing"))?;
-    if let Err(error) = fs::hard_link(&temp, &change.target.requested) {
-        let _ = fs::remove_file(&temp);
+    commit_new_file(&temp, &change.target.requested)
+}
+
+fn commit_new_file(temp: &Path, target: &Path) -> std::result::Result<(), FileError> {
+    if let Err(error) = fs::hard_link(temp, target) {
+        let _ = fs::remove_file(temp);
         return Err(FileError::new(
-            "file_write_failed",
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "file_already_exists"
+            } else {
+                "file_write_failed"
+            },
             &format!("file commit failed: {error}"),
         ));
     }
@@ -2536,11 +2571,14 @@ fn stage_temp(
             ".agentic-file-tmp-{}",
             uuid::Uuid::new_v4().simple()
         ));
-        let mut file = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-        {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(permissions) = permissions {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            options.mode(permissions.mode());
+        }
+        let mut file = match options.open(&temp) {
             Ok(file) => file,
             Err(_) => continue,
         };

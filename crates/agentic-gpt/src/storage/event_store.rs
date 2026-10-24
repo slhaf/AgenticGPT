@@ -177,6 +177,50 @@ impl RawEvent {
 }
 
 impl EventStore {
+    /// Delivers a durable producer outbox item. The receipt survives event-history cleanup.
+    pub(crate) fn inject_external_once(
+        &self,
+        external_id: &str,
+        request: &EventInjectRequest,
+        low_ttl_seconds: u64,
+    ) -> Result<()> {
+        validate_reference(external_id, "event_delivery_id")?;
+        validate_message(&request.message)?;
+        validate_reference(&request.reference, "event_ref")?;
+        let now = Utc::now();
+        let severity = request.severity.unwrap_or(EventSeverity::Low);
+        let expires_at = expiry_for(severity, low_ttl_seconds, now)?;
+        self.transact(|transaction| {
+            // An additive producer receipt table leaves the existing event schema intact.
+            transaction.execute_batch(
+                "CREATE TABLE IF NOT EXISTS external_deliveries (delivery_id TEXT PRIMARY KEY NOT NULL)",
+            )?;
+            let delivered: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_deliveries WHERE delivery_id=?1)",
+                params![external_id],
+                |row| row.get(0),
+            )?;
+            if delivered {
+                return Ok(());
+            }
+            expire_and_cleanup_at(transaction, now)?;
+            ensure_pending_capacity(transaction)?;
+            insert_event(
+                transaction,
+                &request.message,
+                severity,
+                now,
+                &EventSource { kind: EventSourceKind::External, reference: request.reference.clone() },
+                expires_at.as_ref(),
+            )?;
+            transaction.execute(
+                "INSERT INTO external_deliveries(delivery_id) VALUES(?1)",
+                params![external_id],
+            )?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn open(paths: &PrivateStatePaths) -> Result<Arc<Self>> {
         let path = paths.root.join("events.sqlite3");
         ensure_private_database_file(&paths.root, &path)?;

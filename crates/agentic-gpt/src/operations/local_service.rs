@@ -372,6 +372,42 @@ async fn dispatch_inner(
         HubCommand::UserNotifyDeliver { payload, .. } => Ok(serde_json::to_value(
             notify::deliver_freedesktop_notification(payload).await,
         )?),
+        HubCommand::RoomEmailList { payload, .. } => {
+            Ok(
+                crate::email::dispatch(&state, "room.email.list", serde_json::to_value(payload)?)
+                    .await,
+            )
+        }
+        HubCommand::RoomEmailRead { payload, .. } => {
+            Ok(
+                crate::email::dispatch(&state, "room.email.read", serde_json::to_value(payload)?)
+                    .await,
+            )
+        }
+        HubCommand::RoomEmailSearch { payload, .. } => {
+            Ok(
+                crate::email::dispatch(&state, "room.email.search", serde_json::to_value(payload)?)
+                    .await,
+            )
+        }
+        HubCommand::RoomEmailAttachment { payload, .. } => Ok(crate::email::dispatch(
+            &state,
+            "room.email.attachment",
+            serde_json::to_value(payload)?,
+        )
+        .await),
+        HubCommand::RoomEmailSend { payload, .. } => {
+            Ok(
+                crate::email::dispatch(&state, "room.email.send", serde_json::to_value(payload)?)
+                    .await,
+            )
+        }
+        HubCommand::RoomEmailOperate { payload, .. } => Ok(crate::email::dispatch(
+            &state,
+            "room.email.operate",
+            serde_json::to_value(payload)?,
+        )
+        .await),
         HubCommand::RoomDiaryActive { payload, .. } => map_room_read_result(
             room_reads::diary_active(&state, payload).await,
             "room_diary_active_failed",

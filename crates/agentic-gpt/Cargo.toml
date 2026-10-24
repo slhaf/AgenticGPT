@@ -25,7 +25,15 @@ ratatui.workspace = true
 crossterm.workspace = true
 ignore = "=0.4.31"
 image = { version = "=0.25.8", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+imap = { version = "=3.0.0-alpha.15", default-features = false }
+imap-proto = "0.16.1"
+lettre = { version = "=0.11.23", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
+mailparse = "=0.18.0"
+htmd = "=0.5.6"
+html5ever = "=0.38.0"
+markup5ever_rcdom = "0.38"
 libc = "0.2"
+litehtml = { version = "=0.2.6", features = ["vendored", "email", "pixbuf"] }
 notify-rust = "4.11"
 zbus = "5.15"
 parking_lot = "0.12"
@@ -51,4 +59,8 @@ urlencoding = "2.1"
 xz2 = "0.1"
 unicode-width.workspace = true
 uuid.workspace = true
+webpki-roots = "1"
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+rcgen = { version = "=0.13.2", default-features = false, features = ["crypto", "ring"] }
