@@ -289,14 +289,7 @@ impl Owner {
             );
             self.cli
                 .run(&["login", "--apikey"], env, None, false, false)
-                .await
-                .map_err(|e| {
-                    if matches!(e, Error::Network) {
-                        e
-                    } else {
-                        Error::Auth
-                    }
-                })?;
+                .await?;
             status = self.status().await?;
         }
         verify_identity(&status, config)?;
@@ -315,14 +308,7 @@ impl Owner {
                     false,
                     false,
                 )
-                .await
-                .map_err(|e| {
-                    if matches!(e, Error::Network) {
-                        e
-                    } else {
-                        Error::Locked
-                    }
-                })?;
+                .await?;
             let session = String::from_utf8(bytes).map_err(|_| Error::Locked)?;
             let session = session.trim();
             if session.is_empty() || session.len() > 8192 || session.chars().any(char::is_control) {

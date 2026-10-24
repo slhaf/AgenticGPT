@@ -103,7 +103,11 @@ args=sys.argv[1:]
 assert all('new-test' not in arg for arg in args)
 if args==['--version']: print('2026.10.0')
 elif args==['status']:
- print(json.dumps({'serverUrl':'https://vault.example.invalid','userEmail':'test@example.invalid','status':'unlocked','lastSync':'2026-10-01T00:00:00Z'}))
+ print(json.dumps({'serverUrl':'https://vault.example.invalid','userEmail':'test@example.invalid','status':'unauthenticated' if (root/'unauthenticated').exists() else 'unlocked','lastSync':'2026-10-01T00:00:00Z'}))
+elif args[:2]==['config','server']:print('Configured server.')
+elif args==['login','--apikey']:
+ assert os.environ.get('BW_CLIENTID') and os.environ.get('BW_CLIENTSECRET')
+ print((root/'bootstrap-failure').read_text(),file=sys.stderr);sys.exit(1)
 elif args==['sync']:
  with open(root/'sync-count','a') as f:f.write('1\n')
  (root/'sync-pid').write_text(str(os.getpid()))
@@ -323,6 +327,32 @@ async fn secret_only_known_transport_failure_allows_native_stale_reads() {
             assert_eq!(result["error"]["code"], code);
             assert!(result.get("stale").is_none());
             assert!(!result.to_string().contains("old-test-value"));
+        }
+        // A real login subprocess is a separate owner path: compatibility and
+        // TLS failures must not be rewritten as invalid credentials there.
+        let reference = fixture.root.join("credential");
+        std::fs::write(&reference, "synthetic-bootstrap-credential").unwrap();
+        {
+            let mut config = fixture.state.config.write().await;
+            config.room.secret.client_id = format!("file:{}", reference.display());
+            config.room.secret.client_secret = format!("file:{}", reference.display());
+        }
+        fixture.write("unauthenticated", "");
+        for (failure, code) in [
+            (
+                "userDecryptionOptions is missing in response",
+                "secret_provider_unavailable",
+            ),
+            (
+                "TLS certificate validation failed",
+                "secret_provider_unavailable",
+            ),
+            ("invalid client", "secret_authentication_failed"),
+        ] {
+            fixture.write("bootstrap-failure", failure);
+            let value = fixture.call("room.secret.list", json!({})).await;
+            assert_eq!(value["error"]["code"], code);
+            assert!(value.get("stale").is_none());
         }
     })
     .catch_unwind()
