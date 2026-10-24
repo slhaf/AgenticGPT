@@ -4,7 +4,11 @@ version = "0.10.1"
 edition.workspace = true
 license.workspace = true
 
+[features]
+schema = ["dep:schemars"]
+
 [dependencies]
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars = { version = "1", optional = true }

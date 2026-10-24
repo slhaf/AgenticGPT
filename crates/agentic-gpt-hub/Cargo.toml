@@ -9,7 +9,7 @@ name = "agentic-gpt-hub"
 path = "src/main.rs"
 
 [dependencies]
-agentic-gpt-protocol.workspace = true
+agentic-gpt-protocol = { workspace = true, features = ["schema"] }
 anyhow.workspace = true
 axum = { version = "0.7", features = ["ws"] }
 chrono.workspace = true

@@ -152,6 +152,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
                 | "tmux.closeSession"
                 | "skills.install"
                 | "skills.run"
+                | "room.email.read"
                 | "room.email.send"
                 | "room.email.operate"
         );
@@ -1100,18 +1101,13 @@ impl AgenticMcpServer {
     )]
     async fn room_email_list(
         &self,
-        params: Parameters<args::RoomEmailListArgs>,
+        params: Parameters<agentic_gpt_protocol::RoomEmailListRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let payload: agentic_gpt_protocol::RoomEmailListRequest =
-            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
-                mcp_invalid_params("email_arguments_invalid", error.to_string())
-            })?)
-            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
         let value = request_active_room(
             &self.state,
             HubCommand::RoomEmailList {
                 request_id: random_id("req"),
-                payload,
+                payload: params.0,
             },
             REQUEST_TIMEOUT_SECS,
         )
@@ -1128,18 +1124,13 @@ impl AgenticMcpServer {
     )]
     async fn room_email_read(
         &self,
-        params: Parameters<args::RoomEmailReadArgs>,
+        params: Parameters<agentic_gpt_protocol::RoomEmailReadRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let payload: agentic_gpt_protocol::RoomEmailReadRequest =
-            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
-                mcp_invalid_params("email_arguments_invalid", error.to_string())
-            })?)
-            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
         let value = request_active_room(
             &self.state,
             HubCommand::RoomEmailRead {
                 request_id: random_id("req"),
-                payload,
+                payload: params.0,
             },
             REQUEST_TIMEOUT_SECS,
         )
@@ -1156,18 +1147,13 @@ impl AgenticMcpServer {
     )]
     async fn room_email_search(
         &self,
-        params: Parameters<args::RoomEmailSearchArgs>,
+        params: Parameters<agentic_gpt_protocol::RoomEmailSearchRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let payload: agentic_gpt_protocol::RoomEmailSearchRequest =
-            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
-                mcp_invalid_params("email_arguments_invalid", error.to_string())
-            })?)
-            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
         let value = request_active_room(
             &self.state,
             HubCommand::RoomEmailSearch {
                 request_id: random_id("req"),
-                payload,
+                payload: params.0,
             },
             REQUEST_TIMEOUT_SECS,
         )
@@ -1184,18 +1170,13 @@ impl AgenticMcpServer {
     )]
     async fn room_email_attachment(
         &self,
-        params: Parameters<args::RoomEmailAttachmentArgs>,
+        params: Parameters<agentic_gpt_protocol::RoomEmailAttachmentRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let payload: agentic_gpt_protocol::RoomEmailAttachmentRequest =
-            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
-                mcp_invalid_params("email_arguments_invalid", error.to_string())
-            })?)
-            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
         let value = request_active_room(
             &self.state,
             HubCommand::RoomEmailAttachment {
                 request_id: random_id("req"),
-                payload,
+                payload: params.0,
             },
             REQUEST_TIMEOUT_SECS,
         )
@@ -1212,18 +1193,13 @@ impl AgenticMcpServer {
     )]
     async fn room_email_send(
         &self,
-        params: Parameters<args::RoomEmailSendArgs>,
+        params: Parameters<agentic_gpt_protocol::RoomEmailSendRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let payload: agentic_gpt_protocol::RoomEmailSendRequest =
-            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
-                mcp_invalid_params("email_arguments_invalid", error.to_string())
-            })?)
-            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
         let value = request_active_room(
             &self.state,
             HubCommand::RoomEmailSend {
                 request_id: random_id("req"),
-                payload,
+                payload: params.0,
             },
             REQUEST_TIMEOUT_SECS,
         )
@@ -1240,18 +1216,13 @@ impl AgenticMcpServer {
     )]
     async fn room_email_operate(
         &self,
-        params: Parameters<args::RoomEmailOperateArgs>,
+        params: Parameters<agentic_gpt_protocol::RoomEmailOperateRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let payload: agentic_gpt_protocol::RoomEmailOperateRequest =
-            serde_json::from_value(serde_json::to_value(params.0).map_err(|error| {
-                mcp_invalid_params("email_arguments_invalid", error.to_string())
-            })?)
-            .map_err(|error| mcp_invalid_params("email_arguments_invalid", error.to_string()))?;
         let value = request_active_room(
             &self.state,
             HubCommand::RoomEmailOperate {
                 request_id: random_id("req"),
-                payload,
+                payload: params.0,
             },
             REQUEST_TIMEOUT_SECS,
         )
