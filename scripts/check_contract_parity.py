@@ -7364,6 +7364,36 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 event_panel(value, label)
         reports.append("PASS all six Hub email HTTP/MCP calls used shared requests and retained Agent events/error frames")
 
+        # Real HTTP and Apps MCP must reach the ephemeral Secret dispatch path,
+        # even when the Room's Secret capability is disabled. This protects the
+        # public adapters and common error/event frame without using a vault.
+        for request_id, (action, payload) in enumerate((
+            ("list", {}),
+            ("get", {"site": "parity.invalid", "account": "fixture", "type": "password"}),
+            ("upsert", {"site": "parity.invalid", "account": "fixture", "password": "synthetic-parity-value"}),
+            ("delete", {"site": "parity.invalid", "account": "fixture"}),
+        ), start=170):
+            label = f"Hub secret shared request {action}"
+            validate_instance(document, schemas, f"RoomSecret{action.capitalize()}Request", payload, label)
+            response = http_request(
+                hub_port, "POST", f"/v1/room/secret/{action}", payload,
+                {"Authorization": f"Bearer {hub_key}"}, label,
+            )
+            if response.status != 503:
+                fail(label, f"expected unconfigured Agent response, got HTTP {response.status}: {response.body[:500]!r}")
+            reply = mcp_call(
+                hub_port, hub_key, full_session, request_id, "tools/call",
+                {"name": f"room.secret.{action}", "arguments": payload}, label,
+            )
+            if reply.get("result", {}).get("isError") is not True:
+                fail(label, "MCP discarded the Agent business error")
+            for value in (response.json(label), json_result(reply, label)):
+                validate_instance(document, schemas, "AgentErrorResponse", value, label)
+                if value.get("error", {}).get("code") != "secret_not_configured":
+                    fail(label, f"request did not reach the active Room secret service: {value}")
+                event_panel(value, label)
+        reports.append("PASS all four Hub secret HTTP/MCP calls used ephemeral dispatch and retained Agent events/error frames")
+
         room_process.stop()
         room_process = None
         wait_for_agent_offline(hub_port, hub_key, room_id, "Hub Room disconnect before lifecycle checks")

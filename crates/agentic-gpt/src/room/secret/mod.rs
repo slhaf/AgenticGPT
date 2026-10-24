@@ -220,6 +220,9 @@ impl SecretService {
         let owner = self.owner.lock().clone();
         if let Some(owner) = owner {
             owner.cli.stop().await;
+            // A detached write still owns its guards until it observes CLI
+            // cancellation. Wait for that whole workflow before final cleanup.
+            let _write = owner.writes.lock().await;
             if let Some(job) = self.job.lock().await.take() {
                 let _ = job.handle.await;
             }
@@ -465,16 +468,44 @@ pub(crate) async fn dispatch(state: &AppState, operation: &str, args: Value) -> 
     if secret.server_url.is_empty() || secret.account.is_empty() {
         return Error::NotConfigured.value();
     }
+    if matches!(operation, "room.secret.upsert" | "room.secret.delete") {
+        let state = state.clone();
+        let operation = operation.to_owned();
+        // Own the complete transaction, including both serialization leases.
+        // Losing a caller must not let another write race a still-running CLI.
+        return tokio::spawn(async move {
+            dispatch_inner(&state, &config, &operation, args, true).await
+        })
+        .await
+        .unwrap_or_else(|_| Error::WriteUnknown.value());
+    }
+    dispatch_inner(state, &config, operation, args, false).await
+}
+
+async fn dispatch_inner(
+    state: &AppState,
+    config: &Config,
+    operation: &str,
+    args: Value,
+    write: bool,
+) -> Value {
+    let secret = &config.room.secret;
     let owner = match state.secret.activate(secret) {
         Ok(owner) => owner,
         Err(error) => return error.value(),
     };
-    let write = matches!(operation, "room.secret.upsert" | "room.secret.delete");
     let _write = if write {
         Some(owner.writes.lock().await)
     } else {
         None
     };
+    if state
+        .secret
+        .stopped
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Error::Unavailable.value();
+    }
     let receiver = state
         .secret
         .trigger(state, owner.clone(), secret.clone())
@@ -521,7 +552,7 @@ pub(crate) async fn dispatch(state: &AppState, operation: &str, args: Value) -> 
     } else {
         None
     };
-    let result = execute(state, &config, &owner, operation, args, stale).await;
+    let result = execute(state, config, &owner, operation, args, stale).await;
     let mut value = match result {
         Ok(value) => value,
         Err(error) => error.value(),

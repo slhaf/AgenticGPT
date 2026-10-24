@@ -118,9 +118,20 @@ elif args[:2]==['get','item']:print((root/'item.json').read_text())
 elif args[:2]==['get','totp']:print('123456')
 elif args[:2] in (['edit','item'],['create','item']):
  item=json.loads(base64.b64decode(sys.stdin.buffer.read()))
- assert item['notes']=='retained notes'
- assert item['fields']==[{'name':'retained','value':'custom'}]
- assert item['login']['totp']=='JBSWY3DPEHPK3PXP'
+ if args[0]=='edit':
+  assert item['notes']=='retained notes'
+  assert item['fields']==[{'name':'retained','value':'custom'}]
+  assert item['login']['totp']=='JBSWY3DPEHPK3PXP'
+ else:
+  assert item['type']==1 and item['name']=='New site'
+  assert item['login']['username']=='Bob'
+  assert 'password' not in item['login']
+  item['id']='fabbb491-4e6d-40a3-86b8-6fb12a841919'
+  (root/'missing').unlink(missing_ok=True)
+ with open(root/'write-count','a') as f:f.write('1\n')
+ (root/'write-started').touch()
+ if (root/'hold-write').exists():
+  while not (root/'release-write').exists():time.sleep(.005)
  (root/'item.json').write_text(json.dumps(item))
  if (root/'write-unknown').exists():
   print('read ECONNRESET new-test-value',file=sys.stderr);sys.exit(1)
@@ -230,6 +241,23 @@ async fn secret_writes_merge_native_item_and_never_replay_uncertain_outcome() {
             .await;
         assert_eq!(deleted, json!({"deleted":true}));
         assert_eq!(fixture.owner.usage.rank(ITEM_ID), (0.0, 0));
+        // Creation uses a different native command and needs no existing
+        // password: omission must remain valid for a TOTP-only account.
+        std::fs::remove_file(fixture.owner.cli.root.join("write-unknown")).unwrap();
+        let created = fixture
+            .call(
+                "room.secret.upsert",
+                json!({"site":"New site","account":"Bob","totp":"JBSWY3DPEHPK3PXP"}),
+            )
+            .await;
+        assert_eq!(created, json!({"created":true}));
+        let code = fixture
+            .call(
+                "room.secret.get",
+                json!({"site":"NEW SITE","account":"Bob","type":"totp"}),
+            )
+            .await;
+        assert_eq!(code["value"], "123456");
     })
     .catch_unwind()
     .await;
@@ -295,6 +323,79 @@ async fn secret_only_known_transport_failure_allows_native_stale_reads() {
             assert_eq!(result["error"]["code"], code);
             assert!(result.get("stale").is_none());
             assert!(!result.to_string().contains("old-test-value"));
+        }
+    })
+    .catch_unwind()
+    .await;
+    fixture.cleanup().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+// The long-lived invariant is transaction serialization after response loss,
+// not a particular CLI invocation count in an ordinary successful request.
+#[tokio::test]
+async fn secret_cancelled_caller_does_not_release_inflight_write_transaction() {
+    let fixture = Fixture::new();
+    fixture.write("release-sync", "");
+    fixture.write("hold-write", "");
+    let result = AssertUnwindSafe(async {
+        let state = fixture.state.clone();
+        let first = tokio::spawn(async move {
+            dispatch(
+                &state,
+                "room.secret.upsert",
+                json!({"site":"Example","account":"Alice","password":"new-test-first"}),
+            )
+            .await
+        });
+        fixture.wait_file("write-started").await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        let state = fixture.state.clone();
+        let mut second = tokio::spawn(async move {
+            dispatch(
+                &state,
+                "room.secret.upsert",
+                json!({"site":"Example","account":"Alice","password":"new-test-second"}),
+            )
+            .await
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(75), &mut second)
+            .await
+            .is_err());
+        for counter in ["sync-count", "write-count"] {
+            assert_eq!(
+                std::fs::read_to_string(fixture.owner.cli.root.join(counter))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1
+            );
+        }
+        fixture.write("release-write", "");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), second)
+                .await
+                .unwrap()
+                .unwrap(),
+            json!({"updated":true})
+        );
+        let item: Value = serde_json::from_slice(
+            &std::fs::read(fixture.owner.cli.root.join("item.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(item["login"]["password"], "new-test-second");
+        for counter in ["sync-count", "write-count"] {
+            assert_eq!(
+                std::fs::read_to_string(fixture.owner.cli.root.join(counter))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                2
+            );
         }
     })
     .catch_unwind()

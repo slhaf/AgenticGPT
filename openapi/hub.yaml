@@ -3226,9 +3226,9 @@ components:
           const: true
           description: 仅使用过期本地密码库读取时出现。
         lastSyncedAt:
-          type: string
+          type: [string, "null"]
           format: date-time
-          description: 过期读取时来自 bw 的最后成功同步时间；无法取得时省略。
+          description: 过期读取时来自 bw 的最后成功同步时间；bw 尚无同步记录时为 null。
         events:
           $ref: "#/components/schemas/EventPanel"
     RoomSecretGetResponse:
@@ -3244,9 +3244,9 @@ components:
           const: true
           description: 仅使用过期本地密码库读取时出现。
         lastSyncedAt:
-          type: string
+          type: [string, "null"]
           format: date-time
-          description: 过期读取时来自 bw 的最后成功同步时间；无法取得时省略。
+          description: 过期读取时来自 bw 的最后成功同步时间；bw 尚无同步记录时为 null。
         events:
           $ref: "#/components/schemas/EventPanel"
     RoomSecretUpsertResponse:
