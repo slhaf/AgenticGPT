@@ -211,7 +211,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 ## Room 密钥
 
-`room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete` 由同一 Agent 本地服务执行。Standalone／Local 要求 `room` 工具集与 `room.secret.enabled=true`；Hub Full 使用活动 Room 租约，对应 `POST /v1/room/secret/<action>`，请求不含 `agentId`。Coordinator 隐藏并拒绝这些工具。Secret 子开关的修改需要重启，运行中工具集关闭则按现有实时准入生效。
+`room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete` 由同一 Agent 本地服务执行。Standalone／Local 要求 `room` 工具集与 `room.secret.enabled=true`；Hub Full 使用活动 Room 租约，对应 `POST /v1/room/secret/<action>`，请求不含 `agentId`。Coordinator 隐藏并拒绝这些工具。Secret 子开关的修改需要重启，运行中工具集关闭则按现有实时准入生效。本地 MCP 随开关隐藏工具，Hub Full MCP 保持固定工具列表并在调用时检查。账号组定位沿用 bw 可读列表；解密失败的条目可能被 bw 省略，具体影响见使用指南。
 
 `list` 只返回 `site/account`，可按 `site` 或 `account` 过滤；`get` 必须指定 `site/account/type`，`type` 为 `password` 或 `totp`，后者返回当前验证码；`upsert` 至少提供非空 `password/totp` 之一，省略字段保留原值；`delete` 将整个账号组移入回收站。相同身份重复时返回 `ambiguous_secret`，不猜测或批量修改。
 

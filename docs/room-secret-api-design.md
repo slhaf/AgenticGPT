@@ -44,6 +44,8 @@
 
 如果发现多个相同身份的条目，`get/upsert/delete` 返回 `ambiguous_secret`，不得自行选择或批量修改；调用方需通过 Vaultwarden 客户端处理重复项。`list` 不以排序结果替代唯一性判断。
 
+账号组、未命中、重复检测及 upsert 的定位范围均以 `bw list items` 返回的可解密条目为准。bw 对条目损坏或密钥不匹配等解密异常可能省略该条目并成功退出；这是读取时的异常容错，并非导入专用分支，也没有证据表明正常有效的个人 Login 条目会在常规读写时触发。产品接受这一原生行为，不读取其加密缓存来交叉校验库存，不另存快照或自行解密。因此成功同步后的 `secret_not_found` 只表示 bw 可读列表未命中；原有条目被省略时，upsert 可能创建另一个同名账号组。
+
 ## 3. Vaultwarden 与 bw 的职责
 
 第一阶段使用官方 Password Manager CLI `bw`，不使用 Bitwarden Secrets Manager SDK。Vaultwarden 不提供 Secrets Manager API。
@@ -108,7 +110,7 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 ```
 
 - 仅在明确网络故障或同步等待预算耗尽而使用本地数据时附加这两个字段；正常结果不返回 `stale: false`。
-- `lastSyncedAt` 直接读取 `bw` 记录的最后同步时间，不用本次触发时间或 Agentic 的当前时间代替。无法取得时间时不得伪造时间；空值及元数据读取失败的准确投影需在固定版本联调时落实。
+- `lastSyncedAt` 直接读取 `bw` 记录的最后同步时间，不用本次触发时间或 Agentic 的当前时间代替。bw 尚无同步记录时返回 `null`；元数据缺失、格式无效或读取失败直接返回错误，不伪造时间。
 - 不限制本地数据的最长年龄。远端在断网期间新增、修改或删除的内容可能尚未反映在本地库，过期标记不能保证数据仍然有效。
 - 本地库仍须可读取、可解锁；数据异常直接报错，不从自建快照恢复。
 - 过期读取的未命中错误也应携带相同的新鲜程度信息，不得把旧数据未命中报告成远端不存在。
@@ -127,7 +129,7 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 - `filter` 可选，执行大小写不敏感的包含过滤。
 - `field` 可选，为 `site | account`，仅存在 `filter` 时生效。
 - 提供 `filter` 但省略 `field` 时，同时匹配 `site/account`。过滤的大小写规则不改变 `account` 精确定位时区分大小写的规则。
-- 省略 `filter` 时列出全部账号组，按使用权重排序。
+- 省略 `filter` 时列出 bw 返回的全部可读账号组，按使用权重排序。
 - 不提供 cursor、页数、显式排序或调用方可调的权重参数。
 
 响应示例：
@@ -158,7 +160,7 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 - 每次 `get` 成功生成响应中的密码或当前验证码后增加权重并记录时间；这不表示调用方已经成功登录目标服务。
 - 权重随时间衰减，近期经常使用的条目优先；公式、半衰期属于实现选择，不对外暴露。
 - 更新已有条目保留权重，新条目初始权重为零。
-- 删除明确成功后清理权重；后续成功同步发现外部删除时清理孤立记录。不能根据失败同步或不完整本地结果推断远端删除。
+- 删除明确成功后清理权重；成功同步后按 bw 可读列表清理孤立记录，不在失败同步时清理。这仅维护排序元数据，不能作为远端已删除的证明；bw 省略的条目也可能失去原有权重。
 - 记录按后端、账号与 item ID 关联，避免切换后端账号后继承无关权重。
 - 权重损坏、缺失或写入失败不影响密钥读取及远端写入事实。排序退化为仍可用的时间信息及稳定名称顺序；全部记录丢失时，最近使用时间也可能不可用。
 
@@ -185,7 +187,7 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 ```
 
 - `password` 返回密码；`totp` 通过 `bw` 返回当前验证码，不返回 seed，也不重放之前生成的验证码。验证码不保证调用方稍后提交时仍未过期。
-- 同步成功后账号组仍不存在，返回 `secret_not_found`；账号组存在但请求类型没有值，返回 `secret_value_missing`。
+- 同步成功后 bw 可读列表仍未命中账号组，返回 `secret_not_found`；账号组存在但请求类型没有值，返回 `secret_value_missing`。
 - 同步网络失败或等待预算耗尽而使用本地数据时，未命中返回 `secret_presence_unknown`，不能断言远端不存在。仅凭过期数据也不能确定远端缺少所请求字段。
 - 重复账号组返回 `ambiguous_secret`。
 - 成功返回后更新权重；附属权重保存失败不把成功读取改报为失败。
@@ -208,11 +210,11 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 ```
 
 - `site/account` 必填；`password/totp` 至少提供一个。
-- 同步成功后，身份不存在则创建，存在则更新；重复则返回 `ambiguous_secret`。
+- 同步成功后，以 bw 可读列表定位身份：未命中则创建，命中则更新；可见重复项返回 `ambiguous_secret`。
 - 更新时省略字段保留原值。`bw edit` 是替换操作，适配器应读取并合并完整条目，保留其他已有内容，而不是只拼装四个字段后覆盖。
 - 拒绝用空字符串或 `null` 清空字段。单字段清理由 Vaultwarden 客户端处理，第一阶段不增加清空语义。
 - TOTP 输入须在写入前完成格式及受支持参数校验，不把 HOTP 等其他 URI 作为 TOTP 接受，不写入部分校验结果。
-- 同一实例内协调“同步、定位、创建／更新”的并发，避免自身制造重复条目。外部客户端不受本地锁约束，不能承诺跨客户端的原子身份唯一性。
+- 同一实例内协调“同步、定位、创建／更新”的并发，避免并发请求自身制造重复条目；bw 省略不可解密项造成的重复属于上述已接受边界。外部客户端不受本地锁约束，不能承诺跨客户端的原子身份唯一性。
 
 创建成功返回 `{"created": true}`，更新成功返回 `{"updated": true}`，不回显密钥、身份或底层 ID。
 
@@ -242,7 +244,7 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 
 ## 10. 配置与运行时准入
 
-拟议配置示例；`enabled: true` 表示使用者主动启用，缺省仍为 `false`：
+配置示例；`enabled: true` 表示使用者主动启用，缺省仍为 `false`：
 
 ```json
 {
@@ -272,7 +274,7 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 | `syncWaitTimeoutMs` | `3000` 毫秒；仅限制查询等待，不取消同步。合法范围在实现阶段确定。 |
 | 三个凭据字段 | 接入现有 `env:`／`file:` secret reference 校验和解析，不接受普通配置中的明文凭据。 |
 
-生效条件同时包括 Room toolset 开启和 `room.secret.enabled=true`。当前仅有 `room` namespace；不为本功能新增嵌套 toolset 体系。关闭 Secret 子开关只关闭 Secret；关闭 Room toolset 关闭所有 Room 工具。除发现时隐藏外，已知工具名直接调用也必须在运行时拒绝。
+生效条件同时包括 Room toolset 开启和 `room.secret.enabled=true`。当前仅有 `room` namespace；不为本功能新增嵌套 toolset 体系。关闭 Secret 子开关只关闭 Secret；关闭 Room toolset 关闭所有 Room 工具。Agent 本地 MCP 在发现时隐藏关闭的 Secret 工具；Hub Full MCP 沿用固定工具列表，实际调用仍由活动 Room 检查开关。已知工具名直接调用也必须在运行时拒绝。
 
 配置需接入现有稀疏写盘、校验、配置 CLI、TUI 草稿／Review、字段隐藏和工具描述符。所有写者沿用配置变更锁和备份写入 helper。
 
@@ -301,7 +303,7 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 
 ### 12.2 状态摘要
 
-在实际持有 Secret service 的实例 `agent.info` 中增加以下拟议结构，并同步各实际消费者：
+在实际持有 Secret service 的实例 `agent.info` 中提供以下结构，并同步各实际消费者：
 
 ```json
 {
@@ -372,18 +374,13 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 
 本次可行性审查仅核对仓库、官方资料及上游源码，未连接实际 Vaultwarden 部署，也未完成固定 CLI／服务端版本的端到端验证。后续构建、编译、测试优先使用 `~/.local/bin/remote-build` 针对当前项目执行。
 
-## 15. 实现阶段待落实
+## 15. 实施与验证结果
 
-以下属于实现和验证选择，不改变上述已确认的产品边界：
+首阶段实现固定 `bw 2026.10.0`，由运行环境安装并通过 PATH 提供，不自动下载。具体输入长度、TOTP 参数、使用权重、执行和响应容量见[使用指南](room-secret.zh-CN.md)。独立 review 后已修正写入调用取消导致串行锁提前释放的问题，以及 `lastSyncedAt:null` 与 OpenAPI 不一致的问题。bw 可能返回部分可读列表的行为已按产品决定接受。
 
-- 固定 `bw` 版本、获取和升级方式，与实际 Vaultwarden 版本联调；核验冷启动、离线解锁、同步期间本地读取及 CLI 原生锁行为。
-- 可靠识别网络故障、认证失败、数据异常及写入结果未知；未知错误失败关闭，不靠笼统的非零退出码允许回退。
-- 合法输入长度、同步等待配置范围、CLI 输出和列表完整响应容量。
-- `lastSyncedAt` 在 `bw` 无记录或读取失败时的投影，以及本地库是否可用的判断。
-- TOTP 的算法、位数、周期等支持范围，URI 写入规则，以及 Unicode 站点比较的确定性规则。
-- 权重衰减函数、持久化格式与损坏后的退化排序。
-- 任务退出回收、终态事件去重、状态更新和实际入口错误／事件封套的接入。
-- 所有接口面不持久化敏感请求／结果的具体派发与回执方案，及写入结果不确定后的同步核对方式。
+工作区构建、550 项 Rust 测试（另有 1 项既有忽略）、严格 Clippy 及真实 Agent／Hub 接口契约检查均通过远程构建环境执行。新增测试覆盖真实子进程和临时数据库，保护同步复用、确认、写入保真与取消、敏感信息不落回执和不重放。真实 `bw 2026.10.0` 的隔离冷启动已观察到 `lastSync:null`。
+
+真实 Vaultwarden 端到端互通仍未完成：一次性测试环境的镜像下载超时，未创建密码库账号。因此 API Key 登录、解锁、真实条目写入、TOTP、离线及同步期间并发读取、回收站行为仍缺少实际服务端验证；当前依据为固定版上游源码及替代 CLI 测试，不能将这些检查等同真实部署互通。
 
 ## 16. 外部依据
 
@@ -393,4 +390,4 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 - [Vaultwarden 项目](https://github.com/dani-garcia/vaultwarden)及[维护者对 Secrets Manager 的说明](https://github.com/dani-garcia/vaultwarden/discussions/7457)。
 - [bw 同步实现](https://github.com/bitwarden/clients/blob/main/libs/common/src/platform/sync/default-sync.service.ts)、[条目读取](https://github.com/bitwarden/clients/blob/main/apps/cli/src/commands/get.command.ts)和[列表实现](https://github.com/bitwarden/clients/blob/main/apps/cli/src/commands/list.command.ts)。
 
-上游主分支源码仅作为本次调查依据，不等同第一阶段最终选定的兼容版本。
+主分支源码保留作前期调查记录；实现兼容依据为固定版本 [CLI v2026.10.0](https://github.com/bitwarden/clients/releases/tag/cli-v2026.10.0)。其[解密结果处理](https://github.com/bitwarden/clients/blob/cli-v2026.10.0/libs/common/src/vault/services/cipher.service.ts)与[列表返回](https://github.com/bitwarden/clients/blob/cli-v2026.10.0/apps/cli/src/commands/list.command.ts)说明可读列表并不保证包含所有原生条目。 固定依赖 SDK 的[正常与异常条目测试](https://github.com/bitwarden/sdk-internal/blob/c5e53d3e82ab80fdc9fd79ebd74058399a6444b6/crates/bitwarden-vault/src/cipher/cipher_client/mod.rs#L538-L574)通过替换无效条目密钥构造失败；该证据不表示日常读写会触发，也不能用于估计发生率。

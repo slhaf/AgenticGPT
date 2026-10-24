@@ -27,7 +27,7 @@ agentic-gpt config set room.secret.enabled true
 
 整个 `room.secret` 修改后需要重启 Agent，包括启停、后端账号、策略与等待预算。重启前继续使用原配置。`room` 工具集使用既有实时准入：关闭它会拒绝后续全部 Room 操作。Secret 子开关只控制四项密钥操作；关闭时不会影响其他 Room 工具，也不能通过直接调用已知工具名绕过。
 
-Standalone／Local 从本地 MCP 入口调用；Hub Full 路由到活动 Room Agent，HTTP 使用 `POST /v1/room/secret/list`、`get`、`upsert`、`delete`，请求均不含 `agentId`。Coordinator 不提供这些操作。
+Agent 本地 MCP 在 Secret 关闭时隐藏四个工具。Hub Full MCP 沿用固定工具列表，未启用时实际调用返回错误。Standalone／Local 从本地 MCP 入口调用；Hub Full 路由到活动 Room Agent，HTTP 使用 `POST /v1/room/secret/list`、`get`、`upsert`、`delete`，请求均不含 `agentId`。Coordinator 不提供这些操作。
 
 ## 账号组与调用
 
@@ -54,6 +54,8 @@ Standalone／Local 从本地 MCP 入口调用；Hub Full 路由到活动 Room Ag
 
 `upsert.password/totp` 各最多 64 KiB；空字符串和显式 `null` 均拒绝，不能用它们清空字段。TOTP 接受 Base32 seed 或 `otpauth://totp/…` URI；当前支持 SHA1／SHA256／SHA512、6 或 8 位验证码、30 秒周期。HOTP、重复或未知 URI 参数及不受支持的设置返回 `secret_invalid_totp`。读取 TOTP 不返回 seed。
 
+账号组以 `bw list items` 返回的可解密条目为准。沿用 bw 对异常条目的容错行为：条目损坏或密钥不匹配等解密异常可能导致条目被省略且命令成功退出。这并非导入专用分支，也没有证据表明正常有效的个人 Login 条目会在常规读写时触发。Agentic 不读取加密缓存来核对完整性，也不另存快照。因此成功同步后的 `secret_not_found` 只表示可读列表未命中；upsert 可能为被省略的条目创建同名账号组，重复检查也只能覆盖可见条目。成功同步后的权重清理同样依据该列表，不能作为远端已删除的证明。相关原生行为见[固定版解密结果处理](https://github.com/bitwarden/clients/blob/cli-v2026.10.0/libs/common/src/vault/services/cipher.service.ts)。
+
 ## 确认与同步
 
 默认 `getPolicy=allow`，`upsertPolicy=confirm`，`deletePolicy=confirm`；三者仅接受 `allow` 或 `confirm`。`list` 不请求确认。`confirm` 必须取得明确批准：拒绝、超时、确认不可用都不会披露值或执行写入，`policy.enabled=false` 也不会放宽此要求。预览只展示 `site/account` 与涉及的字段类型。
@@ -66,7 +68,7 @@ Standalone／Local 从本地 MCP 入口调用；Hub Full 路由到活动 Room Ag
 | 明确网络故障，或查询等待预算耗尽 | 本地库仍可读取与解锁时返回旧数据，并附加 `stale:true` 和 `lastSyncedAt`。 |
 | 认证、TLS、解锁、解析、数据异常或无法可靠归类的错误 | 返回错误，不根据这些错误回退到旧数据。 |
 
-`lastSyncedAt` 来自 `bw status.lastSync`，没有同步记录时为 `null`；不能把 Agent 的触发时间当作最后成功同步时间。无法读取有效同步元数据时返回错误。旧数据不设最长年龄限制，可能尚未反映远端新增、修改或删除；旧数据未命中返回 `secret_presence_unknown`，不能据此判定远端不存在。成功同步后的账号组缺失为 `secret_not_found`，组存在但所请求字段缺失为 `secret_value_missing`。
+`lastSyncedAt` 来自 `bw status.lastSync`，没有同步记录时为 `null`；不能把 Agent 的触发时间当作最后成功同步时间。无法读取有效同步元数据时返回错误。旧数据不设最长年龄限制，可能尚未反映远端新增、修改或删除；旧的可读列表未命中返回 `secret_presence_unknown`，不能据此判定远端不存在。成功同步后的可读列表未命中为 `secret_not_found`，组存在但所请求字段缺失为 `secret_value_missing`。
 
 `upsert/delete` 必须观察同步成功，不能按查询等待预算降级写入。同一实例协调同步、定位和修改；其他客户端仍可能并发修改，不承诺跨客户端的原子身份唯一性。写请求已发出而无法确定远端结果时返回 `secret_write_outcome_unknown`，不自动重放；应先通过 Vaultwarden 客户端或后续同步核对，避免盲目重发。
 
