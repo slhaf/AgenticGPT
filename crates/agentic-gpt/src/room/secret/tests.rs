@@ -101,8 +101,7 @@ assert pathlib.Path(os.environ['HOME']).is_relative_to(root)
 assert 'NODE_OPTIONS' not in os.environ
 args=sys.argv[1:]
 assert all('new-test' not in arg for arg in args)
-if args==['--version']: print('2026.10.0')
-elif args==['status']:
+if args==['status']:
  print(json.dumps({'serverUrl':'https://vault.example.invalid','userEmail':'test@example.invalid','status':'unauthenticated' if (root/'unauthenticated').exists() else 'unlocked','lastSync':'2026-10-01T00:00:00Z'}))
 elif args[:2]==['config','server']:print('Configured server.')
 elif args==['login','--apikey']:

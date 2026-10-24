@@ -6,8 +6,8 @@ Room Secret 通过 Agent 本机的 Bitwarden Password Manager CLI（`bw`）访�
 
 ## 准备与启用
 
-1. 在运行 Agent 的机器准备 [`bw` **2026.10.0**](https://github.com/bitwarden/clients/releases/tag/cli-v2026.10.0)，并使 Agent 的 `PATH` 能找到它。当前适配器检查精确版本，不自动下载 CLI；缺失或版本不符返回 `secret_provider_unavailable`。
-2. 使用已联调的 Vaultwarden **1.37.4**；**1.35.1** 的 Personal API 登录响应缺少固定 CLI 要求的 `userDecryptionOptions`，无法完成初始化。其他版本未验证，不据此声明最低兼容版本。准备专用账号的 Personal API client ID、client secret 和主密码。API Key 用于登录，主密码用于解锁；不要填组织 API Key 或 Secrets Manager access token。
+1. 在运行 Agent 的机器准备 `bw`，并使 Agent 的 `PATH` 能找到它。已联调版本为 [`bw` **2026.10.0**](https://github.com/bitwarden/clients/releases/tag/cli-v2026.10.0)；适配器不按版本号拒绝调用，也不自动下载 CLI。仅在命令不可用、执行失败或bw 命令输出缺少当前操作必需的数据时返回对应错误；额外字段不影响使用。Agentic 不直接检查 Vaultwarden 的 HTTP 响应字段。
+2. 准备 Vaultwarden 服务端，已联调版本为 **1.37.4**。与上述 CLI 配合时，**1.35.1** 的 Personal API 登录响应缺少 CLI 要求的 `userDecryptionOptions`，无法完成初始化。服务端也不按版本号设门禁；其他组合未验证，不据此声明最低兼容版本。准备专用账号的 Personal API client ID、client secret 和主密码。API Key 用于登录，主密码用于解锁；不要填组织 API Key 或 Secrets Manager access token。
 3. 用运行 Agent 的环境或私有文件提供三个凭据。`env:NAME` 指向 Agent 进程可读的环境变量；`file:PATH` 指向只保存对应凭据的文件，支持绝对路径或 `~` 展开。文件应由运行账号私有保护，不放进 workspace、日志或 Git。普通配置不接受凭据明文。
 4. 在已有配置中启用 Room 工具集，再填写连接设置，最后启用 Secret：
 

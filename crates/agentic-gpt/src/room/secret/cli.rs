@@ -14,7 +14,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(super) const VERSION: &str = "2026.10.0";
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 pub(super) struct Cli {

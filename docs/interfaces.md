@@ -219,7 +219,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 四项操作的普通工具 reporting 仅保留脱敏状态，不保存请求和结果正文；Hub 持久运行回执与 Agent 重放账本不保存这些操作，不能通过 run 查询取回密码或旧验证码。响应丢失后重新调用 `get`，按当时策略重新授权；写入返回 `secret_write_outcome_unknown` 时不得盲目重发。各入口保留现有错误与 `events` 封套；同步终态另产生一条 `low` 事件。`agent.info.secret.sync` 只观察 `status` 和 `lastTriggeredAt`，不主动同步或返回密码库内容。
 
-配置、请求示例、固定 `bw` 版本及实际部署验证边界见[Room 密钥使用指南](room-secret.zh-CN.md)；HTTP schema 以 [OpenAPI](../openapi/hub.yaml) 为准。
+配置、请求示例、已验证的 `bw` 版本及实际部署验证边界见[Room 密钥使用指南](room-secret.zh-CN.md)；HTTP schema 以 [OpenAPI](../openapi/hub.yaml) 为准。
 
 ## Room 邮件
 

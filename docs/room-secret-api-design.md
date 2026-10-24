@@ -1,6 +1,6 @@
 # Room Secret API 设计
 
-状态：产品语义已确认，首阶段代码与接口已实现；已完成固定 CLI／Vaultwarden 组合的隔离联调。最后整理：2026-10-24。
+状态：产品语义已确认，首阶段代码与接口已实现；已完成所记录 CLI／Vaultwarden 组合的隔离联调。最后整理：2026-10-24。
 
 本文记录原始设计及可行性审查中确认的边界，供实现和评审追溯。当前配置、调用步骤及实现限制见[Room 密钥使用指南](room-secret.zh-CN.md)；真实 provider 的兼容性不能仅由编译和替代 CLI 测试推定。
 
@@ -59,7 +59,7 @@
 | `password` | `login.password` |
 | `totp` | `login.totp` |
 
-调用链为 `room.secret.* → Agentic Rust adapter → bw CLI → Vaultwarden`。
+调用链为 `room.secret.* → Agentic Rust adapter → bw CLI → Vaultwarden`。 Agentic 解析 bw 命令输出中操作必需的数据，不直接检查 Vaultwarden 的 HTTP 响应字段或版本；对 bw 的额外输出字段予以保留或忽略，不断言完整字段集合。
 
 Agentic 负责输入校验、按公开身份定位、确认、同步任务协调、结果裁剪、权重和错误归一化。不能用 `bw` 的模糊搜索替代 `(site, account)` 的精确判断。调用方不接触 CLI 命令、session key 或原始 item JSON。
 
@@ -84,7 +84,7 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 
 预算到期只结束当前查询的等待，不终止同步、不把状态改为失败，也不发送“同步失败”事件。查询可以继续读取 `bw` 当前可用的本地密码库。
 
-该预算不包括人工确认，也不是整个 Secret API 的响应时限。`bw` 本地读取仍需有独立的执行边界，不能假定离线读取始终立即完成。不得持有等待同步完成的锁阻塞本地查询；固定 CLI 版本的实际并发读写行为须在实现阶段验证。
+该预算不包括人工确认，也不是整个 Secret API 的响应时限。`bw` 本地读取仍需有独立的执行边界，不能假定离线读取始终立即完成。不得持有等待同步完成的锁阻塞本地查询；所用 CLI 的实际并发读写行为须通过联调验证。
 
 `upsert/delete` 不通过查询等待预算降级：必须观察同步成功后，才能定位并执行远端写操作；同步失败或尚未完成时不得依据过期数据写入。
 
@@ -376,7 +376,7 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 
 ## 15. 实施与验证结果
 
-首阶段实现固定 `bw 2026.10.0`，由运行环境安装并通过 PATH 提供，不自动下载。具体输入长度、TOTP 参数、使用权重、执行和响应容量见[使用指南](room-secret.zh-CN.md)。独立 review 后已修正写入调用取消导致串行锁提前释放的问题，以及 `lastSyncedAt:null` 与 OpenAPI 不一致的问题。bw 可能返回部分可读列表的行为已按产品决定接受。
+`bw` 由运行环境安装并通过 PATH 提供，不自动下载。`bw 2026.10.0` 与 Vaultwarden `1.37.4` 仅表示已联调组合，不设置客户端或服务端版本号门禁；兼容性以实际命令、认证结果和当前操作必需的数据为准，不断言完整响应字段集合；额外响应字段予以容忍。具体输入长度、TOTP 参数、使用权重、执行和响应容量见[使用指南](room-secret.zh-CN.md)。独立 review 后已修正写入调用取消导致串行锁提前释放的问题，以及 `lastSyncedAt:null` 与 OpenAPI 不一致的问题。bw 可能返回部分可读列表的行为已按产品决定接受。
 
 工作区构建、550 项 Rust 测试（另有 1 项既有忽略）、严格 Clippy 及真实 Agent／Hub 接口契约检查均通过远程构建环境执行。新增测试覆盖真实子进程和临时数据库，保护同步复用、确认、写入保真与取消、敏感信息不落回执和不重放。真实 `bw 2026.10.0` 的隔离冷启动已观察到 `lastSync:null`。
 
@@ -394,4 +394,4 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 - [Vaultwarden 项目](https://github.com/dani-garcia/vaultwarden)及[维护者对 Secrets Manager 的说明](https://github.com/dani-garcia/vaultwarden/discussions/7457)。
 - [bw 同步实现](https://github.com/bitwarden/clients/blob/main/libs/common/src/platform/sync/default-sync.service.ts)、[条目读取](https://github.com/bitwarden/clients/blob/main/apps/cli/src/commands/get.command.ts)和[列表实现](https://github.com/bitwarden/clients/blob/main/apps/cli/src/commands/list.command.ts)。
 
-主分支源码保留作前期调查记录；实现兼容依据为固定版本 [CLI v2026.10.0](https://github.com/bitwarden/clients/releases/tag/cli-v2026.10.0)。其[解密结果处理](https://github.com/bitwarden/clients/blob/cli-v2026.10.0/libs/common/src/vault/services/cipher.service.ts)与[列表返回](https://github.com/bitwarden/clients/blob/cli-v2026.10.0/apps/cli/src/commands/list.command.ts)说明可读列表并不保证包含所有原生条目。 固定依赖 SDK 的[正常与异常条目测试](https://github.com/bitwarden/sdk-internal/blob/c5e53d3e82ab80fdc9fd79ebd74058399a6444b6/crates/bitwarden-vault/src/cipher/cipher_client/mod.rs#L538-L574)通过替换无效条目密钥构造失败；该证据不表示日常读写会触发，也不能用于估计发生率。
+主分支源码保留作前期调查记录；本次源码调查与联调依据为版本 [CLI v2026.10.0](https://github.com/bitwarden/clients/releases/tag/cli-v2026.10.0)。其[解密结果处理](https://github.com/bitwarden/clients/blob/cli-v2026.10.0/libs/common/src/vault/services/cipher.service.ts)与[列表返回](https://github.com/bitwarden/clients/blob/cli-v2026.10.0/apps/cli/src/commands/list.command.ts)说明可读列表并不保证包含所有原生条目。 固定依赖 SDK 的[正常与异常条目测试](https://github.com/bitwarden/sdk-internal/blob/c5e53d3e82ab80fdc9fd79ebd74058399a6444b6/crates/bitwarden-vault/src/cipher/cipher_client/mod.rs#L538-L574)通过替换无效条目密钥构造失败；该证据不表示日常读写会触发，也不能用于估计发生率。

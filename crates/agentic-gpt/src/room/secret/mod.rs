@@ -70,7 +70,7 @@ struct Owner {
     cli: Arc<cli::Cli>,
     usage: usage::Usage,
     session: Mutex<Option<String>>,
-    initialized: Mutex<bool>,
+    initialization: Mutex<()>,
     mutation: Mutex<()>,
     writes: Mutex<()>,
     _lease: crate::instance_lock::InstanceLock,
@@ -142,7 +142,7 @@ impl SecretService {
             usage: usage::Usage::open(root.join("usage.json")),
             cli: Arc::new(cli::Cli::new(root)),
             session: Mutex::new(None),
-            initialized: Mutex::new(false),
+            initialization: Mutex::new(()),
             mutation: Mutex::new(()),
             writes: Mutex::new(()),
             _lease: lease,
@@ -265,13 +265,7 @@ impl Owner {
         cli::json(&self.command(&["status"], None, false, false).await?)
     }
     async fn ensure_ready(&self, config: &RoomSecretConfig) -> Result<()> {
-        let mut initialized = self.initialized.lock().await;
-        if !*initialized {
-            let version = self.command(&["--version"], None, false, false).await?;
-            if std::str::from_utf8(&version).ok().map(str::trim) != Some(cli::VERSION) {
-                return Err(Error::Unavailable);
-            }
-        }
+        let _initializing = self.initialization.lock().await;
         let mut status = self.status().await?;
         if status["status"] == "unauthenticated" {
             self.command(
@@ -321,7 +315,6 @@ impl Owner {
                 return Err(Error::Locked);
             }
         }
-        *initialized = true;
         Ok(())
     }
     async fn items(&self) -> Result<Vec<Item>> {
