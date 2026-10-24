@@ -32,12 +32,14 @@ loopback/私有主目录进程并在结束时清理；schema 验证与实时行�
 
 ## 私有状态布局
 
-当前布局统一使用 `~/.agentic_gpt/state/` 保存 `events.sqlite3`、`process.sqlite3`、`active-skills.json` 和 `skill-installs/`；这些状态不绑定 Agent ID。runtime/socket 路径仍按 `agentId` 分隔，Hub 的连接身份、路由及传输账本所有者约束保持原有协议语义。
+当前布局统一使用 `~/.agentic_gpt/state/` 保存 `events.sqlite3`、`process.sqlite3`、`email.sqlite3`、`email/`、`active-skills.json` 和 `skill-installs/`；这些状态不绑定 Agent ID。runtime/socket 路径仍按 `agentId` 分隔，Hub 的连接身份、路由及传输账本所有者约束保持原有协议语义。
 
 启动过程不会扫描、合并或自动改写旧版私有状态目录。当前仓库不提供把旧配置或旧状态转换为
 现行格式的通用迁移脚本；需要保留旧部署数据时，应先停止使用该 `HOME` 的全部 Agent，完整
 备份配置、数据库及 sidecar，并按该旧版本对应的版本化发布说明处理。不要把历史迁移步骤当作
 当前命令接口，也不要让新实例直接覆盖尚未核验的旧目录。
+
+邮件图片缓存位于 `~/.agentic_gpt/cache/email/`。图片渲染使用随包构建的 `litehtml-rs`，构建需 C++17，运行需合适字体，无需安装 Chrome 或 Python，也不要求启用项目 Browser。`read` 默认 text；image 离线，只有显式 imageWithRemote 才允许下载远程图片，两者均不执行脚本或加载远程 CSS。邮件本地内容受保存天数与容量上限控制；导出到 workspace 的附件不参与该清理。账户连接、图片视图的用法、首次导入与重启后的提醒行为见[Room 邮件使用指南](email.zh-CN.md)。服务器邮件编号变化导致 `recoveryRequired` 时，先停止 Agent，再使用 `agentic-gpt email --config PATH recover --notify-existing` 或 `--skip-existing-notifications` 显式选择恢复提醒方式；旧副本保留，新导入生成新 ID。远程图片缓存保留 24 小时且最多 64 MiB；详情和续读失效处理见[邮件恢复与读取](email.zh-CN.md)。
 
 ## 本地/Standalone 冒烟检查（主要路径）
 
@@ -173,7 +175,9 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 
 实时更新/重启边界适用于 Standalone、Local 和 Hub 连接模式下的 Agent worker，
 并非 Standalone 独有。Agent worker 运行时，对 `policy`、`limits`、`shell.initFile`、`mcpServers`、
-`toolsets.enabled` 和 `events` 的有效变更会以原子方式应用于后续准入、调用和工具发现。
+`toolsets.enabled`、`events` 和 `email` 的非账户字段的有效变更会以原子方式应用于后续准入、调用和工具发现。
+
+`email.account` 修改后需重启；运行中仍使用原账户。其他邮件配置更新影响后续同步和请求；关闭邮件或 Room 工具集停止继续安排同步。邮件发送及垃圾箱确认不因全局命令策略关闭而放宽，详见[邮件配置与权限](email.zh-CN.md#确认权限和失败处理)。
 
 `shell.initFile` 变更只影响之后接纳的 Process；已接纳 Process 保留准入时的配置快照。
 

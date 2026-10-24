@@ -38,7 +38,7 @@ HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上
 
 Normal 并不等于 Room：只有显式启用 `room` 命名空间时，Normal 运行时才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
 
-重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`、`events`），且不会重建已有的启动资源。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已接纳操作保留准入快照。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
+重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`、`events` 和 `email` 的非账户字段），且不会重建已有的启动资源。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已接纳操作保留准入快照。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
 
 Tmux 与 Browser 工具集关闭时，启动不创建默认 tmux 会话，也不发现或准备 Browser 运行时。
 热启用 Tmux 时准备默认会话；热启用 Browser 后首次已准入调用初始化运行时。
@@ -208,6 +208,13 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 历史发布/迁移记录仍是历史记录，不是当前错误或兼容性契约。
 
+## Room 邮件
+
+`room.email.list`、`room.email.read`、`room.email.search`、`room.email.attachment`、`room.email.send` 和 `room.email.operate` 由 Agent 执行；Hub Full 通过活动 Room 路由，HTTP 为同名的 `/v1/room/email/<action>` POST 路由，请求不带 `agentId`。Coordinator 不提供这些操作。六项操作均要求 Room 工具集；后台同步还要求 `email.enabled` 与有效账户。
+
+`list` 只列本地记录的当前 INBOX；`read` 提供默认 `text`、离线 `image` 和仅额外下载远程图片的 `imageWithRemote`；三种模式都不执行脚本或加载远程 CSS，续读保持原模式；`search` 可查本地收件及发送记录；`attachment` 可内联读取或受文件权限检查导出至 workspace；`send` 发送纯文本；`operate` 修改已读、标星或移入垃圾箱。发送和移入垃圾箱由各自 `allow/confirm/deny` 配置控制，`confirm` 失败时不执行。六项响应复用现有公共 `events` 面板。HTTP 保留 JSON 图片数据，MCP 将图片投影为原生图片内容块并保留文本及结构化结果中的 `events`。
+
+输入示例、继续读取规则、同步/清理及不确定发送结果见[Room 邮件使用指南](email.zh-CN.md)；HTTP schema 以 [OpenAPI](../openapi/hub.yaml) 为准。
 
 ## 持久事件收件箱
 

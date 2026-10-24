@@ -73,6 +73,19 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 
 当前九个 Room 名称在本地 Agent MCP、Hub Full MCP 以及九个 `/v1/room/<namespace>/<action>` POST 路由上构成同一套语义契约。Hub 只选择已捕获的活动 Room 租约，并负责路由/回执，不拥有 Room 文件或内容。通用运行回执可能含有有界操作结果，但不是 Room 内容的权威来源。
 
+## Room 邮件接口
+
+六项邮件操作要求 `room` 工具集；Standalone/Local 使用本地 Agent，Hub Full 经活动 Room 路由且不接收 `agentId`，Coordinator 隐藏并拒绝。HTTP 对应 `/v1/room/email/<action>` POST 路由。配置与完整例子见[Room 邮件使用指南](email.zh-CN.md)，字段以 [OpenAPI](../openapi/hub.yaml) 为准。
+
+| 名称 | 用途与输入 | 结果与副作用 |
+| --- | --- | --- |
+| `room.email.list` | 可选 `cursor`、`limit`、`filter`；仅列当前 INBOX。 | 返回本地列表，不触发同步，不标为已读。 |
+| `room.email.read` | `id`；可选 `view=text/image/imageWithRemote`（默认 text）和 `cursor`。 | 分段正文或图片及附件清单；image 离线，imageWithRemote 仅额外下载远程图片；不执行脚本或加载远程 CSS，不标为已读。 |
+| `room.email.search` | `query`；可选 `id`、`field`。提供 `id` 时固定搜索正文。 | `items` 使用 `ref`/`text`，超预算报告 `truncated`；可查本地 `sent`/`unknown`。 |
+| `room.email.attachment` | `id`、`attachmentId`；可选 `download`、`path`。提供 `path` 即下载。 | 内联安全内容或写入 workspace；拒绝越界和覆盖，并应用文件权限。 |
+| `room.email.send` | `to`、`subject`、`text`；可选 `cc`、`bcc`、`replyToId`。 | SMTP 外发并保存发送记录；按 `sendPolicy` 严格确认或拒绝，unknown 不自动重发。 |
+| `room.email.operate` | `id`、`action=markRead/markUnread/flag/unflag/trash`。 | 修改服务器状态；仅 trash 使用 `trashPolicy`，不提供永久删除。 |
+
 ## Hub Full 与 Coordinator 接口面
 
 下表列出 Hub Full 配置档的执行接口面。Coordinator 配置档仅包含 `hub.info`、`agent.list`、`hub.run.list`、`hub.run.get`、`hub.process.status`、`hub.process.list`、`user.notify.channels` 和 `user.notify.send`；它不会派发 Agent 命令。表中标注的 Hub 工具使用 `agentId`；活动 Room 工具则有意路由到活动 Room Agent，不接收 `agentId`。

@@ -10,7 +10,7 @@
 ## 阶段
 1. 配置、TUI与实时生效边界：complete
 2. 同步、存储、确认发送、附件、图片及全部接口：complete
-3. 远程构建、修复、文档与实际链路验证：in_progress
+3. 远程构建、修复、文档与实际链路验证：complete
 每阶段完成后使用Conventional Commit提交；不推送。只添加有长期价值的④⑤测试；①②③不主动编写。
 ## 分工
 主代理持有main/state/startup启动段、EventStore幂等注入、email_files/email_render、文档、验证与提交。配置代理持有config/TUI及reload函数；core持有room/email/**及Cargo依赖；interface持有protocol及其入口映射与OpenAPI。

@@ -1,20 +1,12 @@
-# 发现
-用户bin remote-build与仓库scripts/remote-build.sh不同，必须用前者。前者rsync到远端cache，在远端--locked执行check/build/test，release交叉编译aarch64并取回dist/remote。test隔离HOME，但新smoke还需XDG/runtime/TMP隔离与进程清理。
+# 已确认的实现与验证边界
 
-## 图片方案待用户选择
-用户明确图片视图不得依赖项目Browser功能，并要求先检索可行方案、由用户选择。暂停renderer实现，未添加任何Chrome依赖或渲染代码。
-- litehtml-rs官方README有email/pixbuf feature，CPU直接RGBA，email预处理支持内嵌图与表格/旧式邮件属性，远程资源默认关闭。候选最贴合项目；Rust绑定较新，样本与性能未测。
-- Blitz提供独立HTML/CSS与CPU图像路径，当前官方主仓与about状态不同，table-collapse等表格实现有限制，需样本验证。
-- WeasyPrint独立HTML/CSS排版成熟，依赖Python/Pango，当前主输出PDF，需额外PDF转PNG，集成链更长。
-- Takumi现成HTML转换会丢style/head/link，不宜直接用于原始邮件，不能只凭支持HTML就推荐。
-其他实现已落盘，但尚未远程编译；remote-build sync远端步骤尚未返回，原因未核实；未终止任何远端任务。Cargo.lock通过cargo update --workspace只增加新依赖、保留原有版本。
-
-### Email core work in progress (2026-10-24)
-
-- Added core owner/content/store/network and 3 tier-⑤ tests, plus imap/imap-proto/lettre/mailparse/htmd/webpki-roots dependencies. No Rust compilation, test execution, real mailbox or SMTP smoke has run. Cargo.lock still needs remote dependency resolution. Treat all new core code as unverified.
-- Existing confirmation_content collapses automatic_reason to 100 characters. Email sends supply To/Subject and a body preview, but desktop reason truncation can omit required information. A bounded email-specific display path through existing confirmation providers remains required. Do not weaken strict Confirm behavior.
-- Body storage cleanup currently runs after a full mailbox sync. Must enforce retention/capacity while importing (without scanning the full index for every message), otherwise a large first import can exceed configured capacity transiently.
-- First connection errors are now persisted with accounts.validity=0 as an uninitialized sentinel; successful SELECT persists its true baseline before import. Need real SQL/reopen verification.
-- UIDVALIDITY changes preserve old records and pause remote operations. A user-invoked recovery mechanism/diagnostic procedure has not yet been implemented.
-- SMTP pending records are persisted before confirmation/network and become unknown after reopen. A pre-network worker error currently returns a generic error without its new ID, although the record remains searchable; assess send result handling during compile/review.
-- TLS uses existing rustls with WebPKI trust and explicit ring provider, with a tiny bounded STARTTLS pre-login handshake to impose TCP/IO deadlines; all mailbox commands use imap library. Need real TLS/STARTTLS execution. Parent is researching a standalone HTML mail renderer separately; do not assume project Browser availability.
+- 使用用户的 `/home/dev/.local/bin/remote-build` 远程编译与测试；不使用同名仓库脚本。配置、实现、文档按三个阶段提交。
+- 图片采用 litehtml 0.2.6 的 vendored/email/pixbuf；独立有资源限制的子进程，不使用 Browser/Chrome。保留库完整默认HTML样式，确保div/p/table及分页高度正确。
+- `view=text/image/imageWithRemote`，默认text；只有最后一种允许受限公网图片下载。准备HTML缓存供后续分片复用，禁止每页重复下载；内网地址、文件URL、脚本及外部CSS不开放。
+- Local和Hub运行时本来均经公共 `operation_result::attach_event_panel` 附加events，未另造邮件封套；补齐OpenAPI响应中的同一字段。实际注入事件验证六API、图片和错误响应中的保留。
+- 新邮件提醒写入原EventStore。邮件数据库保存待投递记录，EventStore持久投递回执避免重启/事件历史清理后重复提醒；事件满载不阻塞邮件索引。
+- 独立进程锁保护同一邮件数据库；关闭邮件不夺取其他实例所有权，网络任务继续持有锁直至实际结束。首次分界持久化、pending恢复unknown、过期内容保留ID、明确恢复UID关联均由真实存储测试覆盖。
+- 附件导出复用文件解码和写入能力；workspace目录句柄固定位置、禁止符号链接逃逸、原子不覆盖及600权限创建均在实际效果边界执行。已存在目标根据真实OS错误返回file_already_exists。
+- 测试保留价值：真实TLS收发/确认、恢复与提醒投递保护数据完整性，文件/renderer/Local MCP保护消费者实际可见行为；未新增默认值或工具清单等固定内容测试。按用户要求删除原固定工具集合测试。
+- 远程helper原有fd9被旧tmux继承导致锁等待；只处理本次等待者，保留原tmux，并让编译/测试子进程关闭fd9。隔离目录改为短/tmp/aget防止Unix socket过长，清理只读测试目录；增加lint/parity模式。
+- 最终证据：check/build/lint/test成功，工作区542通过、1个原有手动用例跳过；现有真实HTTP/MCP parity通过。未使用真实邮箱服务商凭据，未验证生产隧道传输。

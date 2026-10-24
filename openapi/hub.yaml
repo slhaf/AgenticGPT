@@ -917,7 +917,7 @@ paths:
   /v1/room/email/list:
     post:
       operationId: roomEmailList
-      description: List the active Room account INBOX from its local index, newest receivedAt first. Does not sync or mark read; unread and inclusive receivedAfter / exclusive receivedBefore filters are bound to the opaque cursor. No agentId is accepted.
+      description: 从活动 Room 账户的本地索引列出 INBOX，按 receivedAt 从新到旧排序。不触发同步、不标为已读；续页保持相同筛选条件，receivedAfter 包含下界，receivedBefore 不包含上界。不接受 agentId。
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -927,7 +927,7 @@ paths:
               $ref: "#/components/schemas/RoomEmailListRequest"
       responses:
         "200":
-          description: Email result from the active Room Agent.
+          description: 活动 Room Agent 的邮件结果，复用公共 events 响应结构。
           content:
             application/json:
               schema:
@@ -945,7 +945,7 @@ paths:
         "409":
           $ref: "#/components/responses/AgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -971,7 +971,7 @@ paths:
               $ref: "#/components/schemas/RoomEmailReadRequest"
       responses:
         "200":
-          description: Email result from the active Room Agent.
+          description: 活动 Room Agent 的邮件结果，复用公共 events 响应结构。
           content:
             application/json:
               schema:
@@ -989,7 +989,7 @@ paths:
         "409":
           $ref: "#/components/responses/AgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1005,7 +1005,7 @@ paths:
   /v1/room/email/search:
     post:
       operationId: roomEmailSearch
-      description: Case insensitive literal substring search over stored received and sent or unknown outgoing email. With id all field values normalize to body and refs are read text cursors; without id refs are mail IDs. No result cursor; truncated reports the response bound.
+      description: 在本地收件和发送记录（含 unknown）中做不区分大小写的字面子串搜索。提供 id 时统一搜索 body，ref 可作为 text 读取位置；未提供时 ref 为邮件 ID。结果不分页，超出预算由 truncated 报告。
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -1015,7 +1015,7 @@ paths:
               $ref: "#/components/schemas/RoomEmailSearchRequest"
       responses:
         "200":
-          description: Email result from the active Room Agent.
+          description: 活动 Room Agent 的邮件结果，复用公共 events 响应结构。
           content:
             application/json:
               schema:
@@ -1033,7 +1033,7 @@ paths:
         "409":
           $ref: "#/components/responses/AgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1049,7 +1049,7 @@ paths:
   /v1/room/email/attachment:
     post:
       operationId: roomEmailAttachment
-      description: Inline a small UTF-8 text or supported image attachment, or atomically download into workspace. Supplying path always normalizes download to true. Paths cannot escape workspace or overwrite existing files; default downloads/email/<mail-id>/<name>. Download returns only the relative path.
+      description: 内联读取小型 UTF-8 文本或受支持图片附件，或将原始附件写入 workspace。提供 path 即采用下载模式；禁止逃出 workspace 或覆盖已有文件。默认路径为 downloads/email/<mail-id>/<name>，下载成功只返回相对路径。
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -1059,7 +1059,7 @@ paths:
               $ref: "#/components/schemas/RoomEmailAttachmentRequest"
       responses:
         "200":
-          description: Email result from the active Room Agent.
+          description: 活动 Room Agent 的邮件结果，复用公共 events 响应结构。
           content:
             application/json:
               schema:
@@ -1077,7 +1077,7 @@ paths:
         "409":
           $ref: "#/components/responses/AgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1093,7 +1093,7 @@ paths:
   /v1/room/email/send:
     post:
       operationId: roomEmailSend
-      description: Send plain text using the configured Room account and email.sendPolicy. Confirm requires explicit approval and deny cannot be overridden. Returns a stable local record ID and sent or unknown. Unknown is retained for search/read, never automatically retried; a new send may duplicate delivery.
+      description: 使用 Room 配置账户发送纯文本，并遵守 email.sendPolicy。confirm 必须明确批准，deny 不可被请求覆盖。返回稳定本地 ID 和 sent/unknown；unknown 可由 search/read 查回，不自动重试，再次 send 可能重复发送。
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -1103,7 +1103,7 @@ paths:
               $ref: "#/components/schemas/RoomEmailSendRequest"
       responses:
         "200":
-          description: Email result from the active Room Agent.
+          description: 活动 Room Agent 的邮件结果，复用公共 events 响应结构。
           content:
             application/json:
               schema:
@@ -1121,7 +1121,7 @@ paths:
         "409":
           $ref: "#/components/responses/AgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1137,7 +1137,7 @@ paths:
   /v1/room/email/operate:
     post:
       operationId: roomEmailOperate
-      description: Explicitly markRead, markUnread, flag, unflag or trash an incoming mail. Trash moves to server trash subject to email.trashPolicy; no permanent deletion. Non-trash operations need no confirmation. Local outgoing records do not support remote operations.
+      description: 对收件显式执行 markRead、markUnread、flag、unflag 或 trash。trash 遵守 email.trashPolicy，仅移入服务器垃圾箱，不永久删除；其他操作无需邮件专属确认。本地发送记录不支持远端操作。
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -1147,7 +1147,7 @@ paths:
               $ref: "#/components/schemas/RoomEmailOperateRequest"
       responses:
         "200":
-          description: Email result from the active Room Agent.
+          description: 活动 Room Agent 的邮件结果，复用公共 events 响应结构。
           content:
             application/json:
               schema:
@@ -1165,7 +1165,7 @@ paths:
         "409":
           $ref: "#/components/responses/AgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1207,7 +1207,7 @@ paths:
         "409":
           $ref: "#/components/responses/RoomAgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1249,7 +1249,7 @@ paths:
         "409":
           $ref: "#/components/responses/RoomAgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1291,7 +1291,7 @@ paths:
         "409":
           $ref: "#/components/responses/RoomAgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1333,7 +1333,7 @@ paths:
         "409":
           $ref: "#/components/responses/RoomAgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1375,7 +1375,7 @@ paths:
         "409":
           $ref: "#/components/responses/RoomAgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1417,7 +1417,7 @@ paths:
         "409":
           $ref: "#/components/responses/RoomAgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1459,7 +1459,7 @@ paths:
         "409":
           $ref: "#/components/responses/RoomAgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1501,7 +1501,7 @@ paths:
         "409":
           $ref: "#/components/responses/RoomAgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -1543,7 +1543,7 @@ paths:
         "409":
           $ref: "#/components/responses/RoomAgentError"
         "422":
-          description: JSON body extraction failed before Room dispatch.
+          description: 请求 JSON 无法解析，尚未派发至 Room。
           content:
             text/plain:
               schema:
@@ -2963,15 +2963,15 @@ components:
         issue:
           $ref: "#/components/schemas/RoomDiaryLayerIssue"
     RoomEmailFilter:
-      {"type": "object", "additionalProperties": false, "properties": {"unread": {"type": "boolean"}, "receivedAfter": {"type": "string", "format": "date-time", "description": "Inclusive lower receivedAt bound."}, "receivedBefore": {"type": "string", "format": "date-time", "description": "Exclusive upper receivedAt bound."}}}
+      {"type": "object", "additionalProperties": false, "properties": {"unread": {"type": "boolean"}, "receivedAfter": {"type": "string", "format": "date-time", "description": "接收时间下界，包含该时刻。"}, "receivedBefore": {"type": "string", "format": "date-time", "description": "接收时间上界，不包含该时刻。"}}}
     RoomEmailListRequest:
       {"type": "object", "additionalProperties": false, "properties": {"cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}, "filter": {"$ref": "#/components/schemas/RoomEmailFilter"}}}
     RoomEmailReadRequest:
       {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "view": {"type": "string", "enum": ["text", "image", "imageWithRemote"], "default": "text", "description": "text 为规范化正文；image 不联网；imageWithRemote 仅额外下载远程图片，不加载远程 CSS，不执行脚本或提交表单。"}, "cursor": {"type": "string"}}, "required": ["id"]}
     RoomEmailSearchRequest:
-      {"type": "object", "additionalProperties": false, "properties": {"query": {"type": "string", "minLength": 1}, "id": {"type": "string"}, "field": {"type": "string", "enum": ["all", "subject", "body", "from"], "default": "all", "description": "When id is present all field values normalize to body."}}, "required": ["query"]}
+      {"type": "object", "additionalProperties": false, "properties": {"query": {"type": "string", "minLength": 1}, "id": {"type": "string"}, "field": {"type": "string", "enum": ["all", "subject", "body", "from"], "default": "all", "description": "提供 id 时统一按 body 搜索。"}}, "required": ["query"]}
     RoomEmailAttachmentRequest:
-      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "attachmentId": {"type": "string"}, "download": {"type": "boolean", "default": false}, "path": {"type": "string", "description": "Workspace-relative destination; presence forces download=true."}}, "required": ["id", "attachmentId"]}
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "attachmentId": {"type": "string"}, "download": {"type": "boolean", "default": false}, "path": {"type": "string", "description": "相对于 workspace 的目标路径；提供即采用下载模式。"}}, "required": ["id", "attachmentId"]}
     RoomEmailSendRequest:
       {"type": "object", "additionalProperties": false, "properties": {"to": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "cc": {"type": "array", "items": {"type": "string"}}, "bcc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "text": {"type": "string"}, "replyToId": {"type": "string"}}, "required": ["to", "subject", "text"]}
     RoomEmailOperateRequest:
@@ -2989,7 +2989,7 @@ components:
     RoomEmailImage:
       {"type": "object", "additionalProperties": false, "properties": {"mimeType": {"type": "string"}, "data": {"type": "string", "contentEncoding": "base64"}}, "required": ["mimeType", "data"]}
     RoomEmailReadResponse:
-      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "array", "items": {"type": "string"}}, "cc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "receivedAt": {"type": "string", "format": "date-time"}, "status": {"type": "string", "enum": ["received", "pending", "sent", "unknown", "failed", "denied"]}, "body": {"type": "string"}, "format": {"type": "string", "enum": ["plain", "markdown"]}, "attachments": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailAttachmentInfo"}}, "hasMore": {"type": "boolean"}, "nextCursor": {"type": ["string", "null"]}, "blockedRemoteImages": {"type": "integer", "minimum": 0, "description": "Distinct external image references refused by the offline renderer, including external CSS background images."}, "images": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailImage"}}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["id", "from", "to", "cc", "subject", "receivedAt", "status", "attachments", "hasMore"]}
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "array", "items": {"type": "string"}}, "cc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "receivedAt": {"type": "string", "format": "date-time"}, "status": {"type": "string", "enum": ["received", "pending", "sent", "unknown", "failed", "denied"]}, "body": {"type": "string"}, "format": {"type": "string", "enum": ["plain", "markdown"]}, "attachments": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailAttachmentInfo"}}, "hasMore": {"type": "boolean"}, "nextCursor": {"type": ["string", "null"]}, "blockedRemoteImages": {"type": "integer", "minimum": 0, "description": "被阻断或无法加载的不同图片来源数，包含远程 CSS 背景图片。"}, "images": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailImage"}}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["id", "from", "to", "cc", "subject", "receivedAt", "status", "attachments", "hasMore"]}
     RoomEmailAttachmentResponse:
       {"oneOf": [{"type": "object", "additionalProperties": false, "properties": {"path": {"type": "string"}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["path"]}, {"type": "object", "additionalProperties": false, "properties": {"body": {"type": "string"}, "format": {"type": "string", "enum": ["plain"]}, "images": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailImage"}}, "events": {"$ref": "#/components/schemas/EventPanel"}}}]}
     RoomEmailSendResponse:

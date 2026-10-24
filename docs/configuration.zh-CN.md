@@ -210,6 +210,7 @@ agentic-gpt run
 | `limits` | Process 并发限制与最大活动 Process/Skill/MCP Job 容量。 |
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
+| `email` | 单账户 IMAP/SMTP、同步间隔、本地内容保存限制和发送/垃圾箱策略；见[邮件使用指南](email.zh-CN.md)。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
 | `browser` | 可选的高级 Browser runtime 覆盖；Browser runtime 自动 discovery 受 Browser 工具集开关控制；managed runtime 自动 provisioning 需显式启用 `browser.managed.autoProvision`，默认 `false`。 |
 | `hub` | `enabled` 在 Standalone/Local 启用确认用的 Hub 辅助连接，默认 `false`；Hub 模式仍始终使用命令连接。Standalone 的上报由 `tunnel.hubReporting.enabled` 独立控制。 |
@@ -778,6 +779,14 @@ Process 主动确认获准的 `read`／`write` 路径可追加到本次挂载，
 `policy.enabled=false` 时不启用 OS 挂载隔离；显式主动确认仍生效。tmux、下游 MCP 和 Browser
 JavaScript 不属于受管理 Process 的 bubblewrap 范围。
 
+## Room 邮件配置
+
+邮件配置使用顶层 `email`，默认关闭；启用时需配置完整 `account`，并启用 `room` 工具集。全屏初始化提供邮件页与 Review；CLI 提供 `email.enabled`、`email.account`、`email.syncIntervalSeconds`、`email.retentionDays`、`email.maxStorageBytes`、`email.sendPolicy` 和 `email.trashPolicy`。账户通过完整 JSON 对象设置；密码仅接受 `env:` 或 `file:` 引用，配置显示与 Review 均脱敏。
+
+同步间隔默认 60 秒，范围 10–86400 秒；本地内容默认保存 90 天，范围 1–36500 天；容量上限默认 2 GiB，最小 1 MiB。`sendPolicy` 和 `trashPolicy` 都默认 `confirm`，可设为 `allow` 或 `deny`；`confirm` 必须明确批准，确认不可用时不会执行，也不受全局 `policy.enabled=false` 放宽。
+
+`email.account` 修改后须重启；其余邮件配置由现有监听器立即应用于后续同步和请求。启停邮件及关闭 Room 工具集会影响后台同步。邮件读取有 `text`（默认）、`image`（离线）和 `imageWithRemote`（仅额外下载远程图片）三种模式；图片渲染使用随包构建的 `litehtml-rs`，无需 Chrome、Python 或项目 Browser，运行时需要合适字体。完整账户示例、六个 API、私有存储与清理边界见[Room 邮件使用指南](email.zh-CN.md)。
+
 ## CLI 可管理字段
 
 `config set` 使用受控 registry，并不是通用 JSONPath 编辑器。使用当前语言列出 registry：
@@ -871,6 +880,8 @@ live subset。无效候选会保留上一份有效状态；候选修改需要重
 | `workspaceRoot` | 修改 workspace 需要重启；重启前默认工作目录仍使用原值，`policy.path` 独立热加载 |
 | `mode`、`profile`、`agentId` | 需要重启 |
 | `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |
+| `email.account` | 需要重启；运行中保持原账户连接配置 |
+| `email.enabled`、`syncIntervalSeconds`、`retentionDays`、`maxStorageBytes`、`sendPolicy`、`trashPolicy` | 热加载；后续同步/请求采用新值，已接纳操作保留原策略 |
 | `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |
 | `tunnel.*` client identity/source/secret | 需要重启 |
 | `hub`、reporting mode | 相关连接需要重启 |

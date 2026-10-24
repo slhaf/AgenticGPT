@@ -8,3 +8,5 @@
 remote-build修复fd9锁被子进程继承，测试HOME改短/tmp/aget以避免Unix socket路径长度限制；添加lint/parity模式，所有编译和执行测试保持远端。
 
 实现阶段完成：远程实际Local MCP邮件组合测试通过，覆盖三种read模式、正文/搜索/图片cursor、远程缓存、本地地址阻断、附件原始写入与拒绝覆盖、六API成功/错误中的真实events保留。独立renderer进程测试通过。现有HTTP/MCP contract parity门禁PASS；无真实邮箱服务商凭据参与。工作区其余测试及最终文档检查收尾中。
+
+最终验证：remote-build check/build/lint/test全部通过；542项通过、1项原有手动测试跳过。remote-build parity中现有真实HTTP/MCP门禁PASS。邮件测试包含真实隔离TLS IMAP/SMTP、数据库重开恢复、提醒满载/重复投递、附件实际写入及路径竞态、独立渲染worker、六公开邮件API及其events frame。未使用真实服务商账户或生产邮箱；未声明生产隧道覆盖。文档链接/代码块及git diff检查通过，恢复原active_plan指针；不推送。
