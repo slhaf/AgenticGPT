@@ -2,12 +2,12 @@
 
 Room Secret 通过 Agent 本机的 Bitwarden Password Manager CLI（`bw`）访问独立 Vaultwarden 账号，提供账号组列表、密码／当前 TOTP 读取、创建／更新和移入回收站。它不提供网页登录、密码生成或永久删除，也不把密钥保存到 Room 文档仓库。
 
-本页适用于包含 `room.secret.*` 的构建，说明当前代码的配置与调用方式。[设计文档](room-secret-api-design.md)记录决策和实现依据；本文不表示已完成真实 Vaultwarden 部署互通验证。共享请求类型见 [secret.rs](../crates/agentic-gpt-protocol/src/secret.rs)，HTTP schema 见 [OpenAPI](../openapi/hub.yaml)。
+本页适用于包含 `room.secret.*` 的构建，说明当前代码的配置与调用方式。[设计文档](room-secret-api-design.md)记录决策和实现依据；已验证的 CLI／服务端组合和范围见文末。共享请求类型见 [secret.rs](../crates/agentic-gpt-protocol/src/secret.rs)，HTTP schema 见 [OpenAPI](../openapi/hub.yaml)。
 
 ## 准备与启用
 
 1. 在运行 Agent 的机器准备 [`bw` **2026.10.0**](https://github.com/bitwarden/clients/releases/tag/cli-v2026.10.0)，并使 Agent 的 `PATH` 能找到它。当前适配器检查精确版本，不自动下载 CLI；缺失或版本不符返回 `secret_provider_unavailable`。
-2. 准备专用 Vaultwarden 账号的 Personal API client ID、client secret 和主密码。API Key 用于登录，主密码用于解锁；不要填组织 API Key 或 Secrets Manager access token。
+2. 使用已联调的 Vaultwarden **1.37.4**；**1.35.1** 的 Personal API 登录响应缺少固定 CLI 要求的 `userDecryptionOptions`，无法完成初始化。其他版本未验证，不据此声明最低兼容版本。准备专用账号的 Personal API client ID、client secret 和主密码。API Key 用于登录，主密码用于解锁；不要填组织 API Key 或 Secrets Manager access token。
 3. 用运行 Agent 的环境或私有文件提供三个凭据。`env:NAME` 指向 Agent 进程可读的环境变量；`file:PATH` 指向只保存对应凭据的文件，支持绝对路径或 `~` 展开。文件应由运行账号私有保护，不放进 workspace、日志或 Git。普通配置不接受凭据明文。
 4. 在已有配置中启用 Room 工具集，再填写连接设置，最后启用 Secret：
 
@@ -54,7 +54,7 @@ Agent 本地 MCP 在 Secret 关闭时隐藏四个工具。Hub Full MCP 沿用固
 
 `upsert.password/totp` 各最多 64 KiB；空字符串和显式 `null` 均拒绝，不能用它们清空字段。TOTP 接受 Base32 seed 或 `otpauth://totp/…` URI；当前支持 SHA1／SHA256／SHA512、6 或 8 位验证码、30 秒周期。HOTP、重复或未知 URI 参数及不受支持的设置返回 `secret_invalid_totp`。读取 TOTP 不返回 seed。
 
-账号组以 `bw list items` 返回的可解密条目为准。沿用 bw 对异常条目的容错行为：条目损坏或密钥不匹配等解密异常可能导致条目被省略且命令成功退出。这并非导入专用分支，也没有证据表明正常有效的个人 Login 条目会在常规读写时触发。Agentic 不读取加密缓存来核对完整性，也不另存快照。因此成功同步后的 `secret_not_found` 只表示可读列表未命中；upsert 可能为被省略的条目创建同名账号组，重复检查也只能覆盖可见条目。成功同步后的权重清理同样依据该列表，不能作为远端已删除的证明。相关原生行为见[固定版解密结果处理](https://github.com/bitwarden/clients/blob/cli-v2026.10.0/libs/common/src/vault/services/cipher.service.ts)。
+账号组以 `bw list items` 返回的可解密条目为准。沿用 bw 对异常条目的容错行为：条目损坏或密钥不匹配等解密异常可能导致条目被省略且命令成功退出。这属于异常条目的容错，并非正常读写步骤，也不是导入专用分支。Agentic 不读取加密缓存来核对完整性，也不另存快照。因此成功同步后的 `secret_not_found` 只表示可读列表未命中；upsert 可能为被省略的条目创建同名账号组，重复检查也只能覆盖可见条目。成功同步后的权重清理同样依据该列表，不能作为远端已删除的证明。相关原生行为见[固定版解密结果处理](https://github.com/bitwarden/clients/blob/cli-v2026.10.0/libs/common/src/vault/services/cipher.service.ts)。
 
 ## 确认与同步
 
@@ -82,4 +82,6 @@ CLI 状态位于 `~/.agentic_gpt/state/secret/<后端账号摘要>/`，由 `BITW
 
 `get` 响应丢失后需重新调用，并按当时策略重新授权；`confirm` 会重新确认。Agentic 会向调用方返回明文值，调用方自己的模型上下文和会话保存由调用方管理。退出时回收同步任务和 CLI 子进程，丢弃内存 session 并尽力锁定密码库。
 
-当前仓库实现的固定 CLI 版本、子进程边界和入口契约仍需与实际 Vaultwarden 版本联调，特别是离线解锁、同步期间读取和 CLI 本地文件锁；本页不把编译或模拟 provider 验证当作真实部署互通证据。
+2026-10-24 已用隔离账号联调 `bw 2026.10.0` 与 Vaultwarden `1.37.4`：Personal API 登录、解锁、stdin 创建及完整条目合并、特殊字符保真、当前 TOTP、原生同步时间、同步期间本地读取、断网后锁定再解锁并读取缓存、删除进入回收站均已通过。测试使用一次性服务端和私有状态目录，不使用个人密码库。 同时通过实际 Agent 本地 MCP 验证了四项操作、当前 TOTP、区分账号大小写、省略字段保留、等待预算耗尽后后台同步继续成功、离线过期读取及未命中、离线写入拒绝、Agent 重启后离线解锁读取；被扫描的 Agent 状态和日志未发现测试密码、seed 或验证码。
+
+网络故障分类取决于 CLI 实际输出。已验证单地址拒绝连接可识别并回退；localhost 双地址失败可能只留下不含具体原因的聚合错误，此时按无法可靠归类的失败报错，不强行降级为过期读取。
