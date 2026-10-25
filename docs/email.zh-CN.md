@@ -68,7 +68,7 @@ agentic-gpt config set email.sendPolicy confirm
 agentic-gpt config set email.trashPolicy deny
 ```
 
-`email.account` 内任何连接配置变化都要求重启 Agent。`enabled`、同步间隔、保存天数、容量上限和两个策略由现有配置监听器应用，无需重启；新策略影响之后接纳的请求，已接纳请求保留当时的策略。关闭 Room 工具集或邮件开关会停止继续安排同步。无效配置不会替换运行中上一份有效配置。
+`email.account` 连接配置变化通过邮件服务局部切换：先停止新准入并排空在途请求与同步，再释放旧账户 owner，保留本地数据库、游标和发送结果。繁忙或准备失败时保留旧账户并报告应用失败，不因重配置自动重发邮件；静态校验不保证远程登录成功。`enabled`、同步间隔、保存天数、容量上限和两个策略用于后续同步与请求，已接纳请求保留原策略。关闭 Room 工具集或邮件开关停止继续安排同步。通过配置 API 的 `value/appliedValue/applyStatus/error` 区分已保存与已应用，详见[配置生效边界](configuration.zh-CN.md#热加载与重启边界)。
 
 ## 收信、提醒与本地保存
 

@@ -38,11 +38,12 @@ agentic-gpt config show
 模式与配置档是两个独立选择：
 
 - `--mode standalone|hub|local` 选择运行时连接方式与配置形状。
-- `--profile normal|room` 选择默认 toolset preset。normal preset 启用除 `room` 外的所有
-  namespace；room preset 启用所有 namespace。配置档本身不会固定最终 runtime surface 或数量，
+- `--profile normal|room` 选择默认 toolset preset。normal preset 启用除 `room`、`config` 外的
+  namespace；room preset 额外启用 `room`，仍不默认选中 `config`。配置档本身不会固定最终 runtime surface 或数量，
   因为显式的 `toolsets.enabled` 选择具有权威性。
 
-可用 namespace 为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`room`。
+可用 namespace 为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`room`、`config`。
+`config` 默认不选中，已有显式列表也不会自动追加；关闭时三个配置工具均不可调用，本地 CLI/TUI 配置管理仍可使用。
 逻辑上的 `room` namespace 包含 Room bootstrap（`bootstrap` 与 `bootstrap.read`）以及全部
 `room.*` 工具。选择只会过滤既有的 Normal/Room advertised names，不会暴露 dispatch-only alias。
 使用以下命令固定选择；将 `<namespace>` 替换为上列 namespace 名称：
@@ -197,7 +198,8 @@ agentic-gpt run
 | --- | --- |
 | `mode` | 权威运行时分派：`standalone`、`hub` 或 `local`。 |
 | `profile` | 默认能力/toolset preset：`normal` 或 `room`。 |
-| `toolsets` | 已启用的 tool namespace；显式 `enabled` 列表会覆盖配置档 preset。 |
+| `toolsets` | 已启用的 tool namespace；显式 `enabled` 列表会覆盖配置档 preset，`config` 默认不选中。 |
+| `config` | 配置 API 的操作级权限；`updatePolicy` 为 `allow` 或 `confirm`，默认 `confirm`。 |
 | `agentId` | 本地连接身份，用于 Hub 路由、协议身份及 `~/.agentic_gpt/runtime/agent/<agentId>/` 下的 runtime/socket 路径；私有持久状态统一位于 `~/.agentic_gpt/state/`，不按此字段分目录。 |
 | `displayName` | summary/reporting 中的人类可读机器名称。 |
 | `workspaceRoot` | 默认工作目录及 `.agentic-gpt-audit.jsonl` 所在位置；不会隐式扩大路径基线。 |
@@ -216,6 +218,67 @@ agentic-gpt run
 | `hub` | `enabled` 在 Standalone/Local 启用确认用的 Hub 辅助连接，默认 `false`；Hub 模式仍始终使用命令连接。Standalone 的上报由 `tunnel.hubReporting.enabled` 独立控制。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
 | `events` | 持久事件收件箱中 `low` 严重级别事件的保留时长，以及内部事件严重级别覆盖。 |
+
+## 配置 API
+
+`config.manual`、`config.get`、`config.update` 由目标 Agent 的同一配置服务执行，支持 Agent stdio、Unix 与 HTTP MCP，以及 Hub HTTP 和 Apps MCP。Hub 请求额外提供 `agentId`，修改的是该 Agent 的配置，不是 Hub 服务端配置。各入口保留自身认证与响应封套，并沿用公共 `events` 面板；HTTP 路由和完整输入见[配置接口](interfaces.md#配置-api)。
+
+先通过本地管理入口启用工具集：
+
+```bash
+agentic-gpt config toolset enable config
+agentic-gpt config manual --section config
+```
+
+`config.updatePolicy` 默认 `confirm`，整批修改须取得明确批准；拒绝、取消、超时或确认通道不可用均不写入，也不因 `policy.enabled=false` 放行。修改 `updatePolicy` 自身按修改前的有效策略判断；候选中的 `allow` 不能批准它自己。`manual/get` 不请求写入确认。此策略只约束配置 API 的 `update`，本地 CLI/TUI 管理不受工具集或该策略限制。
+
+三个工具的请求如下；示例为工具参数，不含传输封套：
+
+```json
+{"section":"limits","detail":"full"}
+```
+
+`config.manual` 无筛选时返回目录，`section` 浏览章节，`query` 检索；二者可组合，`detail` 为 `summary` 或默认 `full`。结果包含文档 `content` 和匹配数 `matches`，说明真实路径、类型、缺省、关联约束及支持的操作，不读取当前凭据。
+
+```json
+{"paths":[["limits"],["shell","initFile"],["mcpServers","example.http","enabled"]]}
+```
+
+`config.get` 接受 1–64 个路径，每个路径是字符串段数组；空路径 `[]` 表示整个配置。事件名 `process.completed` 和服务器 ID `example.http` 各占一段，点不是 API 的分隔符。不支持数组下标。返回的 `items` 中：
+
+| 字段 | 含义 |
+| --- | --- |
+| `value` | 最新持久配置合并默认值后的值；敏感项脱敏。 |
+| `explicit` | 当前稀疏文件是否包含该路径，不表示用户历史上是否改过。 |
+| `exists=false` | 目录支持此路径，但当前没有该条目；不同于存在且值为 `null`。未知路径返回错误。 |
+| `redacted=true` | 此项含脱敏内容；不可将脱敏占位符写回作为凭据。 |
+| `appliedValue` | 已应用值与持久值不同时返回，可为 `null`。 |
+| `applyStatus` | `applied`、`restart_required`、`applying` 或 `failed`。 |
+| `error` | 可选的配置或组件应用错误，不含凭据原文。 |
+
+`applied` 描述配置应用状态，不证明外部邮箱、Vaultwarden、浏览器或网络依赖均已可用；连接和实际调用仍可失败。
+
+```json
+{
+  "changes": [
+    {"op":"set","path":["limits","processResponseBytes"],"value":16384},
+    {"op":"add","path":["skills","allowedHosts"],"value":"skills.example.com"},
+    {"op":"unset","path":["events","internalOverrides","process.completed"]}
+  ],
+  "dryRun": true
+}
+```
+
+`config.update` 接受 1–64 个按序执行的 `changes`，请求大小最多 1 MiB。`value` 使用原生 JSON，不把数字、布尔值或数组装进字符串。操作作用于提交时最新的持久配置，不使用 `revision` 或 `ifRevision`；同一目标以后提交的操作为准。
+
+- `set` 替换值或整个子树；设置对象不会与旧对象自动合并。
+- `unset` 移除显式字段或 map 条目，恢复缺省；必需的 `mode/profile/toolsets/toolsets.enabled` 不可删除。
+- `add/remove` 仅用于目录标为集合的列表，添加已存在值或移除不存在值均无变化。集合包括工具集、命令/路径规则、Skills 允许主机及 HTTP 允许主机；有序的确认通道和 Browser 模块目录用 `set` 整体替换。
+- `null` 是值，和 `unset` 不同。例如 `shell.initFile=null` 禁用初始化文件，`unset` 恢复默认路径。CLI 的文本解析便利约定不改变 API 语义。
+
+整批操作完成后统一校验，成功才保存一次；操作或校验失败不保存本批变更。写入在 rename 后发生目录同步错误时，响应会区分文件已替换，不能把该错误解释为未保存。
+
+`dryRun=true` 不保存本次修改，返回 `saved=false`、`dryRun=true` 及脱敏的 `before/after/expectedEffect`；后续实写会重新基于届时最新配置，预览不是并发前置条件。API 的实写等待保存和本次局部应用尝试结束，返回 `saved`、`changes` 及各项实际 `applyStatus`。`saved=true` 不代表全部已生效；组件失败不回滚整份已保存配置，启动字段仍标记待重启。读取 `config.get` 核对结果，不因传输超时自动重试。查询、预览、公共事件及公开调用回执均脱敏；Hub 私有可靠派发记录保留待重放的原请求。
 
 ## 持久事件收件箱配置
 
@@ -239,13 +302,13 @@ agentic-gpt run
 
 每个覆盖值只能是 `low`、`medium`、`high` 或 `off`。`off` 不创建该类型的事件；把某个已知事件类型的覆盖值设为 CLI 的 JSON `null` 会移除该覆盖并恢复继承的 `low`。事件收件箱的查询、计数、过期和处理语义见[持久事件收件箱](interfaces.md#持久事件收件箱)。
 
-`config set` 的值是单个 shell 参数；枚举值是 JSON 字符串，对象中的 JSON 字符串也要在 shell 中引用。可使用 `config keys` 查看当前 registry、`config show` 查看有效配置：
+`config set` 的值是单个 shell 参数；CLI 的枚举值使用普通文本；原生 JSON 批量操作中的枚举值仍为 JSON 字符串。可使用 `config keys` 查看配置目录、`config show` 查看有效配置：
 
 ```bash
 agentic-gpt config keys --section events
 agentic-gpt config set events.lowTtlSeconds 86400
-agentic-gpt config set events.internalOverrides.process.completed '"high"'
-agentic-gpt config set events.internalOverrides.skill_install.failed '"off"'
+agentic-gpt config set events.internalOverrides.process.completed high
+agentic-gpt config set events.internalOverrides.skill_install.failed off
 agentic-gpt config show
 agentic-gpt config set events.internalOverrides.process.completed null
 ```
@@ -427,11 +490,11 @@ Browser 是否启用不由 runtime 配置决定，`toolsets.enabled` 仍具有�
 }
 ```
 
-显式 source 在进程启动时选择并具有权威性：
+显式 source 在启动或局部重配置时选择并具有权威性：
 
 - 无效 descriptor 会关闭 Browser capability，不会回退到 Desktop discovery，但 Agentic 仍会
   继续启动。
-- 修改它需要重启进程。
+- 修改它会协调重建 Browser runtime；旧租约与 JavaScript 会话可能失效。准备失败会报告组件错误，不能把配置保存成功视为 Browser 已可用。
 - `docsRoot` 与 `trustedCodePaths` 由内部派生，不是配置字段。
 - 本设置不管理 installer、downloader 或 runtime cache。
 
@@ -746,7 +809,7 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 
 ## Skills、Room 与 bubblewrap
 
-`skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；只有缺少顶层字段时才读取 legacy `room.skills`。
+`skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；旧 `room.skills` 不属于当前可写配置路径。
 
 `room.timezone` 保留为 Room metadata；当前读取使用仓库路径，而不是 legacy JSONL
 日期分区。`room.diaryDayBoundaryHour` 范围为 0–23，用于新 bootstrap 的 Daily scaffold
@@ -795,7 +858,7 @@ JavaScript 不属于受管理 Process 的 bubblewrap 范围。
 
 CLI 支持上述全部键，TUI 的 Room 页和 Review 提供对应编辑入口。`config show`、JSON 预览、Review 和 Debug 隐藏服务地址、账号及三个凭据引用；`agent.info` 的配置摘要不包含这些内容。引用在使用时按现有 secret reference 机制解析，文件引用支持 `~` 展开。
 
-`getPolicy=confirm`、`upsertPolicy=confirm` 或 `deletePolicy=confirm` 均要求明确批准；拒绝、超时或确认不可用时不披露或修改密钥，不受 `policy.enabled=false` 绕过。`list` 不请求确认。`room.secret.getPolicy`、`upsertPolicy`、`deletePolicy` 与 `syncWaitTimeoutMs` 支持热更新，配置重载后用于新请求；已接纳请求保留原策略和等待预算，正在运行的同步不受影响。其余 `room.secret` 设置仍需重启，磁盘修改不代表运行中后端或启停状态已经切换。
+`getPolicy=confirm`、`upsertPolicy=confirm` 或 `deletePolicy=confirm` 均要求明确批准；拒绝、超时或确认不可用时不披露或修改密钥，不受 `policy.enabled=false` 绕过。`list` 不请求确认。`room.secret.getPolicy`、`upsertPolicy`、`deletePolicy` 与 `syncWaitTimeoutMs` 支持热更新，配置重载后用于新请求；已接纳请求保留原策略和等待预算，正在运行的同步不受影响。后端、账户、凭据及启停变更通过局部 owner 协调：先排空操作，再释放旧 session/账户锁，之后由新配置激活。准备繁忙或失败会报告错误；已保存不等于后端已连接，重配置不重放 Secret 写入。
 
 ## Room 邮件配置
 
@@ -803,62 +866,35 @@ CLI 支持上述全部键，TUI 的 Room 页和 Review 提供对应编辑入口�
 
 同步间隔默认 60 秒，范围 10–86400 秒；本地内容默认保存 90 天，范围 1–36500 天；容量上限默认 2 GiB，最小 1 MiB。`sendPolicy` 和 `trashPolicy` 都默认 `confirm`，可设为 `allow` 或 `deny`；`confirm` 必须明确批准，确认不可用时不会执行，也不受全局 `policy.enabled=false` 放宽。
 
-`email.account` 修改后须重启；其余邮件配置由现有监听器立即应用于后续同步和请求。启停邮件及关闭 Room 工具集会影响后台同步。邮件读取有 `text`（默认）、`image`（离线）和 `imageWithRemote`（仅额外下载远程图片）三种模式；图片渲染使用随包构建的 `litehtml-rs`，无需 Chrome、Python 或项目 Browser，运行时需要合适字体。完整账户示例、六个 API、私有存储与清理边界见[Room 邮件使用指南](email.zh-CN.md)。
+`email.account` 修改通过邮件服务排空在途操作、释放旧账户 owner 后局部切换，保留本地数据库与发送账本；繁忙时保留旧账户并报告应用失败，不自动重发邮件。其余邮件配置应用于后续同步和请求。启停邮件及关闭 Room 工具集会影响后台同步。邮件读取有 `text`（默认）、`image`（离线）和 `imageWithRemote`（仅额外下载远程图片）三种模式；图片渲染使用随包构建的 `litehtml-rs`，无需 Chrome、Python 或项目 Browser，运行时需要合适字体。完整账户示例、六个 API、私有存储与清理边界见[Room 邮件使用指南](email.zh-CN.md)。
 
-## CLI 可管理字段
+## CLI 与 TUI 配置管理
 
-`config set` 使用受控 registry，并不是通用 JSONPath 编辑器。使用当前语言列出 registry：
-
-```text
-agentic-gpt config keys [--section <SECTION>] [--json]
-```
-
-文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`policy`、`shell`、`limits`、
-`skills`、`room`、`tunnel`、`http-mcp` 和 `events` 分组：
-
-- `--section` 只显示其中一个分组。
-- `--json` 返回机器可读的类型、是否可为 null、示例、双语说明和别名元数据。
-- `config set` 只接受 registry 中的键。
-- 结构化 policy 字符串数组可通过 registry 或专用命令修改；MCP 集合使用专用命令。
-
-注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号。`room.repositoryRoot` 可为 null，
-使用字面量 JSON 值 `null` 可以清除它并恢复 workspace 默认目录。
-
-只有新键 `shell.initFile` 支持 `config unset`；unset 恢复省略状态（Default），不同于 `config set shell.initFile null`
-所设置的 Disabled。该键可用 `config set shell.initFile null` 或设置字符串路径；其他 registry 键不支持 unset。
+本地管理不要求启用 `config` 工具集，也不经过 `config.updatePolicy` 的 API 确认。修改进入共享的路径目录、原生值更新和完整候选校验；成功写入后由运行实例监听并协调应用。CLI 输出的持久值或 `saved=true` 不构成运行态应用完成的证明，实际状态用运行实例的 `config.get` 检查。
 
 ```bash
+agentic-gpt config edit
+agentic-gpt config manual
+agentic-gpt config manual --section browser --detail full
+agentic-gpt config manual --query updatePolicy --json
+agentic-gpt config get limits.processResponseBytes
+agentic-gpt config get '/mcpServers/example.http/enabled'
 agentic-gpt config set shell.initFile null
-agentic-gpt config set shell.initFile /path/to/protected/bashrc
 agentic-gpt config unset shell.initFile
-agentic-gpt config set policy.enabled true
-agentic-gpt config set policy.bubblewrap true
-agentic-gpt config set policy.path.readOnly '["/path/to/read-only"]'
-agentic-gpt config set policy.path.write '["/path/to/workspace"]'
-agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
-agentic-gpt config set room.repositoryRoot null
-agentic-gpt config set room.maintenance.mode local
-agentic-gpt config set room.maintenance.autoPush false
+agentic-gpt config add skills.allowedHosts '"skills.example.com"'
+agentic-gpt config remove skills.allowedHosts '"skills.example.com"'
+agentic-gpt config update '[{"op":"set","path":["limits","processResponseBytes"],"value":16384}]' --dry-run
 ```
 
-registry 包含以下常用 scalar：
+`config get` 不指定路径时读取整份有效持久配置，结果脱敏；与 API 的 `items/appliedValue/applyStatus` 响应不同。`config show` 保留完整有效配置展示。`manual` 使用三端共用的完整目录；`config keys [--section <SECTION>] [--json]` 提供同一目录的字段浏览。章节包含 `runtime/identity/workspace/toolsets/config/hub/http-mcp/confirmation/policy/shell/limits/skills/room/email/tunnel/browser/mcp/events`；`manual` 另外保留完整章节上下文和对象树。
 
-- `mode`、`profile`、`agentId`、`hub.url`、`hub.transport`、`hub.agentSecret`、`workspaceRoot`
-- `confirmationProvider.channels`、`confirmationLanguage`、`policy.enabled`、`policy.bubblewrap`
-- `tunnel.tunnelId`、`tunnel.apiKey`
-- 全部 `tunnel.client.*` 与 `tunnel.hubReporting.*`
-- `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
-- `shell.initFile`
-- `room.maintenance.mode`、`room.maintenance.autoPush`
-- `room.secret.enabled`、`serverUrl`、`account`、`clientId`、`clientSecret`、`masterPassword`、`getPolicy`、`upsertPolicy`、`deletePolicy`、`syncWaitTimeoutMs`（均以 `room.secret.` 为前缀）
-- 文档列出的 `skills.*` scalar/list 字段
-- `httpMcp.enabled`、`httpMcp.host`、`httpMcp.port`、`httpMcp.publicUrl`、`httpMcp.bearerToken`、`httpMcp.allowHosts`
-- `events.lowTtlSeconds`、以及每个 `events.internalOverrides.<event-type>` 注册键（例如 `events.internalOverrides.process.completed`、`events.internalOverrides.skill_install.failed`）
+`get/set/unset/add/remove` 的路径可使用已注册点式键、JSON Pointer 或 JSON 字符串段数组。含点的动态 map key 推荐使用后两种形式，例如 `/mcpServers/example.http/enabled` 或 `'["mcpServers","example.http","enabled"]'`；不能将它拆成两个服务器 ID。`config update` 的操作数组与 API 的 `changes` 相同，支持原生对象、布尔值、数字、列表与 `null`。`add/remove` 的值必须是合法 JSON，包括字符串的双引号。
 
-结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。
-上面的 `config toolset` 命令用于管理 namespace 选择。复杂 JSON（包括 `toolsets.enabled`）
-也可直接编辑；有效编辑会在不重启 worker 的情况下热加载，无效候选会保留上一次有效状态。
-随后可执行 `agentic-gpt config show` 与 smoke test。
+`set` 保留本地文本便利：字符串和枚举可直接传文本，布尔值、数字、对象和列表按类型解析；`config set events.internalOverrides.process.completed null` 映射为 `unset`。API 中请明确使用 `{"op":"unset",...}`，不可依赖该映射。`unset` 可移除目录支持的可选字段和 map 条目，必需字段仍受保护。
+
+`config edit` 打开现有配置的全屏表单，不重新初始化。原有 Connection、Workspace、Room、MCP 等页面保留；附加配置页提供 Browser、Skills、命令策略、`backupLimit` 和 `config.updatePolicy` 的字段编辑。提交仅将实际修改的字段操作作用于最新持久配置，不回写整份旧快照；集合增删保留 `add/remove`，有序列表或重排使用 `set`，MCP map 按稳定服务器 ID 定位。最终校验失败保留草稿，凭据文件创建仍沿用原事务流程。
+
+专用的 `config allow/confirm/deny`、`config path`、`config mcp` 和 `config toolset` 管理命令继续保留；不必为同一设置先删除旧配置再写新配置。
 
 ## 密钥文件与事务写入
 
@@ -884,45 +920,30 @@ Tunnel secret 必须写成 `file:PATH` 或 `env:NAME` 引用；`file:` 路径可
 
 ## 热加载与重启边界
 
-Standalone、Local 以及连接 Hub 的 Agent worker 轮询同一份配置，并原子应用支持的
-live subset。无效候选会保留上一份有效状态；候选修改需要重启的资源时，该资源在进程
-重启前仍保持原来的 live 值。
+Standalone、Local 和连接 Hub 的 Agent 共用串行配置应用协调。目标配置先做静态校验；保存之后，直接更新设置或协调各组件。静态校验不连接邮箱、Vaultwarden、Hub 或浏览器，也不能保证端口、凭据和外部依赖可用。组件应用失败不回滚整份持久配置：能保留旧 owner 则继续使用，否则报告该组件不可用；不保证跨组件原子切换。
 
-| 配置 | 行为 |
+| 配置 | 当前实例如何应用 |
 | --- | --- |
-| `policy`、`limits`、`mcpServers`、`toolsets.enabled` | 所有 Agent worker 共享热加载；policy（包括 `policy.bubblewrap`）对之后接纳的请求生效 |
-| `shell.initFile` | 热加载；之后接纳的 Process 使用新设置，已接纳 Process 保留准入时的配置快照 |
-| `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone HTTP watcher 协调启用状态与 endpoint identity；identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
-| `httpMcp.bearerToken` 引用或其解析内容 | Standalone HTTP watcher 原地更新认证而不重新绑定；解析凭据可用时保留已有 session |
-| 已接纳 Process/Skill Job 与已创建下游调用 | Process 与 Skill Job 从准入开始保留同一份有效配置，贯穿容量、审计、包摘要、policy、工作目录、preflight、确认和异步执行。Process batch 的 preflight/确认、prepared admission 与排队 worker 使用同一份配置；后续新准入使用热加载后的配置。下游 MCP 调用保留各自资源专属快照，这不是全部操作的统一快照规则。 |
-| `events.lowTtlSeconds`、各 `events.internalOverrides.<event-type>` 键 | 热加载；新接纳操作与外部注入使用新配置，已接纳的 Process/Skill install 保留其接纳时快照，之后产生的事件也继续使用该快照。 |
-| `workspaceRoot` | 修改 workspace 需要重启；重启前默认工作目录仍使用原值，`policy.path` 独立热加载 |
-| `mode`、`profile`、`agentId` | 需要重启 |
-| `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |
-| `email.account` | 需要重启；运行中保持原账户连接配置 |
-| `email.enabled`、`syncIntervalSeconds`、`retentionDays`、`maxStorageBytes`、`sendPolicy`、`trashPolicy` | 热加载；后续同步/请求采用新值，已接纳操作保留原策略 |
-| `room.secret.getPolicy`、`upsertPolicy`、`deletePolicy`、`syncWaitTimeoutMs` | 热加载；新请求采用新值，已接纳请求保留原策略和等待预算，不取消同步 |
-| 其余 `room.*`：仓库、时区、日界线、maintenance 和 secret 后端／启停设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |
-| `tunnel.*` client identity/source/secret | 需要重启 |
-| `hub`、reporting mode | 相关连接需要重启 |
-| Skill install 并发等 startup-owned 设置 | 需要重启 |
+| `mode`、`profile`、`agentId`、`workspaceRoot` | 保留当前启动值，保存的目标值需显式重启实例；不自动迁移工作空间或重启用户进程。 |
+| `tunnel.tunnelId`、`tunnel.apiKey`、`tunnel.client.*` | 保留 supervisor 捕获的身份、凭据和客户端启动参数；下次显式启动采用新值。 |
+| `tunnel.hubReporting.detail` | 更新后续报告策略，不重建 Tunnel。 |
+| `tunnel.hubReporting.enabled`、`hub.*` | 由 Hub 连接所有者局部协调，可能处于连接中或失败；旧目标的结果不会作为新目标的调用结果重放。 |
+| `httpMcp.*` | Standalone listener/auth 所有者协调监听、认证与 session；endpoint identity 改变后客户端需重新 initialize。Local/Hub 模式不因此新增 TCP listener。 |
+| `browser.*`、Browser 工具集启停 | 协调发现、排空旧租约并替换 runtime；旧租约、JS 变量和会话可能失效，不重放网页动作。 |
+| `email.account` | 排空在途邮件请求与同步，释放旧账户 owner 后切换；保留 Store、同步记录与发送结果，不自动重发。 |
+| `room.secret` 后端／启停／凭据 | 排空请求、停止旧 CLI/sync、释放 session 和账户锁，再允许新 owner 激活；保留加密缓存及使用记录，不重放写入。 |
+| `room.secret.getPolicy/upsertPolicy/deletePolicy/syncWaitTimeoutMs`、其余邮件设置 | 后续请求／同步使用新值；已准入操作保留各自策略和等待预算。 |
+| `room.repositoryRoot` | 在仓库写入边界准备并切换根目录，不自动迁移已有内容。 |
+| `skills.maxConcurrentInstalls` | 保留安装 manager 与 worker，更新后续准入上限；降低时等待现有任务自然释放，不取消安装。 |
+| `policy`、`limits`、`shell`、`mcpServers`、`toolsets`、`events`、确认设置、其余 Skills/Room 设置、`config.updatePolicy` | 更新后续消费者；Process、Skill 和已创建下游调用保留各自准入快照，不因配置变化重新执行。 |
 
-共享 live subset 适用于每个 Agent worker；只有具有 Standalone HTTP MCP listener 的运行时
-才会处理 `httpMcp` listener 字段。Local 没有 TCP listener，Hub 也不会因此把这个配置
-section 变成 Hub ingress。
+Room `timezone` 当前仅保留配置，现有运行逻辑未使用；`diaryDayBoundaryHour` 只影响新空仓库的初始化，不改写已有仓库。关闭工具集不等于撤销已准入副作用；Tmux 已有会话不因工具集关闭而删除。
 
-HTTP MCP watcher 的失败行为如下：
+HTTP token 无法解析时拒绝认证，监听绑定失败由组件重试，不影响其他入口。更换 endpoint 会丢弃其本地 OAuth/session 状态；token 原地更新保留 session 并撤销 OAuth 记录。邮件、Secret 或 Browser 准备繁忙时可报告应用失败并保留原实例；需要重新应用的配置通过配置操作再次提交，连接恢复沿各组件现有机制处理，不重放用户副作用。
 
-- 凭据无法解析时会 fail closed：endpoint 停止接受请求并停止监听，直到引用再次可用。
-- 语法或语义无效的候选会被拒绝，并保留 last-good live 配置。
-- 监听地址冲突不会影响 tunnel 或 Unix execution；修复 endpoint 配置后 watcher 会重试。
-- 上述过程不会输出引用或 token。
+待重启的模式、身份或工作空间值不会阻止无关设置应用。同一 Standalone supervisor 的故障恢复从私有启动快照保留原启动契约，同时读取最新磁盘的可热配置字段；只有显式重启整个实例才采用新的启动值。快照位于本次 runtime 目录，权限为 0600，supervisor 退出时清理，不修改用户目标配置。
 
-共享 watcher 在需要重启的字段变化时记录 `config changes require restart; fields=...`，其中包括
-`browser`。诊断只列出发生变化的字段名，不会输出 secret 值。Standalone supervisor 另外输出
-`restart_required`；Hub 没有 supervisor 事件。不要把“文件已修改”误认为现有子进程树已经切换。
-
-`agent.info` 的 `config.liveSubsetMatchesDisk` 比较运行时 live subset 与有效磁盘配置投影；该比较包含完整的 `shell` 配置，Default、Disabled 与显式 init 文件路径三态按配置序列化表示区分。改变 Shell 初始化文件配置后，在 worker 热加载应用前该值预期为 `false`，应用后为 `true`。这只是配置快照诊断：不检查 init 文件内容，也不表示运行中进程已切换配置或提供强一致生效屏障。
+通过 `config.get` 的 `value/appliedValue/applyStatus/error` 检查每项保存与生效状态；`agent.info.config.liveSubsetMatchesDisk` 和 `restartRequiredFields` 是概要诊断，不证明外部资源已就绪，也不证明运行中的旧进程已切换设置。
 
 ## 验证与检查
 

@@ -160,7 +160,7 @@ printf '%s' '{"message":"需要查看部署状态","ref":"deploy-42","severity":
 
 Normal 与 Room profile 选择 namespace 预设，而不是固定最终运行时表面：Normal 启用 `agent`、`file`、`mcp`、`process`、`skills`、
 `tmux` 和 `browser`；Room 在此基础上还启用 `room`。显式设置的
-`toolsets.enabled` 是最终依据。逻辑 `room` namespace 包含 `bootstrap`、`bootstrap.read`、语义读取工具以及维护状态/提交工具。
+`toolsets.enabled` 是最终依据。`config` 是额外可选 namespace，Normal/Room 预设均不选中，显式启用后提供 `config.manual/get/update`。逻辑 `room` namespace 包含 `bootstrap`、`bootstrap.read`、语义读取工具以及维护状态/提交工具。
 
 这些过滤器只会从已公布的工具表面移除名称，不会暴露仅供 dispatch 使用的别名。
 
@@ -189,7 +189,7 @@ room.state.list, room.state.read
 room.maintenance.status, room.maintenance.submit
 ```
 
-另有六项 `room.email.*` 邮件工具；启用 `room.secret.enabled=true` 后，密钥工具为 `room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete`。密钥子开关默认关闭，修改后需重启；已知工具名的直接调用也受准入约束。配置、已验证的 `bw` 版本、严格确认与无敏感回执边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
+另有六项 `room.email.*` 邮件工具；启用 `room.secret.enabled=true` 后，密钥工具为 `room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete`。密钥子开关默认关闭，修改通过 Secret 局部服务协调；已知工具名的直接调用也受准入约束。配置、已验证的 `bw` 版本、严格确认与无敏感回执边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
 
 相同的九个文档／维护语义 Room 名称是本地 Unix MCP、Tunnel stdio 和 Hub Full MCP/HTTP 当前合同的一部分。Hub Full 会通过捕获的活动 Room lease 转发
 `room.diary.active/read`、`room.notebook.recent/search/read`、
@@ -368,8 +368,7 @@ Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `boot
 ## 配置
 
 本地配置通常位于 `~/.agentic_gpt/config.json`。Standalone 必须配置 `tunnel` block；Hub 和 Local 模式不需要。跨运行时字段的完整说明见
-[`configuration.md`](configuration.md)。规范的 skill block 位于顶层 `skills`。仅当顶层 `skills` 缺失时才读取旧版 `room.skills` block；
-若两者同时存在，则顶层值优先，后续配置写入会序列化为规范的顶层 block。
+[`configuration.md`](configuration.md)。规范的 Skill 配置位于顶层 `skills`；旧 `room.skills` 不属于当前可写配置路径。
 
 以下仅展示 `tunnel` 配置片段，使用 secret reference 而不是 secret 值。将其合并到已有 Config v2 中；完整配置还必须提供 `mode`、`profile` 和 `toolsets`，见[配置说明](configuration.md)。此片段不能单独作为配置文件使用：
 
@@ -426,33 +425,15 @@ Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `boot
 
 当前的多文件变更边界见[工具合同矩阵](tool-contract-matrix.md)：一份完整的 apply-patch 请求先解析目标并统一判定策略、按需确认，获准后才读取源内容、应用补丁、暂存和验证；提交前复核源文件快照。提交开始后不保证跨文件回滚。
 
-Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`limits`、`shell.initFile`、`mcpServers`、`toolsets.enabled` 和 `events`；这些配置会经过完整验证，再原子应用于新的准入、调用和工具发现。`shell.initFile` 变更只影响之后接纳的 Process，已接纳 Process 保留准入时的配置快照。
+Standalone、Local 和连接 Hub 的 Agent 共用配置更新与串行应用协调。配置 API 先查 `config.manual`，再用 `config.get` 区分持久值、已应用值与组件状态；`config.update` 支持原生 JSON 路径段与 set/unset/add/remove。显式启用 `config` 工具集后，Tunnel、Unix 和 HTTP MCP 均可调用；工具集默认关闭，`config.updatePolicy` 默认 confirm 并要求明确批准。API、CLI 和 TUI 的操作差异见[配置管理参考](configuration.md#配置-api)。
 
-MCP server id 只能使用
-`A-Z`、`a-z`、`0-9`、`.`、`_` 或 `-`，最长 64 字节；`streamable-http` 要求绝对 HTTP(S) URL，可选结构化 Bearer auth；
-`stdio` 要求非空 command，且拒绝 HTTP auth。
+有效变更用于后续请求；已准入 Process、Skill 及下游调用保留其快照。Browser、邮件账户、Secret、Hub/HTTP 等由具体组件排空／重连，失败可保留旧实例或明确报告不可用；保存成功不保证外部依赖可用，也不重放发送、密钥写入或网页动作。Skills 并发调整保留 manager 与运行任务。Room 根目录切换不自动迁移内容。
 
-无效的配置版本会保留最后一个有效的实时配置子集。已准入的 process 和 skill installation
-继续使用准入时的配置快照；`events` 配置变更仅用于后续准入，不会改写已准入工作的决定。
+只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据、client 启动参数需要显式重启实例；`tunnel.hubReporting.detail` 直接更新后续报告，enabled 由辅助 Hub 连接协调。待重启值不会阻止无关热更新。共享状态与详细生效规则见[热加载与重启边界](configuration.md#热加载与重启边界)。
 
-由启动时身份决定的配置包括 workspace root、Room 设置、Browser 配置、tunnel/client、reporting connection 及 skill-install 并发设置；
-这些字段变更后必须重启。共享 watcher 会记录 `config changes require restart; fields=...`；Standalone supervisor 还会发出
-`restart_required`，Hub 模式则没有 supervisor 事件。
+MCP server id 只能使用 `A-Z`、`a-z`、`0-9`、`.`、`_` 或 `-`，最长 64 字节；streamable-http 要求绝对 HTTP(S) URL，stdio 要求非空启动命令且不接受 HTTP auth。API 中完整 server id 占一个路径段。
 
-若 `workspaceRoot` 发生变化，默认工作目录仍保持原值直到重启；统一的 `policy`（包括 `policy.bubblewrap`）仍可独立热加载，并只影响之后接纳的请求。实时启用 `room` namespace 时，会依据当前实时 Room 配置执行 bootstrap；磁盘上需重启才生效的
-`room.*` 变更不会在重启前改变运行时 root。`agent.info.mcp` 仅报告生效的配置 revision、已配置/已启用计数和 client 生命周期，不会暴露 endpoint。
-
-Standalone worker 也会监视并协调 `httpMcp` 子集。启用或禁用 endpoint、变更 bearer-token reference 或其解析后的内容，以及变更 `host`、`port`、
-`publicUrl` 或 `allowHosts`，都无需重启 worker。更换 public origin 或监听器会建立新的监听器身份：会关闭有状态 HTTP session，并丢弃监听器本地
-OAuth code 和 token。
-
-替换绑定地址不同时，会先绑定新监听器再退役旧监听器。同一地址上的 `allowHosts` 或 `publicUrl` 变更则必须先退役旧监听器，
-再绑定新监听器；若新绑定失败，旧监听器已不可用，后续重试会重新启动。若不同地址发生 bind 冲突，只要旧地址仍可用，就会保留正常工作的旧监听器，
-并在不中断 tunnel 或 Unix 执行的情况下重试。变更 token reference 或其解析出的内容，会在不重新绑定的情况下更新内存中的 direct bearer 认证器、
-保留现有 session，并原子撤销 OAuth 记录。
-
-若无法解析 reference，HTTP 认证会 fail closed：监听器停止监听和接受请求，直到凭据重新可用。
-无效候选配置会保留上一个有效的实时配置和状态；日志或摘要中不会记录或包含 reference、token、code 或 access-token 值。
+`httpMcp` 由 Standalone worker 的监听器/auth 所有者协调。更换 endpoint identity 会关闭旧 session 并丢弃其 OAuth 状态，客户端重新 initialize；token 原地更新保留 session 并撤销 OAuth 记录。绑定或凭据失败与持久保存分开报告，不导致其他入口重启。凭据引用无法解析时退役 HTTP 入口并拒绝新请求，已准入响应完成后关闭旧会话；引用恢复后由 owner 重建。
 
 `apiKey` 仅接受 `env:NAME` 和 `file:PATH`。解析出的值会作为 `CONTROL_PLANE_API_KEY` 注入 tunnel-client 子进程环境；
 不会将其放入 argv、日志、配置摘要、报告、生成的 runtime 文件或备份。文件 reference 末尾可有一个 LF 或 CRLF，读取时会将其移除。
@@ -483,14 +464,12 @@ agentic-gpt config set tunnel.client.autoDownload true
 - `tunnel.client.version`, `tunnel.client.cacheDir`,
   `tunnel.client.autoDownload`, `tunnel.client.executable`,
   `tunnel.client.downloadUrl`, `tunnel.client.sha256`.
-- `hub.enabled`, `hub.url`, `hub.transport`, `hub.agentSecret`：辅助连接设置，变更需要重启。
+- `hub.enabled`, `hub.url`, `hub.transport`, `hub.agentSecret`：辅助连接设置，由 Hub 所有者局部重连。
 - `tunnel.hubReporting.enabled`, `tunnel.hubReporting.detail`.
 - `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.publicUrl`,
   `httpMcp.bearerToken`, `httpMcp.allowHosts`.
 
-Tunnel 身份、secret reference、client 来源/版本/hash/cache、Browser 配置和 CLI profile 都属于启动身份。Standalone supervisor 运行期间，
-修改这些值只会记录包含变更字段名称的 `restart_required`；Browser 变更使用 `browser` 字段名，不会切换现有子进程树，也绝不会打印 secret 值。
-`toolsets.enabled` 属于实时配置，不需要重启。
+Tunnel 身份、secret reference、client 来源／版本／hash／cache 及 profile 属于启动契约；修改后保留当前子进程树并报告待重启，诊断不打印 secret 值。Browser 配置、Hub 连接和工具集启停通过局部协调应用，不能与 Tunnel 启动身份合并判断。
 
 ## 隧道客户端的信任与来源选择
 
@@ -543,6 +522,8 @@ run/process 标识符，也会一并记录。内联结束的调用只写一条�
 arguments、results、路径、secret 或 process 输出。Reporting connection 的连接状态转换会另行记录为 connected/disconnected，并标明所选 transport。
 
 ## 健康状态、日志、重启与恢复
+
+Supervisor 在本次 runtime 目录保存 0600 的启动配置快照，隐藏 worker 参数 `--startup-config` 仅供其固定启动契约使用。同一 supervisor 的故障重拉保留原 mode/profile/agentId/workspaceRoot 与 Tunnel 身份，同时读取最新磁盘的可热字段；保存下次启动值不会让自动恢复因 mode/profile 不匹配而失败。快照随 supervisor 正常清理删除；显式重启整个实例才采用新的启动契约。用户 desired 文件不被该快照覆盖。
 
 对于 Agent id `laptop`，supervisor 使用以下私有 runtime 目录：
 

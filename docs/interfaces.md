@@ -38,10 +38,10 @@ HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上
 
 Normal 并不等于 Room：只有显式启用 `room` 命名空间时，Normal 运行时才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
 
-重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`、`events` 和 `email` 的非账户字段），且不会重建已有的启动资源。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已接纳操作保留准入快照。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
+配置保存与运行态应用分别报告：只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据与 client 启动参数保留显式重启边界，待重启字段不阻止其他设置应用。Hub、HTTP、Browser、邮件账户、Secret 后端、Room 根目录和 Skills 安装并发由具体所有者局部协调，保留进程注册表与持久任务。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已准入操作保留各自快照，不自动重放副作用。完整边界见[配置生效说明](configuration.zh-CN.md#热加载与重启边界)。
 
 Tmux 与 Browser 工具集关闭时，启动不创建默认 tmux 会话，也不发现或准备 Browser 运行时。
-热启用 Tmux 时准备默认会话；热启用 Browser 后首次已准入调用初始化运行时。
+热启用 Tmux 时准备默认会话；Browser 启停或配置变化通过局部 runtime 协调，旧租约和 JS 会话可能失效。
 关闭 Skills 时保留重启恢复记录与提交日志协调，但不重新调度排队安装；热启用后幂等恢复。
 基础 Event API、历史状态协调与显式 CLI 管理入口继续保留。`agent.info.connections.hubAuxiliary`
 报告 Standalone/Local 辅助连接的启用与连接状态，`hubReporting` 单独报告运行上报状态。
@@ -53,6 +53,28 @@ Tmux 与 Browser 工具集关闭时，启动不创建默认 tmux 会话，也不
 `tmux.sessions`、`tmux.panes`、`tmux.exec` 和 `tmux.pasteText` 不属于这四项 CLI 管理操作。
 
 `agentic-gpt local stdio --config PATH` 为每个 stdio MCP 客户端启动独立进程，并将 MCP 流原样转发到已有 Agent 的 Unix socket。它适用于 Local 和 Standalone，不适用于没有本地 socket 的 Hub 模式；连接仍受同 UID 限制并记录 `local:` 来源。各客户端有独立 MCP session，但共享 Agent 状态与 16 个 Unix 连接总额度。命令示例及生命周期、错误行为见[本地 stdio 桥接说明](standalone-runtime.md#通过-stdio-桥接到已有-agent)。
+
+## 配置 API
+
+配置工具共用目标 Agent 的配置目录、更新引擎、授权和应用协调，不修改 Hub 服务端配置。`config` 工具集在所有初始化预设中默认不选中，已有显式工具列表不自动追加；关闭时 `manual/get/update` 均不可调用。本地 `agentic-gpt config` CLI/TUI 仍可管理配置。
+
+| 入口 | 工具或路由 | 路由与认证 |
+| --- | --- | --- |
+| Agent Tunnel stdio、本地 Unix、Standalone HTTP MCP | `config.manual`、`config.get`、`config.update` | 操作当前 Agent，不接受 Hub 的 `agentId`；各自保留 stdio、同 UID 或 HTTP MCP 认证。 |
+| Hub HTTP | `POST /v1/config/manual`、`/v1/config/get`、`/v1/config/update` | 请求增加必填 `agentId`，使用 Hub Actions 认证，目标 Agent 再执行 Toolset 与写入确认。 |
+| Hub Full Apps MCP | 同名三个工具 | 必填 `agentId`，通过 Hub-Agent wire 调用目标服务；保留 MCP 认证和结果封套，Coordinator 不公布这些工具。 |
+
+`manual` 可省略参数得到章节目录，也可传 `section`、`query` 和 `detail=summary|full`（默认 full），返回 `content/matches`。`get` 使用 `{"paths":[["limits"],["shell","initFile"]]}`；`update` 使用 `{"changes":[{"op":"set","path":["limits","processResponseBytes"],"value":16384}],"dryRun":false}`。Hub 请求只在这些字段外增加 `agentId`。
+
+路径使用字符串段数组，含点的事件名或 MCP 服务器 ID 各占一个段；`value` 为原生 JSON，`null` 不等于 `unset`，不支持数组下标。`set` 替换值／子树，`unset` 移除可选字段或 map 条目，只有目录支持的集合可 `add/remove`。一批操作按序作用于最新持久配置，最终统一校验并保存一次，不使用 `revision/ifRevision`；完整示例与集合范围见[配置 API 参考](configuration.zh-CN.md#配置-api)。
+
+`get.items` 以合并缺省后的持久 `value` 为主，带 `explicit`、`applyStatus`，缺失条目标记 `exists=false`，敏感值标记 `redacted=true`。持久值与已应用值不同时返回 `appliedValue`（可为 null）；`error` 保留组件失败。`explicit` 仅表示当前稀疏文件包含此项，不记录历史编辑意图。
+
+`config.updatePolicy=confirm`（默认）要求整批操作获得明确批准；拒绝、取消、超时、确认不可用均不写盘，不回退 allow，不受全局命令策略关闭影响。修改权限自身也使用修改前的有效策略。`manual/get` 不请求写入确认，CLI/TUI 本地配置管理不经过该 API 策略。
+
+`dryRun=true` 返回 `saved=false/dryRun=true` 以及脱敏 `before/after/expectedEffect`，不保存本次变更。实写等待保存和本次局部应用尝试后返回 `saved/changes`，各项 `applyStatus` 为 `applied/restart_required/applying/failed`；已保存配置不因组件失败整份回滚。静态合法不证明外部系统可用，也不保证全部组件原子切换。普通操作／校验错误未提交；rename 后的目录同步失败会明确报告文件已替换。
+
+在线 Agent 业务响应沿用公共 `events`；Hub 离线、路由、超时等传输错误不伪造面板。Hub HTTP 返回原生 JSON，Apps MCP 保留其 `structuredContent/text/isError` 封套。Hub 对 update 最多等待 180 秒；超时或连接中断不能证明未保存，不自动重试修改。查询和预览返回值、参数／结果的公共上报及公开调用回执均脱敏；Hub 私有可靠派发记录仍保留待重放的原请求。查询应用状态不能代替读取真实操作结果。
 
 ## 错误原因与执行状态
 
@@ -80,6 +102,7 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 
 - `GET /v1/info`：安全的 Hub 运行时概要。
 - `GET /v1/agents`：启用的本地 Agent、其在线状态和安全配置概要。
+- `POST /v1/config/manual|get|update`：以 `agentId` 指定目标 Agent 的配置读取／修改，详见[配置 API](#配置-api)。
 - `POST /v1/process/exec`：启动一个受策略控制的 Bash 命令并短暂等待。
   - 必填字段是 `agentId` 和原始 shell 脚本 `command`。
   - 可选字段是 `acquireConfirmation`、`cwd`（工作目录）、`group`（1–32 个字符）和
@@ -211,7 +234,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 ## Room 密钥
 
-`room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete` 由同一 Agent 本地服务执行。Standalone／Local 要求 `room` 工具集与 `room.secret.enabled=true`；Hub Full 使用活动 Room 租约，对应 `POST /v1/room/secret/<action>`，请求不含 `agentId`。Coordinator 隐藏并拒绝这些工具。Secret 子开关的修改需要重启，运行中工具集关闭则按现有实时准入生效。本地 MCP 随开关隐藏工具，Hub Full MCP 保持固定工具列表并在调用时检查。账号组定位沿用 bw 可读列表；解密失败的条目可能被 bw 省略，具体影响见使用指南。
+`room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete` 由同一 Agent 本地服务执行。Standalone／Local 要求 `room` 工具集与 `room.secret.enabled=true`；Hub Full 使用活动 Room 租约，对应 `POST /v1/room/secret/<action>`，请求不含 `agentId`。Coordinator 隐藏并拒绝这些工具。Secret 子开关与后端变更通过局部服务排空并释放旧 owner 后应用，运行中工具集关闭按实时准入生效。本地 MCP 随开关隐藏工具，Hub Full MCP 保持固定工具列表并在调用时检查。账号组定位沿用 bw 可读列表；解密失败的条目可能被 bw 省略，具体影响见使用指南。
 
 `list` 只返回 `site/account`，可按 `site` 或 `account` 过滤；`get` 必须指定 `site/account/type`，`type` 为 `password` 或 `totp`，后者返回当前验证码；`upsert` 至少提供非空 `password/totp` 之一，省略字段保留原值；`delete` 将整个账号组移入回收站。相同身份重复时返回 `ambiguous_secret`，不猜测或批量修改。
 
@@ -377,7 +400,7 @@ Skill 安装状态遵循以下规则：
 - 安装记录保留终态七天，最多 100 条；公开状态绝不暴露内联负载或 URL 查询/片段值。
 - 显式替换前，现有 Skill 会归档到 `skills/.archive/<id>/`。
 - 远程文件 URL 必须使用公开 HTTPS，并在 DNS 解析和重定向后重新验证；部署方可通过
-  `room.skills.allowedHosts` 收窄允许的主机。
+  `skills.allowedHosts` 收窄允许的主机。
 
 ## Room 会话引导包
 

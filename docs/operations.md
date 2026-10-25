@@ -173,41 +173,22 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 
 ## 配置重载与重启诊断
 
-实时更新/重启边界适用于 Standalone、Local 和 Hub 连接模式下的 Agent worker，
-并非 Standalone 独有。Agent worker 运行时，对 `policy`、`limits`、`shell.initFile`、`mcpServers`、
-`toolsets.enabled`、`events` 和 `email` 的非账户字段的有效变更会以原子方式应用于后续准入、调用和工具发现。
+三种 Agent 运行模式共用配置应用协调。API 更新等待本次保存与局部应用尝试后返回；CLI/TUI 写入由运行实例监听处理。先查 `config.manual`，再用 `config.get` 核对 `value/appliedValue/applyStatus/error`；不能把磁盘写入或 `saved=true` 当作运行组件已就绪。工具集 `config` 默认关闭，可通过本地 `config toolset enable config` 开启；API 写入默认要求明确确认，本地 CLI/TUI 不受该 API 策略限制。
 
-`email.account` 修改后需重启；运行中仍使用原账户。其他邮件配置更新影响后续同步和请求；关闭邮件或 Room 工具集停止继续安排同步。邮件发送及垃圾箱确认不因全局命令策略关闭而放宽，详见[邮件配置与权限](email.zh-CN.md#确认权限和失败处理)。
+| 观察结果 | 处理 |
+| --- | --- |
+| `applied` | 对应设置已应用；外部凭据、网络和真实调用仍须独立观察。 |
+| `restart_required` | 只有 mode/profile/agentId/workspaceRoot、Tunnel 身份／凭据／client 启动参数保留该边界；安排显式重启实例。 |
+| `applying` | 查看对应连接状态；不要重复提交原用户副作用。 |
+| `failed` | 查看逐项 error 并修复组件环境；已保存配置不整份回滚，旧 owner 可保留时继续服务。 |
 
-`shell.initFile` 变更只影响之后接纳的 Process；已接纳 Process 保留准入时的配置快照。
+Hub、HTTP、Browser、邮件账户、Secret 后端、Room 根目录和 Skills 并发由具体所有者协调，不重建整个 AppState。重配置不会清空 Process 注册表、持久事件、安装账本或发送结果；不会自动重发邮件、重写密钥或重放网页操作。降低安装并发不取消现有任务；关闭 Skills 保留恢复记录，重新启用时恢复排队安装，不重复启动已被 worker 占有的记录。Browser 切换会清理旧租约与 JS 会话，Tmux 已有会话不因工具集关闭而删除。
 
-`events` 配置变更影响后续 process/skill-install 准入；已准入的 process 和安装任务保留准入时的配置快照。
-关闭 Tmux 或 Browser 工具集后，下次启动不会自动准备对应资源。运行期间重新启用 Tmux
-会准备默认会话；重新启用 Browser 后首次工具调用按当前有效配置初始化运行时。
-Skills 关闭或当前运行模式不支持 Skills 时，重启恢复只协调持久记录，不重新启动排队安装；
-重新启用 Skills 后恢复同一排队记录，重复重载不会启动重复安装。关闭开关不撤销已接纳任务，
-也不自动关闭已有 tmux 会话或 Browser 租约。
-`policy.command`、`policy.path` 和 `policy.bubblewrap` 的有效变更只用于之后接纳的请求；已接纳
-Process 保留准入时的执行配置快照。`workspaceRoot` 变更仍须重启，不会阻止统一 policy 独立
-热加载；不得把磁盘文件已修改视为运行中操作已经切换配置。
+HTTP 监听变更可能使 session/OAuth 状态失效；token 原地更新保留 session 并撤销 OAuth 记录。认证引用不可用时拒绝访问，端口绑定失败由组件重试，不影响其他入口。邮件/Secret 等排空繁忙时保留原 owner 并报告失败；静态校验不检验远程登录可用性。
 
-对于 Standalone HTTP MCP 监听器，应通过受控变更验证协调器处理
-`httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` 以及 bearer token
-引用或其解析值。启用/禁用和端点变更会在不重启 worker 的情况下协调生效。
+`tunnel.hubReporting.detail` 更新后续报告，enabled 由辅助 Hub 连接控制，二者不要求重建 Tunnel。配置的待重启 mode/profile 不会阻止无关热更新。Standalone supervisor 在私有 runtime 目录用 0600 启动快照保存本次启动契约；自动重拉 worker 保留原身份并读取最新可热字段，显式重启整个实例才采用新的启动值。快照由 supervisor 清理，不覆盖 desired 文件。
 
-监听器身份发生变化时，会关闭有状态 HTTP session 并丢弃监听器本地 OAuth 状态；
-token 变更则会就地更新直接身份验证，并在吊销 OAuth 记录的同时保留现有 session。
-凭据无法解析时会 fail closed；候选配置无效时保留上一个有效监听器；端口绑定冲突
-会重试，不影响 tunnel 或 Unix 执行。
-
-`mode`、`profile`、`agentId`、`hub`（含辅助连接开关）、`workspaceRoot`、`browser`、Room 设置、
-tunnel/客户端设置、上报模式和 Skill 安装并发度等由启动时拥有的字段
-发生变化时，需要重启。共享 watcher 会记录日志
-`config changes require restart; fields=...`，包含已变更字段名，但绝不包含密钥值。
-
-Standalone supervisor 还会发出 `restart_required`；Hub 模式没有 supervisor 事件。
-编辑文件不会切换现有子进程树。实时启用 Room 命名空间时使用当前活动 Room 根目录；
-需要重启的 Room 配置变更在重启前不会移动该根目录。
+`config.update` 传输超时不能证明未保存，先用 get 核对；普通校验失败未提交，rename 后的目录同步失败则明确报告文件已替换。Hub 对 update 的等待上限为 180 秒，不自动重试修改。完整字段分类见[配置生效边界](configuration.zh-CN.md#热加载与重启边界)。
 
 `agentic-gpt local` 命令是仅所有者可用的 Unix MCP 客户端，并保留 `local:` 审计来源。
 它不同于 `agentic-gpt tmux` 本地管理员 CLI；后者只暴露四个命令：`list`、

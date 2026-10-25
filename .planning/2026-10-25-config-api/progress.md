@@ -36,3 +36,7 @@
 - root额外源码核查确认HTTP重构曾改变原凭据失效边界：不可解析时错误地保留旧token/监听器。已恢复退役入口、拒绝新请求、保留已准入响应排空的行为；现有真实文件凭据⑤测试增加删除文件关端口/恢复文件重新认证，正在远端最终回归。文档同步fail-closed及私有可靠派发原请求与公开脱敏投影的实际区别。
 
 - 最终凭据失效修复已通过remote-build lint及完整remote-build test；真实文件删除/恢复后的HTTP关闭与重新认证用例通过。源码修复与追加⑤保障作为单独fix阶段提交；随后只剩最终二进制契约验收和文档阶段提交。
+
+- 实施提交：`45e30b0 feat(config): add shared APIs and live service reconfiguration`；HTTP凭据失效边界修复：`193493b fix(http): retire ingress when credentials become unavailable`。独立reviewer复核后，主agent结合源码和真实入口测试确认修复有效。
+- 最终源码的远端build、完整workspace test、严格lint（fmt及all-targets Clippy -D warnings）、实时parity均成功；最终parity明确输出`contract parity gate: PASS`和`remote-build parity complete`。验收包含实际Agent/Hub HTTP/MCP入口、公开events、配置授权/持久化/脱敏、局部服务重配及故障恢复；未将生产Tunnel可执行文件传输称为已验证。
+- 受影响配置说明、接口文档、运行/开发说明与示例已同步；中英文对应页功能事实一致，静态差异检查通过。已按用户取舍移除固定默认值/元数据镜像断言，保留有长期价值的真实链路保障。实施、审查和验收阶段均完成，文档与本记录作为最后阶段提交。

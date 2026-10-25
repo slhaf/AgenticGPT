@@ -4,7 +4,7 @@
 
 为 Agent 增加独立的 config 工具集，提供配置说明、查询及修改能力；本次同时补齐 CLI/TUI 缺失的配置操作、说明文案及相关示例。用户已授权按本 planning 和响应示例开始完整实施，并要求所有入口进入现有公共 event frame。
 
-用户要求用 planning 记录共识，不另建独立设计文档。调查结论见 findings.md，执行记录见 progress.md。本文中的共识是拟实施合同，不代表当前程序已经支持。
+用户要求用 planning 记录共识，不另建独立设计文档。调查结论见 findings.md，执行记录见 progress.md。本文中的共识已实施并完成远端验收；原始调查保留历史上下文，以执行记录和当前代码为准。
 
 ## 已确认共识
 
@@ -58,7 +58,7 @@
 - [complete] 阶段一：单份协议DTO、共享配置目录与原生值修改/校验/保存核心；各入口复用公共event frame，不重复定义。
 - [complete] 阶段二：具体服务生命周期、串行应用协调、启动契约/故障恢复、严格确认与敏感报告。
 - [complete] 阶段三：CLI/TUI完整目录编辑与操作意图、Hub/Agent全部入口和OpenAPI。
-- [in_progress] 阶段四：集成验证、受影响文档、reviewer独立审查；主agent核查每项发现后处理并复验。
+- [complete] 阶段四：集成验证、受影响文档、reviewer独立审查；主agent核查每项发现后处理并复验。
 
 每阶段用Conventional Commits提交；阶段一至三因共享wire枚举与AppState/服务接口互相依赖，作为一个可编译的实施阶段合并提交，阶段四另行提交文档与验收结果；当前环境Git作者缺失，实施提交沿用仓库已有Codex <codex@openai.com>身份，以命令级配置指定，不更改全局配置。
 

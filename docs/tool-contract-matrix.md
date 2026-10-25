@@ -12,11 +12,11 @@
 
 本地 Unix、Tunnel stdio、HTTP MCP 工作进程、Hub 命令和 CLI 路径保留各自不同的封装/身份验证/错误封套。Agent 审计来源前缀分别为 `local:`、`tunnel:`、`http:`、`hub:` 和 `localadmin:`。CLI 接口面仅包含现有四项本地 tmux 管理操作：`tmux.listSessions`、`tmux.attach`、`tmux.createSession` 和 `tmux.closeSession`；MCP `tmux.sessions`、`tmux.panes`、`tmux.exec` 和 `tmux.pasteText` 是单独的 MCP 操作，不是 CLI 别名。共享 Skill 执行和 Process 结果投影仍由 Agent 操作/资源层负责。
 
-Normal 不代表 Room：只有显式启用 `toolsets.room` 命名空间后，Normal 才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力行为。实际副作用仍由策略、路径、确认、租约和资源所有者控制；不能因此声称外部 MCP、Browser JavaScript、tmux、tunnel 子进程或 Browser 宿主副作用受到通用 OS 沙箱保护。
+Normal 不代表 Room：只有显式启用 `room` 命名空间后，Normal 才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力行为。实际副作用仍由策略、路径、确认、租约和资源所有者控制；不能因此声称外部 MCP、Browser JavaScript、tmux、tunnel 子进程或 Browser 宿主副作用受到通用 OS 沙箱保护。
 
 ## Standalone 公布接口面与命名空间预设
 
-Standalone 公布的接口面有 Normal 和 Room 两种预设。Normal 预设启用除 `room` 以外的所有命名空间；Room 预设启用所有命名空间。可用命名空间为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser` 和 `room`。逻辑 `room` 命名空间包括 `bootstrap`、`bootstrap.read`、语义读取工具以及 Room 维护状态/提交操作。显式设置的 `toolsets.enabled` 无论配置档为何都具有权威性，只筛选这些已公布名称；它不会暴露仅供派发使用的别名。
+Standalone 公布的接口面有 Normal 和 Room 两种预设。Normal 预设启用除 `room/config` 以外的命名空间，Room 预设额外启用 `room`；`config` 在两种预设中均不选中。可用命名空间为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`room` 和 `config`。逻辑 `room` 命名空间包括 `bootstrap`、`bootstrap.read`、语义读取工具以及 Room 维护状态/提交操作。显式设置的 `toolsets.enabled` 无论配置档为何都具有权威性，只筛选这些已公布名称；它不会暴露仅供派发使用的别名。
 
 Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路径策略、审计和 Process 注册表。Standalone 调用不接受仅 Hub 支持的 `agentId` 字段；所有受影响请求均拒绝旧 `needConfirm`／`confirmMethod` 字段。
 
@@ -27,6 +27,9 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 
 | 公开名称 | 用途 / 不执行的操作 | 必填或条件必填输入 | 默认值与范围 | 失败与生命周期 | 接口面一致性 |
 |---|---|---|---|---|---|
+| `config.manual` | 浏览／检索配置目录，不读取当前凭据或修改配置。 | 可选 `section/query/detail`；Hub 必填 `agentId`。 | detail 默认 full，可选 summary；无筛选返回目录。 | 返回 `content/matches`，未知章节／过宽结果返回错误。 | Agent 各 MCP 入口与 Hub Full；HTTP 为 `POST /v1/config/manual`，config 工具集默认不选中。 |
+| `config.get` | 批量读持久值／子树并区分已应用状态，不把文件保存等同外部依赖可用。 | `paths` 为字符串段数组的数组；Hub 必填 `agentId`。 | 1–64 个路径；空路径读根；无数组下标。 | items 含 value/explicit/applyStatus；可选 exists=false、redacted、appliedValue、error；敏感值脱敏。 | Agent 各 MCP 入口与 Hub Full；HTTP 为 `POST /v1/config/get`，均由目标 Agent 门控。 |
+| `config.update` | 在最新持久配置上按意图批量修改，不修改 Hub 服务端配置、不重放用户副作用。 | changes 各含 op/path，set/add/remove 含原生 JSON value；可选 dryRun；Hub 必填 agentId。 | 1–64 项、请求最多 1MiB；最终整批校验；无 revision。 | confirm 默认且严格；dryRun 不保存，返回脱敏预览；实写 saved 与逐项 applyStatus 分开；组件失败不回滚已保存文件，超时不自动重试。 | Agent 各 MCP 入口与 Hub Full；HTTP 为 `POST /v1/config/update`；默认关闭的 config 工具集必须启用，本地 CLI/TUI 管理独立。 |
 | `agent.info` | 查看本地运行时；不执行操作或修改状态。 | 无必填字段。 | 有界诊断和安全配置概要。 | 只读快照；返回后实时 Process/配置状态可能变化。 | Normal + Room；Tunnel 与本地 Unix 一致。 |
 | `browser.manual` | 阅读或搜索所选运行时的官方 Browser 文档；不执行语义化 Browser 操作。 | `action`；`read` 必须提供 `path`，可选 `startLine`/`endLine`；`search` 必须提供 `query`，可选 `maxResults`/`contextLines`；与当前 action 不兼容的字段会被拒绝。 | 在文档根目录内读取且有界；搜索的 `maxResults` 范围为 1–100，`contextLines` 范围为 0–5。 | 运行时缺失以及文档范围/路径错误会返回稳定的 Browser 错误；只读、非破坏性。 | Normal + Room；使用所选运行时的文档根目录。 |
 | `browser.acquire` | 获取或复用一个具名的持久 Browser JavaScript 租约；不调用语义化 Browser 操作。 | `name`、`idleTimeoutSeconds`。 | 空闲超时为 1–86,400 秒；同名调用幂等。 | 运行时缺失或管理器错误使用稳定的 Browser 错误；成功时租约状态为 ready。 | Normal + Room；两个接入路径使用同一管理器。 |
