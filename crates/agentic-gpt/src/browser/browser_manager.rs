@@ -157,6 +157,9 @@ impl LeaseEntry {
 
 pub(crate) struct BrowserRuntimeManager {
     entries: Mutex<BTreeMap<String, Arc<LeaseEntry>>>,
+    admission: Arc<tokio::sync::RwLock<()>>,
+    closed: std::sync::atomic::AtomicBool,
+    shutdown_lock: Mutex<()>,
     factory: KernelFactory,
     browser_client_path: PathBuf,
 }
@@ -191,6 +194,9 @@ impl BrowserRuntimeManager {
     ) -> Arc<Self> {
         let manager = Arc::new(Self {
             entries: Mutex::new(BTreeMap::new()),
+            admission: Arc::new(tokio::sync::RwLock::new(())),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            shutdown_lock: Mutex::new(()),
             factory,
             browser_client_path,
         });
@@ -199,7 +205,23 @@ impl BrowserRuntimeManager {
         manager
     }
 
-    pub(crate) async fn acquire(&self, name: &str, idle_timeout: Duration) -> Result<()> {
+    pub(crate) async fn acquire(
+        self: &Arc<Self>,
+        name: &str,
+        idle_timeout: Duration,
+    ) -> Result<()> {
+        let admission = self.admit()?;
+        let manager = self.clone();
+        let name = name.to_owned();
+        tokio::spawn(async move {
+            let _admission = admission;
+            manager.acquire_admitted(&name, idle_timeout).await
+        })
+        .await
+        .map_err(|_| anyhow!("browser_runtime_task_failed"))?
+    }
+
+    async fn acquire_admitted(&self, name: &str, idle_timeout: Duration) -> Result<()> {
         validate_lease_name(name)?;
         if idle_timeout.is_zero() {
             return Err(anyhow!("browser_runtime_idle_timeout_invalid"));
@@ -277,6 +299,24 @@ impl BrowserRuntimeManager {
     }
 
     pub(crate) async fn repl(
+        self: &Arc<Self>,
+        name: &str,
+        code: &str,
+        timeout_ms: u64,
+    ) -> Result<CallToolResult> {
+        let admission = self.admit()?;
+        let manager = self.clone();
+        let name = name.to_owned();
+        let code = code.to_owned();
+        tokio::spawn(async move {
+            let _admission = admission;
+            manager.repl_admitted(&name, &code, timeout_ms).await
+        })
+        .await
+        .map_err(|_| anyhow!("browser_runtime_task_failed"))?
+    }
+
+    async fn repl_admitted(
         &self,
         name: &str,
         code: &str,
@@ -316,7 +356,19 @@ impl BrowserRuntimeManager {
             }
         }
     }
-    pub(crate) async fn reset(&self, name: &str) -> Result<()> {
+    pub(crate) async fn reset(self: &Arc<Self>, name: &str) -> Result<()> {
+        let admission = self.admit()?;
+        let manager = self.clone();
+        let name = name.to_owned();
+        tokio::spawn(async move {
+            let _admission = admission;
+            manager.reset_admitted(&name).await
+        })
+        .await
+        .map_err(|_| anyhow!("browser_runtime_task_failed"))?
+    }
+
+    async fn reset_admitted(&self, name: &str) -> Result<()> {
         validate_lease_name(name)?;
         let entry = self
             .entry(name)
@@ -408,7 +460,19 @@ impl BrowserRuntimeManager {
         }
     }
 
-    pub(crate) async fn release(&self, name: &str) -> Result<bool> {
+    pub(crate) async fn release(self: &Arc<Self>, name: &str) -> Result<bool> {
+        let admission = self.admit()?;
+        let manager = self.clone();
+        let name = name.to_owned();
+        tokio::spawn(async move {
+            let _admission = admission;
+            manager.release_admitted(&name).await
+        })
+        .await
+        .map_err(|_| anyhow!("browser_runtime_task_failed"))?
+    }
+
+    async fn release_admitted(&self, name: &str) -> Result<bool> {
         validate_lease_name(name)?;
         let Some(entry) = self.entry(name).await else {
             return Ok(false);
@@ -476,6 +540,61 @@ impl BrowserRuntimeManager {
         snapshots
     }
 
+    fn admit(&self) -> Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(anyhow!("browser_runtime_closed"));
+        }
+        let guard = self
+            .admission
+            .clone()
+            .try_read_owned()
+            .map_err(|_| anyhow!("browser_runtime_closed"))?;
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(anyhow!("browser_runtime_closed"));
+        }
+        Ok(guard)
+    }
+
+    /// Stop admission, drain current calls and initialization, then finalize every
+    /// lease. The caller can publish a replacement manager after this returns.
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        let _shutdown = self.shutdown_lock.lock().await;
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _admission = match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.admission.clone().write_owned(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.closed
+                    .store(false, std::sync::atomic::Ordering::Release);
+                return Err(anyhow!("browser_runtime_busy"));
+            }
+        };
+        let entries = std::mem::take(&mut *self.entries.lock().await);
+        let mut first_error = None;
+        for (_, entry) in entries {
+            let mut lifecycle = entry.lifecycle.lock().await;
+            lifecycle.state = BrowserLeaseState::Closing;
+            let kernel = lifecycle.kernel.take();
+            drop(lifecycle);
+            if let Some(kernel) = kernel {
+                let already_closed = kernel.is_closed();
+                if let Err(error) = final_cleanup(kernel, already_closed).await {
+                    first_error.get_or_insert(error);
+                }
+            }
+            entry.changed.notify_waiters();
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     async fn entry(&self, name: &str) -> Option<Arc<LeaseEntry>> {
         self.entries.lock().await.get(name).cloned()
     }
@@ -503,6 +622,9 @@ impl BrowserRuntimeManager {
     }
 
     async fn reap_expired(&self) {
+        let Ok(_admission) = self.admit() else {
+            return;
+        };
         let entries = {
             let entries = self.entries.lock().await;
             entries

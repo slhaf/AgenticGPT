@@ -73,6 +73,7 @@ pub(crate) async fn serve(
         .route("/v1/events/mark", post(routes::mark_events))
         .route("/v1/events/:event_id", get(routes::get_event))
         .merge(routes::process_routes())
+        .merge(routes::config_routes())
         .route("/v1/tmux/sessions", get(routes::tmux_list_sessions))
         .route("/v1/tmux/panes", get(routes::tmux_list_panes))
         .route("/v1/tmux/capture", post(routes::tmux_capture_pane))

@@ -36,6 +36,7 @@ pub(crate) enum OptionalSection {
     TunnelClient,
     HubReporting,
     Events,
+    Additional,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,6 +105,7 @@ pub(crate) struct InitInput {
     pub(crate) mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
     pub(crate) toolsets: Option<ToolsetConfig>,
     pub(crate) events: Option<EventsConfig>,
+    pub(crate) additional: Vec<agentic_gpt_protocol::ConfigChange>,
 }
 
 impl InitInput {
@@ -141,6 +143,7 @@ impl InitInput {
             mcp_servers: None,
             toolsets: None,
             events: None,
+            additional: Vec::new(),
         }
     }
 }
@@ -206,6 +209,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         tunnel_client,
         hub_reporting,
         events,
+        additional,
         mcp_servers,
         toolsets,
     } = input;
@@ -390,6 +394,10 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
             .retain(|channel| *channel != crate::config::ConfirmationChannel::Ntfy);
     }
 
+    if !additional.is_empty() {
+        config = crate::config_apply::apply_changes(&config, &additional)?;
+    }
+
     Ok(InitBuild {
         mode,
         profile,
@@ -413,7 +421,8 @@ pub(crate) fn optional_section_is_legal(
         | OptionalSection::McpServers
         | OptionalSection::Toolsets
         | OptionalSection::Events
-        | OptionalSection::Email => true,
+        | OptionalSection::Email
+        | OptionalSection::Additional => true,
         OptionalSection::Room => toolsets.is_enabled(ToolNamespace::Room),
         OptionalSection::TunnelClient | OptionalSection::HubReporting => {
             mode == RuntimeMode::Standalone

@@ -126,6 +126,120 @@ fn standalone_http_mcp_allow_hosts_supports_default_and_explicit_full_allow() {
     drop(worker);
 }
 
+#[test]
+fn standalone_http_config_update_self_disable_and_failed_rebind_preserve_service() {
+    let root = TempRoot::new("config-self-disable").unwrap();
+    if let Err(error) = run_config_self_disable_scenario(&root.path) {
+        panic!("{error}");
+    }
+}
+
+fn run_config_self_disable_scenario(root: &Path) -> Result<(), String> {
+    let port = free_port()?;
+    let token = "http-config-self-disable-token";
+    let env_name = format!("AGENTIC_HTTP_CONFIG_SELF_{}", Uuid::new_v4().simple());
+    let (mut worker, config_path) = spawn_worker(
+        root,
+        port,
+        format!("env:{env_name}"),
+        &[(env_name, token.to_owned())],
+    )?;
+    let endpoint = Endpoint::new("127.0.0.1", port);
+    wait_for_tcp(&endpoint, true)?;
+    worker.stdio_initialize(1)?;
+    worker.send(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))?;
+
+    let mut config = read_config(&config_path)?;
+    config["toolsets"]["enabled"]
+        .as_array_mut()
+        .ok_or("fixture toolsets missing")?
+        .push(json!("config"));
+    config["config"] = json!({"updatePolicy":"allow"});
+    write_config(&config_path, &config)?;
+    let session = http_initialize(&endpoint, token, 10)?;
+    wait_for_http_tools_presence(&endpoint, token, &session, 11, "config.update", true)?;
+
+    // One real POST, without transport retry: retiring the current endpoint
+    // must deliver this exact response before closing its MCP session.
+    let authorization = format!("Bearer {token}");
+    let response = http_post(
+        &endpoint,
+        Some(&authorization),
+        Some(&session),
+        json!({
+            "jsonrpc":"2.0", "id":12, "method":"tools/call", "params":{
+                "name":"config.update", "arguments":{"changes":[{"op":"set","path":["httpMcp","enabled"],"value":false}]}
+            }
+        }),
+    )?;
+    require(
+        response.status == 200,
+        "self-disable did not return an HTTP MCP response",
+    )?;
+    let message = sse_message(&response)?;
+    let saved = &message["result"]["structuredContent"];
+    require(
+        saved["saved"] == true,
+        &format!("self-disable did not report its committed write: {message}"),
+    )?;
+    require(
+        saved["events"].is_object(),
+        "self-disable response lost the public event frame",
+    )?;
+    wait_for_tcp(&endpoint, false)?;
+    // config.get reloads the persisted file and materializes defaults, so it
+    // verifies the saved behavior independently of sparse JSON formatting.
+    let status = worker.stdio_call(2, "config.get", json!({"paths":[["httpMcp","enabled"]]}))?;
+    let item = &status["result"]["structuredContent"]["items"][0];
+    require(
+        item["value"] == false && item["applyStatus"] == "applied",
+        &format!("stdio could not observe the disabled owner: {status}"),
+    )?;
+
+    // The surviving stdio ingress can restore HTTP without restarting the worker.
+    let enabled = worker.stdio_call(
+        3,
+        "config.update",
+        json!({"changes":[{"op":"set","path":["httpMcp","enabled"],"value":true}]}),
+    )?;
+    require(
+        enabled["result"]["structuredContent"]["saved"] == true,
+        "stdio could not re-enable HTTP",
+    )?;
+    wait_for_tcp(&endpoint, true)?;
+    let replacement_session = http_initialize(&endpoint, token, 20)?;
+    let occupied = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+    let occupied_port = occupied
+        .local_addr()
+        .map_err(|error| error.to_string())?
+        .port();
+    let changed = worker.stdio_call(
+        4,
+        "config.update",
+        json!({"changes":[{"op":"set","path":["httpMcp","port"],"value":occupied_port}]}),
+    )?;
+    let changed = &changed["result"]["structuredContent"];
+    require(
+        changed["saved"] == true,
+        "occupied-port candidate was not persisted",
+    )?;
+    let (_, still_serving) = http_call(
+        &endpoint,
+        token,
+        &replacement_session,
+        21,
+        "config.get",
+        json!({"paths":[["httpMcp","port"]]}),
+    )?;
+    let item = &still_serving["result"]["structuredContent"]["items"][0];
+    require(item["value"] == occupied_port && item["appliedValue"] == port && item["applyStatus"] == "failed",
+        &format!("failed rebind did not retain the old listener and report desired/applied values: {still_serving}"))?;
+    drop(worker);
+    drop(occupied);
+    wait_for_tcp(&endpoint, false)?;
+    Ok(())
+}
+
 fn run_env_scenario(root: &Path) -> Result<(), String> {
     let initial_port = free_port()?;
     let suffix = Uuid::new_v4().simple().to_string();

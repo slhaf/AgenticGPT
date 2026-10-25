@@ -1,16 +1,6 @@
-use std::path::PathBuf;
+use anyhow::Result;
 
-use anyhow::{anyhow, Result};
-use serde::Serialize;
-
-use crate::{
-    cli_i18n::{self, UiLanguage},
-    config::{
-        self, normalize_confirmation_language, Config, EventNotificationLevel, ReportingDetail,
-        RoomMaintenanceMode, RuntimeMode, ShellInitFile, INTERNAL_EVENT_TYPES,
-    },
-    WorkerProfile,
-};
+use crate::cli_i18n::{self, UiLanguage};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConfigValueKind {
@@ -40,7 +30,7 @@ pub(crate) enum ConfigValueKind {
 }
 
 impl ConfigValueKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::String => "string",
             Self::Path => "path",
@@ -68,7 +58,7 @@ impl ConfigValueKind {
         }
     }
 
-    fn choices(self) -> Option<&'static [&'static str]> {
+    pub(crate) fn choices(self) -> Option<&'static [&'static str]> {
         match self {
             Self::Boolean => Some(&["true", "false"]),
             Self::PolicyAction => Some(&["allow", "confirm", "deny"]),
@@ -100,11 +90,21 @@ pub(crate) enum ConfigSection {
     Email,
     Tunnel,
     Events,
+    Workspace,
+    Toolsets,
+    Config,
+    Browser,
+    Mcp,
 }
 
 impl ConfigSection {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Workspace => "workspace",
+            Self::Toolsets => "toolsets",
+            Self::Config => "config",
+            Self::Browser => "browser",
+            Self::Mcp => "mcp",
             Self::Runtime => "runtime",
             Self::HttpMcp => "http-mcp",
             Self::Identity => "identity",
@@ -121,8 +121,18 @@ impl ConfigSection {
         }
     }
 
-    fn label(self, language: UiLanguage) -> &'static str {
+    pub(crate) fn label(self, language: UiLanguage) -> &'static str {
         match (self, language) {
+            (Self::Workspace, UiLanguage::En) => "Workspace",
+            (Self::Workspace, UiLanguage::ZhCn) => "工作区",
+            (Self::Toolsets, UiLanguage::En) => "Toolsets",
+            (Self::Toolsets, UiLanguage::ZhCn) => "工具集",
+            (Self::Config, UiLanguage::En) => "Configuration API",
+            (Self::Config, UiLanguage::ZhCn) => "配置 API",
+            (Self::Browser, UiLanguage::En) => "Browser",
+            (Self::Browser, UiLanguage::ZhCn) => "浏览器",
+            (Self::Mcp, UiLanguage::En) => "MCP servers",
+            (Self::Mcp, UiLanguage::ZhCn) => "MCP 服务",
             (Self::Runtime, UiLanguage::En) => "Runtime",
             (Self::Runtime, UiLanguage::ZhCn) => "运行时",
             (Self::Identity, UiLanguage::En) => "Identity",
@@ -160,21 +170,17 @@ pub(crate) struct LocalizedText {
 
 pub(crate) struct ConfigKeySpec {
     pub(crate) key: &'static str,
-    pub(crate) section: ConfigSection,
     pub(crate) kind: ConfigValueKind,
     pub(crate) nullable: bool,
     pub(crate) description: LocalizedText,
     pub(crate) example: &'static str,
     pub(crate) alias_of: Option<&'static str>,
-    apply: fn(&mut Config, &str) -> Result<()>,
-    reset: Option<fn(&mut Config)>,
 }
 
 macro_rules! config_key {
     ($key:literal, $section:ident, $kind:ident, $nullable:expr, $en:expr, $zh_cn:expr, $example:expr, $apply:ident) => {
         ConfigKeySpec {
             key: $key,
-            section: ConfigSection::$section,
             kind: ConfigValueKind::$kind,
             nullable: $nullable,
             description: LocalizedText {
@@ -183,14 +189,11 @@ macro_rules! config_key {
             },
             example: $example,
             alias_of: None,
-            apply: $apply,
-            reset: None,
         }
     };
     ($key:literal, $section:ident, $kind:ident, $nullable:expr, $en:expr, $zh_cn:expr, $example:expr, $apply:ident, $reset:ident) => {
         ConfigKeySpec {
             key: $key,
-            section: ConfigSection::$section,
             kind: ConfigValueKind::$kind,
             nullable: $nullable,
             description: LocalizedText {
@@ -199,14 +202,11 @@ macro_rules! config_key {
             },
             example: $example,
             alias_of: None,
-            apply: $apply,
-            reset: Some($reset),
         }
     };
     ($key:literal, $section:ident, $kind:ident, $nullable:expr, $en:expr, $zh_cn:expr, $example:expr, $apply:ident, $alias_of:literal) => {
         ConfigKeySpec {
             key: $key,
-            section: ConfigSection::$section,
             kind: ConfigValueKind::$kind,
             nullable: $nullable,
             description: LocalizedText {
@@ -215,8 +215,6 @@ macro_rules! config_key {
             },
             example: $example,
             alias_of: Some($alias_of),
-            apply: $apply,
-            reset: None,
         }
     };
 }
@@ -1135,69 +1133,15 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
     ),
 ];
 
-pub(crate) fn apply_config_key(config: &mut Config, key: &str, value: &str) -> Result<()> {
-    let spec = CONFIG_KEYS
-        .iter()
-        .find(|spec| spec.key == key)
-        .ok_or_else(|| anyhow!("unsupported config key: {key}"))?;
-    (spec.apply)(config, value)?;
-    if spec.section == ConfigSection::Email {
-        config.email.validate()?;
-    }
-    if key.starts_with("room.secret.") {
-        config.room.secret.validate()?;
-    }
-    if spec.section == ConfigSection::HttpMcp {
-        config.validate_http_mcp()?;
-    }
-    Ok(())
-}
-
-pub(crate) fn unset_config_key(config: &mut Config, key: &str) -> Result<()> {
-    let spec = CONFIG_KEYS
-        .iter()
-        .find(|spec| spec.key == key)
-        .ok_or_else(|| anyhow!("unsupported config key: {key}"))?;
-    let reset = spec
-        .reset
-        .ok_or_else(|| anyhow!("config key cannot be unset: {key}"))?;
-    reset(config);
-    Ok(())
-}
-
-#[derive(Serialize)]
-struct ConfigKeysOutput {
-    keys: Vec<ConfigKeyOutput>,
-}
-
-#[derive(Serialize)]
-struct ConfigKeyOutput {
-    key: &'static str,
-    section: &'static str,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    nullable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    choices: Option<&'static [&'static str]>,
-    example: &'static str,
-    description: ConfigDescriptionOutput,
-    #[serde(rename = "aliasOf", skip_serializing_if = "Option::is_none")]
-    alias_of: Option<&'static str>,
-}
-
-#[derive(Serialize)]
-struct ConfigDescriptionOutput {
-    en: &'static str,
-    #[serde(rename = "zhCN")]
-    zh_cn: &'static str,
-}
-
-const CONFIG_SECTION_ORDER: [ConfigSection; 13] = [
+const CONFIG_SECTION_ORDER: [ConfigSection; 18] = [
     ConfigSection::Runtime,
     ConfigSection::Identity,
+    ConfigSection::Workspace,
     ConfigSection::Hub,
     ConfigSection::HttpMcp,
     ConfigSection::Confirmation,
+    ConfigSection::Config,
+    ConfigSection::Toolsets,
     ConfigSection::Policy,
     ConfigSection::Shell,
     ConfigSection::Limits,
@@ -1205,6 +1149,8 @@ const CONFIG_SECTION_ORDER: [ConfigSection; 13] = [
     ConfigSection::Room,
     ConfigSection::Email,
     ConfigSection::Tunnel,
+    ConfigSection::Browser,
+    ConfigSection::Mcp,
     ConfigSection::Events,
 ];
 
@@ -1213,642 +1159,50 @@ pub(super) fn print_config_keys(
     json: bool,
     language: UiLanguage,
 ) -> Result<()> {
+    let entries = crate::config_catalog::entries()?;
+    let entries = entries
+        .into_iter()
+        .filter(|entry| entry.kind != "object" || entry.path == ["browser", "runtime"])
+        .filter(|entry| section.is_none_or(|s| s.as_str() == entry.section))
+        .collect::<Vec<_>>();
+    let records = entries.iter().map(|entry| {
+        let key = entry.path.join(".");
+        let legacy = CONFIG_KEYS.iter().find(|spec| spec.key == key && spec.alias_of.is_none());
+        let example = legacy.map(|spec| spec.example.to_owned()).unwrap_or_else(|| entry.example.to_string());
+        let en = legacy.map(|spec| spec.description.en).unwrap_or(&entry.description);
+        serde_json::json!({"key":key,"path":entry.path,"section":entry.section,"type":entry.kind,"nullable":entry.nullable,
+            "choices":entry.choices,"example":example,"description":{"en":en,"zhCN":entry.description}})
+    }).collect::<Vec<_>>();
     if json {
-        let output = ConfigKeysOutput {
-            keys: CONFIG_KEYS
-                .iter()
-                .filter(|spec| section.is_none_or(|section| spec.section == section))
-                .map(|spec| ConfigKeyOutput {
-                    key: spec.key,
-                    section: spec.section.as_str(),
-                    kind: spec.kind.as_str(),
-                    nullable: spec.nullable,
-                    choices: spec.kind.choices(),
-                    example: spec.example,
-                    description: ConfigDescriptionOutput {
-                        en: spec.description.en,
-                        zh_cn: spec.description.zh_cn,
-                    },
-                    alias_of: spec.alias_of,
-                })
-                .collect(),
-        };
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"keys":records}))?
+        );
         return Ok(());
     }
-
     println!("{}", cli_i18n::text(language).config_keys_about);
-    let sections = section.map_or_else(|| CONFIG_SECTION_ORDER.to_vec(), |section| vec![section]);
-    for section in sections {
-        let specs = CONFIG_KEYS
+    for section in section.map_or_else(|| CONFIG_SECTION_ORDER.to_vec(), |s| vec![s]) {
+        let records = records
             .iter()
-            .filter(|spec| spec.section == section)
+            .filter(|record| record["section"] == section.as_str())
             .collect::<Vec<_>>();
-        if specs.is_empty() {
+        if records.is_empty() {
             continue;
         }
-        println!();
-        println!("{}:", section.label(language));
-        for spec in specs {
-            let alias = spec
-                .alias_of
-                .map(|canonical| match language {
-                    UiLanguage::En => format!("; alias of {canonical}"),
-                    UiLanguage::ZhCn => format!("；{canonical} 的别名"),
-                })
-                .unwrap_or_default();
-            let (description_label, example_label) = match language {
-                UiLanguage::En => ("description", "example"),
-                UiLanguage::ZhCn => ("说明", "示例"),
+        println!("\n{}:", section.label(language));
+        for record in records {
+            let description = match language {
+                UiLanguage::En => &record["description"]["en"],
+                UiLanguage::ZhCn => &record["description"]["zhCN"],
             };
-            println!("  {} [{}]{}", spec.key, spec.kind.as_str(), alias);
             println!(
-                "    ├─ {description_label}: {}",
-                localized_description(spec, language)
+                "  {} [{}]\n    {}\n    {}",
+                record["key"].as_str().unwrap_or_default(),
+                record["type"].as_str().unwrap_or_default(),
+                description.as_str().unwrap_or_default(),
+                record["example"].as_str().unwrap_or_default()
             );
-            if let Some(choices) = spec.kind.choices() {
-                let choices_label = match language {
-                    UiLanguage::En => "choices",
-                    UiLanguage::ZhCn => "可选值",
-                };
-                println!("    ├─ {example_label}: {}", spec.example);
-                println!("    └─ {choices_label}: {}", choices.join(" | "));
-            } else {
-                println!("    └─ {example_label}: {}", spec.example);
-            }
         }
     }
-    Ok(())
-}
-
-fn localized_description(spec: &ConfigKeySpec, language: UiLanguage) -> &'static str {
-    match language {
-        UiLanguage::En => spec.description.en,
-        UiLanguage::ZhCn => spec.description.zh_cn,
-    }
-}
-
-fn set_mode(config: &mut Config, value: &str) -> Result<()> {
-    config.mode = match value.to_ascii_lowercase().as_str() {
-        "standalone" => RuntimeMode::Standalone,
-        "hub" => RuntimeMode::Hub,
-        "local" => RuntimeMode::Local,
-        _ => return Err(anyhow!("mode must be standalone, hub, or local")),
-    };
-    Ok(())
-}
-
-fn set_profile(config: &mut Config, value: &str) -> Result<()> {
-    config.profile = match value.to_ascii_lowercase().as_str() {
-        "normal" => WorkerProfile::Normal,
-        "room" => WorkerProfile::Room,
-        _ => return Err(anyhow!("profile must be normal or room")),
-    };
-    Ok(())
-}
-
-fn set_agent_id(config: &mut Config, value: &str) -> Result<()> {
-    config.agent_id = value.to_string();
-    Ok(())
-}
-
-fn set_display_name(config: &mut Config, value: &str) -> Result<()> {
-    config.display_name = value.to_string();
-    Ok(())
-}
-
-fn set_agent_secret(config: &mut Config, value: &str) -> Result<()> {
-    config.hub.agent_secret = value.to_string();
-    Ok(())
-}
-fn set_http_mcp_enabled(config: &mut Config, value: &str) -> Result<()> {
-    config.http_mcp.enabled = value.parse::<bool>()?;
-    Ok(())
-}
-
-fn set_http_mcp_host(config: &mut Config, value: &str) -> Result<()> {
-    config.http_mcp.host = value.to_string();
-    Ok(())
-}
-
-fn set_http_mcp_port(config: &mut Config, value: &str) -> Result<()> {
-    let port = value.parse::<u16>()?;
-    if port == 0 {
-        return Err(anyhow!("httpMcp.port must be between 1 and 65535"));
-    }
-    config.http_mcp.port = port;
-    Ok(())
-}
-
-fn set_http_mcp_bearer_token(config: &mut Config, value: &str) -> Result<()> {
-    if !value.is_empty() {
-        config::validate_http_mcp_bearer_token(value)?;
-    }
-    config.http_mcp.bearer_token = value.to_string();
-    Ok(())
-}
-
-fn set_http_mcp_public_url(config: &mut Config, value: &str) -> Result<()> {
-    config.http_mcp.public_url = if value == "null" {
-        None
-    } else {
-        Some(config::normalize_http_mcp_public_url(value)?)
-    };
-    Ok(())
-}
-
-fn set_http_mcp_allow_hosts(config: &mut Config, value: &str) -> Result<()> {
-    config.http_mcp.allow_hosts = config::parse_http_mcp_allow_hosts(value)?;
-    Ok(())
-}
-
-fn set_workspace_root(config: &mut Config, value: &str) -> Result<()> {
-    config.workspace_root = crate::exec::expand_path(value)?;
-    Ok(())
-}
-
-fn set_hub_enabled(config: &mut Config, value: &str) -> Result<()> {
-    config.hub.enabled = value.parse::<bool>()?;
-    Ok(())
-}
-
-fn set_hub_url(config: &mut Config, value: &str) -> Result<()> {
-    config.hub.url = value.to_string();
-    Ok(())
-}
-
-fn set_hub_transport(config: &mut Config, value: &str) -> Result<()> {
-    let normalized = value.to_lowercase();
-    if normalized != "websocket" && normalized != "sse" {
-        return Err(anyhow!("hub.transport must be websocket or sse"));
-    }
-    config.hub.transport = normalized;
-    Ok(())
-}
-
-fn set_confirmation_channels(config: &mut Config, value: &str) -> Result<()> {
-    let names = serde_json::from_str::<Vec<String>>(value)
-        .map_err(|_| anyhow!("confirmationProvider.channels must be a JSON string array"))?;
-    config.confirmation_provider =
-        config::ConfirmationProviderConfig::from_channel_names(names.iter().map(String::as_str))
-            .map_err(|error| anyhow!(error))?;
-    Ok(())
-}
-
-fn set_confirmation_language(config: &mut Config, value: &str) -> Result<()> {
-    config.confirmation_language = normalize_confirmation_language(value);
-    Ok(())
-}
-
-fn set_shell_init_file(config: &mut Config, value: &str) -> Result<()> {
-    config.shell.init_file = if value == "null" {
-        ShellInitFile::Disabled
-    } else {
-        ShellInitFile::Path(value.to_string())
-    };
-    Ok(())
-}
-
-fn unset_shell_init_file(config: &mut Config) {
-    config.shell.init_file = ShellInitFile::Default;
-}
-fn set_policy_enabled(config: &mut Config, value: &str) -> Result<()> {
-    config.policy.enabled = value.parse::<bool>()?;
-    Ok(())
-}
-fn set_policy_command_default_action(config: &mut Config, value: &str) -> Result<()> {
-    config.policy.command.default_action =
-        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
-    Ok(())
-}
-fn set_policy_command_allow(config: &mut Config, value: &str) -> Result<()> {
-    let patterns: Vec<String> = serde_json::from_str(value)?;
-    for pattern in &patterns {
-        crate::policy::validate_command_pattern(pattern)?;
-    }
-    config.policy.command.allow = patterns;
-    Ok(())
-}
-fn set_policy_command_confirm(config: &mut Config, value: &str) -> Result<()> {
-    let patterns: Vec<String> = serde_json::from_str(value)?;
-    for pattern in &patterns {
-        crate::policy::validate_command_pattern(pattern)?;
-    }
-    config.policy.command.confirm = patterns;
-    Ok(())
-}
-fn set_policy_command_deny(config: &mut Config, value: &str) -> Result<()> {
-    let patterns: Vec<String> = serde_json::from_str(value)?;
-    for pattern in &patterns {
-        crate::policy::validate_command_pattern(pattern)?;
-    }
-    config.policy.command.deny = patterns;
-    Ok(())
-}
-fn set_policy_path_default_action(config: &mut Config, value: &str) -> Result<()> {
-    config.policy.path.default_action =
-        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
-    Ok(())
-}
-fn set_policy_path_read_only(config: &mut Config, value: &str) -> Result<()> {
-    config.policy.path.read_only = parse_path_roots(value)?;
-    Ok(())
-}
-fn set_policy_path_write(config: &mut Config, value: &str) -> Result<()> {
-    config.policy.path.write = parse_path_roots(value)?;
-    Ok(())
-}
-fn set_policy_path_deny(config: &mut Config, value: &str) -> Result<()> {
-    config.policy.path.deny = parse_path_roots(value)?;
-    Ok(())
-}
-fn parse_path_roots(value: &str) -> Result<Vec<PathBuf>> {
-    let roots = serde_json::from_str::<Vec<PathBuf>>(value)?;
-    crate::exec::normalize_roots(roots.iter().map(PathBuf::as_path))?;
-    Ok(roots)
-}
-fn set_bubblewrap(config: &mut Config, value: &str) -> Result<()> {
-    config.policy.bubblewrap = value.parse::<bool>()?;
-    Ok(())
-}
-
-fn set_backup_limit(config: &mut Config, value: &str) -> Result<()> {
-    config.backup_limit = value.parse::<usize>()?;
-    Ok(())
-}
-
-fn set_max_concurrent_tasks(config: &mut Config, value: &str) -> Result<()> {
-    config.limits.max_concurrent_tasks = value.parse::<usize>()?;
-    Ok(())
-}
-
-fn set_max_active_processes(config: &mut Config, value: &str) -> Result<()> {
-    config.limits.max_active_processes = config::parse_max_active_processes(value)?;
-    Ok(())
-}
-
-fn set_max_file_search_context_lines(config: &mut Config, value: &str) -> Result<()> {
-    let parsed = value.parse::<usize>()?;
-    config::validate_max_file_search_context_lines(parsed)?;
-    config.limits.max_file_search_context_lines = parsed;
-    Ok(())
-}
-
-fn set_process_response_bytes(config: &mut Config, value: &str) -> Result<()> {
-    let parsed = value.parse::<usize>()?;
-    config::validate_process_response_bytes(parsed)?;
-    config.limits.process_response_bytes = parsed;
-    Ok(())
-}
-
-fn set_skills_max_files(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.max_files = value.parse::<usize>()?;
-    Ok(())
-}
-
-fn set_skills_max_file_bytes(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.max_file_bytes = value.parse::<u64>()?;
-    Ok(())
-}
-
-fn set_skills_max_package_bytes(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.max_package_bytes = value.parse::<u64>()?;
-    Ok(())
-}
-
-fn set_skills_max_skill_md_bytes(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.max_skill_md_bytes = value.parse::<u64>()?;
-    Ok(())
-}
-
-fn set_skills_max_inline_bytes(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.max_inline_bytes = value.parse::<u64>()?;
-    Ok(())
-}
-
-fn set_skills_connect_timeout_secs(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.connect_timeout_secs = value.parse::<u64>()?;
-    Ok(())
-}
-
-fn set_skills_request_timeout_secs(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.request_timeout_secs = value.parse::<u64>()?;
-    Ok(())
-}
-
-fn set_skills_idle_timeout_secs(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.idle_timeout_secs = value.parse::<u64>()?;
-    Ok(())
-}
-
-fn set_skills_max_redirects(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.max_redirects = value.parse::<usize>()?;
-    Ok(())
-}
-
-fn set_skills_max_concurrent_installs(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.max_concurrent_installs = value.parse::<usize>()?;
-    Ok(())
-}
-
-fn set_skills_max_parallel_downloads(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.max_parallel_downloads = value.parse::<usize>()?;
-    Ok(())
-}
-
-fn set_skills_max_attempts(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.max_attempts = value.parse::<u32>()?;
-    Ok(())
-}
-
-fn set_skills_total_deadline_secs(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.total_deadline_secs = value.parse::<u64>()?;
-    Ok(())
-}
-
-fn set_skills_allowed_hosts(config: &mut Config, value: &str) -> Result<()> {
-    config.skills.allowed_hosts = serde_json::from_str(value)?;
-    Ok(())
-}
-
-fn set_repository_root(config: &mut Config, value: &str) -> Result<()> {
-    config.room.repository_root = if value == "null" {
-        None
-    } else {
-        Some(PathBuf::from(value))
-    };
-    Ok(())
-}
-
-fn set_room_maintenance_mode(config: &mut Config, value: &str) -> Result<()> {
-    config.room.maintenance.mode = match value.to_ascii_lowercase().as_str() {
-        "local" => RoomMaintenanceMode::Local,
-        "workflow" => RoomMaintenanceMode::Workflow,
-        _ => return Err(anyhow!("room.maintenance.mode must be local or workflow")),
-    };
-    Ok(())
-}
-
-fn set_room_maintenance_auto_push(config: &mut Config, value: &str) -> Result<()> {
-    config.room.maintenance.auto_push = value.parse::<bool>()?;
-    Ok(())
-}
-
-fn set_room_timezone(config: &mut Config, value: &str) -> Result<()> {
-    config.room.timezone = value.to_string();
-    Ok(())
-}
-
-fn set_diary_day_boundary_hour(config: &mut Config, value: &str) -> Result<()> {
-    let hour = value.parse::<u32>()?;
-    if hour > 23 {
-        return Err(anyhow!(
-            "room.diaryDayBoundaryHour must be an integer from 0 to 23"
-        ));
-    }
-    config.room.diary_day_boundary_hour = hour;
-    Ok(())
-}
-
-fn set_tunnel_id(config: &mut Config, value: &str) -> Result<()> {
-    tunnel_config(config).tunnel_id = value.to_string();
-    Ok(())
-}
-
-fn set_tunnel_api_key(config: &mut Config, value: &str) -> Result<()> {
-    tunnel_config(config).api_key = value.to_string();
-    Ok(())
-}
-
-fn set_tunnel_client_version(config: &mut Config, value: &str) -> Result<()> {
-    tunnel_config(config).client.version = if value == "null" {
-        None
-    } else {
-        Some(value.to_string())
-    };
-    Ok(())
-}
-
-fn set_tunnel_client_cache_dir(config: &mut Config, value: &str) -> Result<()> {
-    tunnel_config(config).client.cache_dir = PathBuf::from(value);
-    Ok(())
-}
-
-fn set_tunnel_client_auto_download(config: &mut Config, value: &str) -> Result<()> {
-    let parsed = value.parse::<bool>()?;
-    tunnel_config(config).client.auto_download = parsed;
-    Ok(())
-}
-
-fn set_tunnel_client_executable(config: &mut Config, value: &str) -> Result<()> {
-    tunnel_config(config).client.executable = if value == "null" {
-        None
-    } else {
-        Some(PathBuf::from(value))
-    };
-    Ok(())
-}
-
-fn set_tunnel_client_download_url(config: &mut Config, value: &str) -> Result<()> {
-    tunnel_config(config).client.download_url = if value == "null" {
-        None
-    } else {
-        Some(value.to_string())
-    };
-    Ok(())
-}
-
-fn set_tunnel_client_sha256(config: &mut Config, value: &str) -> Result<()> {
-    tunnel_config(config).client.sha256 = if value == "null" {
-        None
-    } else {
-        Some(value.to_string())
-    };
-    Ok(())
-}
-
-fn set_tunnel_hub_reporting_enabled(config: &mut Config, value: &str) -> Result<()> {
-    let parsed = value.parse::<bool>()?;
-    tunnel_config(config).hub_reporting.enabled = parsed;
-    Ok(())
-}
-
-fn set_tunnel_hub_reporting_detail(config: &mut Config, value: &str) -> Result<()> {
-    let detail = match value {
-        "metadata" => ReportingDetail::Metadata,
-        "full" => ReportingDetail::Full,
-        _ => {
-            return Err(anyhow!(
-                "tunnel hub reporting detail must be metadata or full"
-            ));
-        }
-    };
-    tunnel_config(config).hub_reporting.detail = detail;
-    Ok(())
-}
-fn set_events_low_ttl_seconds(config: &mut Config, value: &str) -> Result<()> {
-    let low_ttl_seconds = value
-        .parse::<u64>()
-        .map_err(|_| anyhow!("events.lowTtlSeconds must be a non-negative integer"))?;
-    let mut events = config.events.clone();
-    events.low_ttl_seconds = low_ttl_seconds;
-    events.validate()?;
-    config.events = events;
-    Ok(())
-}
-
-fn set_internal_override(config: &mut Config, event_type: &str, value: &str) -> Result<()> {
-    if !INTERNAL_EVENT_TYPES.contains(&event_type) {
-        return Err(anyhow!("unknown internal event type: {event_type}"));
-    }
-    let mut events = config.events.clone();
-    if value == "null" {
-        events.internal_overrides.remove(event_type);
-    } else {
-        let level = match value {
-            "low" => EventNotificationLevel::Low,
-            "medium" => EventNotificationLevel::Medium,
-            "high" => EventNotificationLevel::High,
-            "off" => EventNotificationLevel::Off,
-            _ => {
-                return Err(anyhow!(
-                    "events.internalOverrides value must be low, medium, high, off, or null"
-                ));
-            }
-        };
-        events
-            .internal_overrides
-            .insert(event_type.to_string(), level);
-    }
-    events.validate()?;
-    config.events = events;
-    Ok(())
-}
-
-macro_rules! internal_override_setter {
-    ($name:ident, $event_type:literal) => {
-        fn $name(config: &mut Config, value: &str) -> Result<()> {
-            set_internal_override(config, $event_type, value)
-        }
-    };
-}
-
-internal_override_setter!(set_process_completed_level, "process.completed");
-internal_override_setter!(set_process_failed_level, "process.failed");
-internal_override_setter!(set_process_rejected_level, "process.rejected");
-internal_override_setter!(set_process_cancelled_level, "process.cancelled");
-internal_override_setter!(set_process_timed_out_level, "process.timed_out");
-internal_override_setter!(set_process_detached_level, "process.detached");
-internal_override_setter!(
-    set_process_unknown_after_restart_level,
-    "process.unknown_after_restart"
-);
-internal_override_setter!(set_process_skipped_level, "process.skipped");
-internal_override_setter!(set_skill_install_completed_level, "skill_install.completed");
-internal_override_setter!(set_skill_install_failed_level, "skill_install.failed");
-internal_override_setter!(set_skill_install_cancelled_level, "skill_install.cancelled");
-
-fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
-    config
-        .tunnel
-        .get_or_insert_with(config::TunnelConfig::default)
-}
-
-fn set_email_account(config: &mut Config, value: &str) -> Result<()> {
-    config.email.account = serde_json::from_str(value)?;
-    Ok(())
-}
-
-fn set_email_enabled(config: &mut Config, value: &str) -> Result<()> {
-    config.email.enabled = value.parse()?;
-    Ok(())
-}
-
-fn set_email_sync_interval_seconds(config: &mut Config, value: &str) -> Result<()> {
-    config.email.sync_interval_seconds = value.parse()?;
-    Ok(())
-}
-
-fn set_email_retention_days(config: &mut Config, value: &str) -> Result<()> {
-    config.email.retention_days = value.parse()?;
-    Ok(())
-}
-
-fn set_email_max_storage_bytes(config: &mut Config, value: &str) -> Result<()> {
-    config.email.max_storage_bytes = value.parse()?;
-    Ok(())
-}
-
-fn set_email_send_policy(config: &mut Config, value: &str) -> Result<()> {
-    config.email.send_policy =
-        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
-    Ok(())
-}
-
-fn set_email_trash_policy(config: &mut Config, value: &str) -> Result<()> {
-    config.email.trash_policy =
-        serde_json::from_value(serde_json::Value::String(value.to_string()))?;
-    Ok(())
-}
-
-fn set_room_secret_enabled(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.enabled = value.parse::<bool>()?;
-    Ok(())
-}
-
-fn set_room_secret_server_url(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.server_url = value.to_string();
-    Ok(())
-}
-
-fn set_room_secret_account(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.account = value.to_string();
-    Ok(())
-}
-
-fn set_room_secret_client_id(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.client_id = value.to_string();
-    Ok(())
-}
-
-fn set_room_secret_client_secret(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.client_secret = value.to_string();
-    Ok(())
-}
-
-fn set_room_secret_master_password(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.master_password = value.to_string();
-    Ok(())
-}
-
-fn set_room_secret_get_policy(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.get_policy = match value {
-        "allow" => config::SecretPolicy::Allow,
-        "confirm" => config::SecretPolicy::Confirm,
-        _ => return Err(anyhow!("room_secret_policy_invalid")),
-    };
-    Ok(())
-}
-
-fn set_room_secret_upsert_policy(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.upsert_policy = match value {
-        "allow" => config::SecretPolicy::Allow,
-        "confirm" => config::SecretPolicy::Confirm,
-        _ => return Err(anyhow!("room_secret_policy_invalid")),
-    };
-    Ok(())
-}
-
-fn set_room_secret_delete_policy(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.delete_policy = match value {
-        "allow" => config::SecretPolicy::Allow,
-        "confirm" => config::SecretPolicy::Confirm,
-        _ => return Err(anyhow!("room_secret_policy_invalid")),
-    };
-    Ok(())
-}
-
-fn set_room_secret_sync_wait_timeout_ms(config: &mut Config, value: &str) -> Result<()> {
-    config.room.secret.sync_wait_timeout_ms = value.parse::<u64>()?;
     Ok(())
 }

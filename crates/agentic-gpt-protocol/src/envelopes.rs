@@ -5,6 +5,7 @@ use super::email::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::config_api::{ConfigGetRequest, ConfigManualRequest, ConfigUpdateRequest};
 use super::events::{
     EventGetRequest, EventListRequest, EventMarkRequest, EventOrigin, EventResponseDisposition,
     EventSettleRequest, EventSource,
@@ -45,6 +46,21 @@ fn is_false(value: &bool) -> bool {
     rename_all_fields = "camelCase"
 )]
 pub enum HubCommand {
+    #[serde(rename = "config.manual")]
+    ConfigManual {
+        request_id: String,
+        payload: ConfigManualRequest,
+    },
+    #[serde(rename = "config.get")]
+    ConfigGet {
+        request_id: String,
+        payload: ConfigGetRequest,
+    },
+    #[serde(rename = "config.update")]
+    ConfigUpdate {
+        request_id: String,
+        payload: ConfigUpdateRequest,
+    },
     #[serde(rename = "process.exec")]
     Exec {
         request_id: String,
@@ -318,7 +334,10 @@ impl HubCommand {
 
     pub fn request_id(&self) -> &str {
         match self {
-            Self::Exec { request_id, .. }
+            Self::ConfigManual { request_id, .. }
+            | Self::ConfigGet { request_id, .. }
+            | Self::ConfigUpdate { request_id, .. }
+            | Self::Exec { request_id, .. }
             | Self::ProcessBatch { request_id, .. }
             | Self::ProcessList { request_id, .. }
             | Self::ProcessRead { request_id, .. }
@@ -469,6 +488,13 @@ pub enum AgentMessage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HubMessage {
+    /// The Hub has durably stored this response; this is not a command-admission ACK.
+    ResponseAck {
+        #[serde(rename = "runId")]
+        run_id: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
     SecretCommand {
         #[serde(rename = "dispatchId")]
         dispatch_id: String,

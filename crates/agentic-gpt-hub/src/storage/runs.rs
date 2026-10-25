@@ -73,6 +73,9 @@ pub(crate) struct PendingReplay {
 
 pub(crate) fn command_type(command: &HubCommand) -> &'static str {
     match command {
+        HubCommand::ConfigManual { .. } => "config.manual",
+        HubCommand::ConfigGet { .. } => "config.get",
+        HubCommand::ConfigUpdate { .. } => "config.update",
         HubCommand::Exec { .. } => "process.exec",
         HubCommand::ProcessBatch { .. } => "process.batch",
         HubCommand::ProcessList { .. } => "process.list",
@@ -570,7 +573,7 @@ pub(crate) fn store_result(
 pub(crate) fn upsert_agent_report(
     state: &HubState,
     agent_id: &str,
-    report: AgentRunReport,
+    mut report: AgentRunReport,
 ) -> Result<()> {
     if report.run_id.trim().is_empty() || report.request_id.trim().is_empty() {
         return Err(anyhow!("invalid_agent_run_report"));
@@ -580,6 +583,16 @@ pub(crate) fn upsert_agent_report(
     }
     if !matches!(report.detail.as_str(), "metadata" | "full") {
         return Err(anyhow!("invalid_agent_run_detail"));
+    }
+    if report.tool_name.starts_with("config.") {
+        if let Some(arguments) = report.arguments.as_mut() {
+            arguments.value = serde_json::json!({ "redacted": true });
+        }
+        if let Some(result) = report.result.as_mut() {
+            result.value = public_config_result(&result.value);
+        }
+        // Public reports must not echo configuration values in an error message.
+        report.reason = report.reason.map(|_| "config_operation_failed".to_owned());
     }
     let now = Utc::now();
     let detail = report.detail.clone();
@@ -717,6 +730,19 @@ pub(crate) fn upsert_agent_report(
     )?;
     Ok(())
 }
+
+fn public_config_result(value: &Value) -> Value {
+    let mut result = serde_json::json!({ "redacted": true });
+    for field in ["saved", "dryRun"] {
+        if let Some(value) = value.get(field).and_then(Value::as_bool) {
+            result[field] = Value::Bool(value);
+        }
+    }
+    if let Some(code) = value.pointer("/error/code").and_then(Value::as_str) {
+        result["error"] = serde_json::json!({ "code": code });
+    }
+    result
+}
 pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>> {
     let conn = state.db.lock().unwrap();
     conn.query_row(
@@ -732,6 +758,8 @@ pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>
             let process_id: Option<String> = row.get(12)?;
             let process_json: Option<String> = row.get(13)?;
             let status: String = row.get(8)?;
+            let command_type: String = row.get(3)?;
+            let is_config = command_type.starts_with("config.");
             let expires_at: Option<DateTime<Utc>> = row.get(17)?;
             let result_retained = result_json.is_some();
             let result_omitted = !result_retained
@@ -742,19 +770,27 @@ pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>
                 run_id: row.get(0)?,
                 request_id: row.get(1)?,
                 agent_id: row.get(2)?,
-                command_type: row.get(3)?,
+                command_type,
                 command_hash: row.get(4)?,
                 source: row.get(5)?,
                 profile: row.get(6)?,
                 detail: row.get(7)?,
                 status,
-                result: result_json.and_then(|json| serde_json::from_str(&json).ok()),
+                result: result_json
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .map(|value| if is_config { public_config_result(&value) } else { value }),
                 result_retained,
                 result_omitted,
-                arguments: arguments_json.and_then(|json| serde_json::from_str(&json).ok()),
+                arguments: arguments_json
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .map(|value| if is_config { serde_json::json!({ "redacted": true }) } else { value }),
                 process_id,
                 process: process_json.and_then(|json| serde_json::from_str(&json).ok()),
-                reason: row.get(14)?,
+                reason: if is_config {
+                    row.get::<_, Option<String>>(14)?.map(|_| "config_operation_failed".to_owned())
+                } else {
+                    row.get(14)?
+                },
                 created_at: row.get(15)?,
                 updated_at: row.get(16)?,
             })

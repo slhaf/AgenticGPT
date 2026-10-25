@@ -85,10 +85,15 @@ pub(crate) async fn run_stdio_worker(
     config_path: PathBuf,
     profile: CapabilityProfile,
     supervisor_token: Option<String>,
+    startup_config: Option<PathBuf>,
 ) -> Result<()> {
     supervisor::authorize_worker(supervisor_token.as_deref())?;
     let supervised = supervisor_token.is_some();
-    let config = Config::load(&config_path)?;
+    let mut config = Config::load(&config_path)?;
+    if let Some(path) = startup_config {
+        let startup = supervisor::load_startup_config(&path)?;
+        crate::config_runtime::preserve_startup(&mut config, &startup);
+    }
     if config.mode != RuntimeMode::Standalone || config.profile.capability_profile() != profile {
         return Err(anyhow!("stdio_worker_config_mismatch"));
     }
@@ -123,14 +128,13 @@ pub(crate) async fn run_stdio_worker(
     ));
     let initial_http_mcp = state.config.read().await.http_mcp.clone();
     let (http_updates, http_config) = watch::channel(initial_http_mcp);
+    *state.config_runtime.http_updates.write().await = Some(http_updates.clone());
     tokio::spawn(watch_live_config(
         state.clone(),
         supervised,
         Some(http_updates),
     ));
-    if hub_enabled {
-        tokio::spawn(hub::connect_loop(state.clone()));
-    }
+    tokio::spawn(hub::connect_loop(state.clone()));
     let mut local_task = tokio::spawn(listener.serve(state.clone()));
     let http_shutdown = CancellationToken::new();
     let mut http_task = tokio::spawn(http_server::run(
@@ -229,10 +233,11 @@ pub(crate) fn build_app_state_with_private_state(
         log_warn(format!("process history recovery failed: {error}"));
     }
     let skill_installs_root = private_state.skill_installs.clone();
-    let browser_runtime_cell = Arc::new(tokio::sync::OnceCell::new());
-    if browser_runtime.is_some() || config.toolsets.is_enabled(config::ToolNamespace::Browser) {
-        let _ = browser_runtime_cell.set(browser_runtime);
-    }
+    let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(
+        &config,
+        browser_runtime.is_some(),
+    ));
+    let browser_runtime_cell = Arc::new(crate::state::BrowserRuntimeSlot::new(browser_runtime));
     Ok(AppState {
         config_path,
         transport_agent_id: config.agent_id.clone(),
@@ -243,6 +248,7 @@ pub(crate) fn build_app_state_with_private_state(
         secret,
         process_history,
         browser_runtime: browser_runtime_cell,
+        config_runtime,
         runtime,
         started_at: chrono::Utc::now(),
         boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -298,7 +304,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         "local MCP ingress ready; transport=unix; path={}",
         listener.path().display()
     ));
-    let hub_task = hub_enabled.then(|| tokio::spawn(hub::connect_loop(state.clone())));
+    let hub_task = Some(tokio::spawn(hub::connect_loop(state.clone())));
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
     let mut local_task = tokio::spawn(listener.serve(state));
@@ -344,19 +350,10 @@ async fn wait_for_local_shutdown_signal() -> Result<()> {
         _ = terminate.recv() => Ok(()),
     }
 }
-fn config_matches_runtime(config: &Config, runtime: RuntimeModel) -> bool {
-    let mode = match runtime.transport {
-        crate::state::Transport::Hub => RuntimeMode::Hub,
-        crate::state::Transport::TunnelStdio => RuntimeMode::Standalone,
-        crate::state::Transport::LocalUnix => RuntimeMode::Local,
-    };
-    config.mode == mode && config.profile.capability_profile() == runtime.profile
-}
-
 async fn watch_live_config(
     state: AppState,
     supervised: bool,
-    http_updates: Option<watch::Sender<config::HttpMcpConfig>>,
+    _http_updates: Option<watch::Sender<config::HttpMcpConfig>>,
 ) {
     let mut last_modified = fs::metadata(&state.config_path)
         .and_then(|meta| meta.modified())
@@ -384,9 +381,6 @@ async fn watch_live_config(
             }
         };
         let live = state.config.read().await;
-        if let Some(updates) = http_updates.as_ref() {
-            let _ = updates.send(live.http_mcp.clone());
-        }
         log_info(format!(
             "live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteAllow={}; pathReadAllow={}; pathDeny={}; mcpServers={}; httpMcpEnabled={}",
             resolved.diagnostic(),
@@ -405,66 +399,12 @@ async fn watch_live_config(
 pub(crate) async fn reload_live_config_once(
     state: &AppState,
 ) -> Result<config::ResolvedMaxActiveProcesses> {
+    let _serial = state.config_runtime.apply_lock.lock().await;
     let candidate = Config::load(&state.config_path)?;
-    candidate.validate_policies()?;
-    let mut live = state.config.write().await;
-    if !config_matches_runtime(&candidate, state.runtime) {
-        return Err(anyhow!("runtime_selector_changed_restart_required"));
-    }
-    match state.runtime.transport {
-        crate::state::Transport::TunnelStdio => candidate.validate_standalone()?,
-        crate::state::Transport::LocalUnix => candidate.validate_local()?,
-        crate::state::Transport::Hub => candidate.validate_mcp_servers()?,
-    }
-    let restart_required_fields = config::restart_required_fields(&live, &candidate);
-    let tmux_was_enabled = live.toolsets.is_enabled(config::ToolNamespace::Tmux);
-    let tmux_is_enabled = candidate.toolsets.is_enabled(config::ToolNamespace::Tmux);
-    let skills_were_enabled = live.toolsets.is_enabled(config::ToolNamespace::Skills);
-    let skills_are_enabled = candidate.toolsets.is_enabled(config::ToolNamespace::Skills);
-    let live_room_enabled = live.toolsets.is_enabled(config::ToolNamespace::Room);
-    let candidate_room_enabled = candidate.toolsets.is_enabled(config::ToolNamespace::Room);
-    if candidate_room_enabled && !live_room_enabled {
-        room_repository::ensure_repository(&live)?;
-    }
-    let workspace_root = live.workspace_root.clone();
-    let resolved = apply_live_config_subset(&mut live, candidate);
-    drop(live);
-    if !skills_were_enabled && skills_are_enabled {
-        state.skill_installs.resume_queued(state).await?;
-    }
-    if !tmux_was_enabled && tmux_is_enabled {
-        if let Err(error) = tmux::ensure_default_session(&workspace_root).await {
-            log_warn(format!(
-                "default tmux session unavailable after toolset enable: {error}"
-            ));
-        }
-    }
-    if !restart_required_fields.is_empty() {
-        log_warn(format!(
-            "config changes require restart; fields={}",
-            restart_required_fields.join(",")
-        ));
-    }
-    Ok(resolved)
-}
-
-pub(crate) fn apply_live_config_subset(
-    live: &mut Config,
-    candidate: Config,
-) -> config::ResolvedMaxActiveProcesses {
+    crate::config_apply::validate(&candidate)?;
     let resolved = candidate.limits.max_active_processes.resolve();
-    live.policy = candidate.policy;
-    live.limits = candidate.limits;
-    live.shell = candidate.shell;
-    live.mcp_servers = candidate.mcp_servers;
-    live.toolsets = candidate.toolsets;
-    live.events = candidate.events;
-    live.http_mcp = candidate.http_mcp;
-    live.room.secret.apply_live_settings(&candidate.room.secret);
-    let account = live.email.account.take();
-    live.email = candidate.email;
-    live.email.account = account;
-    resolved
+    crate::config_runtime::apply_locked(state, candidate).await?;
+    Ok(resolved)
 }
 
 pub(crate) fn error_code(value: &str) -> String {

@@ -52,8 +52,10 @@ fn invalid_explicit_runtime_keeps_app_startup_fail_open() {
     .unwrap();
     assert!(state
         .browser_runtime
-        .get()
-        .and_then(Option::as_ref)
+        .inner
+        .try_lock()
+        .expect("uncontended browser slot")
+        .as_ref()
         .is_none());
     drop(state);
     let _ = fs::remove_dir_all(root);
@@ -313,8 +315,10 @@ async fn builder_accepts_pre_resolved_browser_context_without_discovery() {
     assert_eq!(
         state
             .browser_runtime
-            .get()
-            .and_then(Option::as_ref)
+            .inner
+            .try_lock()
+            .expect("uncontended browser slot")
+            .as_ref()
             .unwrap()
             .descriptor
             .app_version,
@@ -399,7 +403,8 @@ fn command_test_state(
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,
             process_history,
-            browser_runtime: Arc::new(tokio::sync::OnceCell::new()),
+            browser_runtime: Arc::new(crate::state::BrowserRuntimeSlot::default()),
+            config_runtime: Arc::new(crate::config_runtime::ConfigRuntime::default()),
             runtime: RuntimeModel::hub(profile),
             started_at: chrono::Utc::now(),
             boot_generation: "testboot0001".to_string(),
@@ -1137,7 +1142,6 @@ async fn wp2_hub_live_reload_preserves_restart_fields() -> anyhow::Result<()> {
     initial.workspace_root = live_workspace.clone();
     initial.hub.agent_secret = "hub-secret".to_string();
     initial.policy.path.write = vec![live_write_root.to_path_buf()];
-    let live_hub_url = initial.hub.url.clone();
     *state.config.write().await = initial.clone();
 
     let mut candidate = initial;
@@ -1152,7 +1156,7 @@ async fn wp2_hub_live_reload_preserves_restart_fields() -> anyhow::Result<()> {
 
     let live = state.config.read().await.clone();
     assert_eq!(live.mode, RuntimeMode::Hub);
-    assert_eq!(live.hub.url, live_hub_url);
+    assert_eq!(live.hub.url, candidate.hub.url);
     assert_eq!(live.workspace_root, live_workspace);
     assert_eq!(live.policy.path, candidate_path_policy);
     assert!(live
@@ -1324,10 +1328,10 @@ async fn standalone_live_reload_bootstraps_room_repository_before_maintenance_su
     reload_live_config_once(&state).await?;
 
     let live = state.config.read().await.clone();
-    assert_eq!(live.room, initial.room);
-    assert!(!candidate_room_root.exists());
+    assert_eq!(live.room.repository_root, candidate.room.repository_root);
+    assert!(!live_room_root.exists());
     let room_root = room_repository::repository_root(&live);
-    assert_eq!(room_root, live_room_root);
+    assert_eq!(room_root, candidate_room_root);
     assert!(room_root.join(".git").is_dir());
     for relative in room_repository::scaffold_paths() {
         assert!(

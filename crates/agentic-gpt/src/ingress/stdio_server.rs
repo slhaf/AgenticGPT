@@ -63,6 +63,7 @@ pub(crate) async fn serve_stdio(state: AppState) -> Result<()> {
 pub(crate) struct AgentMcpServer {
     state: AppState,
     ingress: RequestIngress,
+    http_owner: Option<Arc<crate::http_server::HttpOwner>>,
     browser_repl_results: Arc<Mutex<HashMap<String, CallToolResult>>>,
 }
 
@@ -162,8 +163,18 @@ impl AgentMcpServer {
         Self {
             state,
             ingress,
+            http_owner: None,
             browser_repl_results: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) fn with_http_owner(
+        state: AppState,
+        owner: Arc<crate::http_server::HttpOwner>,
+    ) -> Self {
+        let mut server = Self::with_ingress(state, RequestIngress::Http);
+        server.http_owner = Some(owner);
+        server
     }
 
     async fn current_tools(&self) -> Vec<Tool> {
@@ -223,6 +234,15 @@ impl AgentMcpServer {
         &self,
         request: CallToolRequestParams,
     ) -> Result<(Value, Option<CallToolResult>), ErrorData> {
+        let _http_lease = if let Some(owner) = self.http_owner.as_ref() {
+            Some(
+                owner
+                    .begin()
+                    .ok_or_else(|| ErrorData::internal_error("http_mcp_endpoint_retired", None))?,
+            )
+        } else {
+            None
+        };
         let name = request.name.to_string();
         if !self.tool_is_available(&name).await {
             return Err(ErrorData::new(
@@ -248,7 +268,7 @@ impl AgentMcpServer {
         let report_request_id = task_id("req");
         let started_at = Utc::now();
         let terminal_tracker = Arc::new(HumanTerminalTracker::default());
-        let reported_arguments = if name.starts_with("room.secret.") {
+        let reported_arguments = if name.starts_with("room.secret.") || name == "config.update" {
             json!({"redacted": true})
         } else if name == "browser.repl" {
             browser_report_arguments(&arguments)
@@ -286,7 +306,11 @@ impl AgentMcpServer {
                     "failed",
                     started_at,
                     None,
-                    Some(error.to_string()),
+                    Some(if name.starts_with("config.") {
+                        bounded_error_code(&error.to_string())
+                    } else {
+                        error.to_string()
+                    }),
                     None,
                     None,
                     None,
@@ -329,7 +353,13 @@ impl AgentMcpServer {
                     .get("isError")
                     .and_then(Value::as_bool)
                     .unwrap_or(false));
-        let reason = if is_browser_repl {
+        let reason = if name.starts_with("config.") {
+            value
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+                .map(bounded_error_code)
+        } else if is_browser_repl {
             browser_error_code_from_value(&value)
         } else {
             value
@@ -384,7 +414,9 @@ impl AgentMcpServer {
                 "completed"
             },
             started_at,
-            if name == "browser.repl" || name.starts_with("room.secret.") {
+            if name.starts_with("config.") {
+                Some(config_report_result(&value))
+            } else if name == "browser.repl" || name.starts_with("room.secret.") {
                 None
             } else {
                 Some(value.clone())
@@ -453,6 +485,36 @@ impl AgentMcpServer {
         let request_id = request_id();
         let mut file_read_result = None;
         let result = match name {
+            "config.manual" => {
+                dispatch(
+                    self,
+                    HubCommand::ConfigManual {
+                        request_id,
+                        payload: from_value(arguments)?,
+                    },
+                )
+                .await
+            }
+            "config.get" => {
+                dispatch(
+                    self,
+                    HubCommand::ConfigGet {
+                        request_id,
+                        payload: from_value(arguments)?,
+                    },
+                )
+                .await
+            }
+            "config.update" => {
+                dispatch(
+                    self,
+                    HubCommand::ConfigUpdate {
+                        request_id,
+                        payload: from_value(arguments)?,
+                    },
+                )
+                .await
+            }
             "agent.info" => {
                 let _: EmptyArgs = from_value(arguments)?;
                 Ok(crate::agent_info::collect(&self.state).await)
@@ -1419,6 +1481,10 @@ impl AgentMcpServer {
         Ok(())
     }
     async fn browser_runtime(&self) -> Option<Arc<crate::state::BrowserRuntimeContext>> {
+        // Configuration application holds this same slot until it publishes the
+        // matching config. Lock it first so delayed discovery cannot win a race
+        // against replacement with a runtime built from newer settings.
+        let mut slot = self.state.browser_runtime.inner.lock().await;
         let config = self.state.config.read().await.clone();
         if !config
             .toolsets
@@ -1426,13 +1492,15 @@ impl AgentMcpServer {
         {
             return None;
         }
-        self.state
-            .browser_runtime
-            .get_or_init(|| async {
-                crate::browser_discovery::resolve_browser_runtime(&config).await
-            })
-            .await
-            .clone()
+        if let Some(runtime) = slot.as_ref() {
+            return Some(runtime.clone());
+        }
+        let runtime = crate::browser_discovery::resolve_browser_runtime(&config).await;
+        if let Some(runtime) = &runtime {
+            *slot = Some(runtime.clone());
+            self.state.config_runtime.browser_ready().await;
+        }
+        runtime
     }
 
     async fn dispatch_browser_manual(&self, arguments: Value) -> Result<Value> {
@@ -2464,6 +2532,15 @@ fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<()> {
         return Err(anyhow::anyhow!("unknown tool argument: {unknown}"));
     }
     match name {
+        "config.manual" => {
+            let _: agentic_gpt_protocol::ConfigManualRequest = from_value(arguments.clone())?;
+        }
+        "config.get" => {
+            let _: agentic_gpt_protocol::ConfigGetRequest = from_value(arguments.clone())?;
+        }
+        "config.update" => {
+            let _: agentic_gpt_protocol::ConfigUpdateRequest = from_value(arguments.clone())?;
+        }
         "file.read" => {
             let args: FileReadArgs = from_value(arguments.clone())?;
             validate_file_read_args(&args)?;
@@ -2996,3 +3073,25 @@ fn remove_empty_warnings(value: &mut Value) {
 #[cfg(test)]
 #[path = "stdio_server_tests.rs"]
 mod tests;
+
+// Reporting is a shared observation surface. Never put configuration values,
+// manual text, previews or field outcomes there, even in full reporting mode.
+fn config_report_result(value: &Value) -> Value {
+    let mut result = Map::new();
+    for field in ["saved", "dryRun"] {
+        if let Some(value) = value.get(field).and_then(Value::as_bool) {
+            result.insert(field.to_owned(), Value::Bool(value));
+        }
+    }
+    if let Some(code) = value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+    {
+        result.insert(
+            "error".to_owned(),
+            json!({"code": bounded_error_code(code)}),
+        );
+    }
+    Value::Object(result)
+}

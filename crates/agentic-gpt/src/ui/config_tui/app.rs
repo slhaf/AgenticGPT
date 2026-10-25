@@ -2322,6 +2322,22 @@ impl ConfigTuiApp {
         let editor = item.editor;
         let field = item.field;
         let item_target = item.target;
+        if let Some(field @ SetupField::Catalog(_)) = field {
+            if editor == ReviewEditorKind::Choice {
+                let mut draft = self
+                    .session()
+                    .optional_draft(crate::config_templates::OptionalSection::Additional);
+                pages::toggle_optional_field(&mut draft, field);
+                match self.session_mut().save_optional_section_for_review(draft) {
+                    Ok(()) => {
+                        self.field_errors.clear();
+                        self.refresh_review();
+                    }
+                    Err(errors) => self.record_errors(errors),
+                }
+                return;
+            }
+        }
 
         match editor {
             ReviewEditorKind::Text | ReviewEditorKind::Secret => {
@@ -2557,32 +2573,36 @@ impl ConfigTuiApp {
             self.record_errors(errors);
             return;
         }
-        let session = self.session.take().expect("session was checked above");
-        let outcome = match session.into_wizard_outcome() {
+        let outcome = match self
+            .session
+            .as_ref()
+            .expect("session was checked above")
+            .prepare_wizard_outcome()
+        {
             Ok(outcome) => outcome,
             Err(errors) => {
-                self.route_validation_errors_after_session_loss(errors);
+                self.record_errors(errors);
                 return;
             }
         };
         match self.committer.commit(&config_path, outcome) {
             Ok(summary) => {
+                self.session.take();
                 self.state.committed_summary = Some(summary);
                 self.state.finished = true;
                 self.review = None;
                 self.leave_review_preview();
             }
+            Err(error) if error.to_string().starts_with("config_edit_") => {
+                self.leave_review_preview();
+                self.field_errors
+                    .insert(SetupField::Mode, "config_edit_validation_failed".to_owned());
+                self.navigation.go_to(ConfigPage::Basic);
+                self.state.page = ConfigPage::Basic;
+                self.state.focus = 0;
+            }
             Err(error) => self.set_system_error(&error),
         }
-    }
-
-    fn route_validation_errors_after_session_loss(&mut self, errors: ValidationErrors) {
-        self.field_errors.clear();
-        if let Some(error) = errors.first() {
-            self.field_errors
-                .insert(error.field, error.code.to_string());
-        }
-        self.set_system_error_code("config_init_build_invalid");
     }
 
     fn set_system_error(&mut self, error: &anyhow::Error) {
@@ -2642,6 +2662,7 @@ fn numeric_field(field: SetupField) -> bool {
 
 fn optional_section_for_field(field: SetupField) -> crate::config_templates::OptionalSection {
     match field {
+        SetupField::Catalog(_) => crate::config_templates::OptionalSection::Additional,
         SetupField::DisplayName => crate::config_templates::OptionalSection::Identity,
         SetupField::WorkspaceRoot
         | SetupField::PathDefaultAction

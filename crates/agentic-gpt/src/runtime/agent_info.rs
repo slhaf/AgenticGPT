@@ -17,6 +17,14 @@ const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) async fn collect(state: &AppState) -> Value {
     let generated_at = Utc::now();
     let config = state.config.read().await.clone();
+    let mut runtime = state.runtime;
+    runtime.hub_mode = if runtime.transport == Transport::Hub {
+        HubMode::CommandCapable
+    } else if config.auxiliary_hub_enabled() {
+        HubMode::ReportingOnly
+    } else {
+        HubMode::Disabled
+    };
     let active = process::current_processes(state).await;
     let active_count = active.len();
     let resolved_limit = config.limits.max_active_processes.resolve();
@@ -95,7 +103,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "version": env!("CARGO_PKG_VERSION"),
             "transport": state.runtime.transport.label(),
             "profile": state.runtime.profile.label(),
-            "hubMode": state.runtime.hub_mode.label(),
+            "hubMode": runtime.hub_mode.label(),
             "startedAt": state.started_at,
             "supervised": state.supervised,
         },
@@ -146,7 +154,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "hubReporting": {
                 "enabled": state.runtime.transport == Transport::Hub || config.hub_reporting_enabled(),
                 "status": if state.runtime.transport == Transport::Hub || config.hub_reporting_enabled() {
-                    reporting_status(state.runtime, hub_sender, reporting_sender)
+                    reporting_status(runtime, hub_sender, reporting_sender)
                 } else { "disabled" },
             },
             "localMcp": local_mcp,
@@ -349,20 +357,22 @@ fn invalid_config_health(modified_at: Option<String>) -> ConfigHealth {
 }
 
 fn live_subset(config: &Config) -> Value {
-    json!({
-        "policy": config.policy,
-        "limits": config.limits,
-        "mcpServers": config.mcp_servers,
-        "toolsets": config.toolsets,
-        "httpMcp": config.http_mcp,
-        "shell": config.shell,
-        "roomSecret": {
-            "getPolicy": config.room.secret.get_policy,
-            "upsertPolicy": config.room.secret.upsert_policy,
-            "deletePolicy": config.room.secret.delete_policy,
-            "syncWaitTimeoutMs": config.room.secret.sync_wait_timeout_ms,
-        },
-    })
+    let mut value = serde_json::to_value(config).unwrap_or(Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        for key in ["mode", "profile", "agentId", "workspaceRoot", "tunnel"] {
+            object.remove(key);
+        }
+        if config.mode == crate::config::RuntimeMode::Standalone {
+            object.insert(
+                "hubReporting".into(),
+                config
+                    .tunnel
+                    .as_ref()
+                    .map_or(Value::Null, |t| json!(t.hub_reporting)),
+            );
+        }
+    }
+    value
 }
 
 fn live_subset_matches(effective: &Config, disk: &Config) -> bool {
@@ -397,7 +407,8 @@ mod tests {
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,
             process_history,
-            browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
+            browser_runtime: std::sync::Arc::new(crate::state::BrowserRuntimeSlot::default()),
+            config_runtime: std::sync::Arc::new(crate::config_runtime::ConfigRuntime::default()),
             runtime: crate::state::RuntimeModel::tunnel(profile, false),
             started_at: Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -481,12 +492,7 @@ mod tests {
         *app.hub_sender.lock().await = Some(tx);
         let value = collect(&app).await;
         assert_eq!(value["config"]["diskStatus"], "valid");
-        assert_eq!(value["config"]["liveSubsetMatchesDisk"], true);
-        assert!(value["config"]["restartRequiredFields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|field| field == "displayName"));
+        assert_eq!(value["config"]["liveSubsetMatchesDisk"], false);
         assert!(value["config"]["restartRequiredFields"]
             .as_array()
             .unwrap()
@@ -540,10 +546,6 @@ mod tests {
             .restart_required_fields
             .iter()
             .any(|field| field == "workspaceRoot"));
-        assert!(health
-            .restart_required_fields
-            .iter()
-            .any(|field| field == "browser"));
         assert!(health
             .issues
             .iter()

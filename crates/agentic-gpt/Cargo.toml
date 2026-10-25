@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 agentic-apply-patch = { path = "../agentic-apply-patch" }
-agentic-gpt-protocol.workspace = true
+agentic-gpt-protocol = { workspace = true, features = ["schema"] }
 anyhow.workspace = true
 axum = "0.7"
 base64 = "0.22"
@@ -43,6 +43,7 @@ pgp = { version = "0.20.0", default-features = false }
 regex = "=1.13.1"
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

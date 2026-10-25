@@ -215,6 +215,9 @@ pub(crate) struct LedgerRecord {
     pub(crate) status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) agent_id: Option<String>,
+    /// Hub authority that accepted this command; absent legacy evidence is never replayed remotely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hub_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) command: Option<StoredCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,7 +269,24 @@ pub(crate) fn latest_records() -> Result<HashMap<String, LedgerRecord>> {
     with_ledger_lock(scan_locked)
 }
 
+#[cfg(test)]
 pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<AcceptOutcome> {
+    accept_with_target(envelope, agent_id, None)
+}
+
+pub(crate) fn accept_for_target(
+    envelope: &HubCommandEnvelope,
+    agent_id: &str,
+    hub_target: &str,
+) -> Result<AcceptOutcome> {
+    accept_with_target(envelope, agent_id, Some(hub_target))
+}
+
+fn accept_with_target(
+    envelope: &HubCommandEnvelope,
+    agent_id: &str,
+    hub_target: Option<&str>,
+) -> Result<AcceptOutcome> {
     if envelope.command.is_room_secret() {
         return Err(anyhow!("secret_persistence_forbidden"));
     }
@@ -287,6 +307,7 @@ pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<Ac
                     command_hash: envelope.command_hash.clone(),
                     status: "accepted".to_string(),
                     agent_id: Some(agent_id.to_string()),
+                    hub_target: hub_target.map(str::to_owned),
                     command: Some(StoredCommand::Current(envelope.command.clone())),
                     result: None,
                     reason: None,
@@ -295,6 +316,14 @@ pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<Ac
             )?;
             return Ok(AcceptOutcome::FirstAccepted);
         };
+
+        if existing.hub_target.as_deref() != hub_target {
+            return Ok(if existing.hub_target.is_none() {
+                AcceptOutcome::LegacyUnowned
+            } else {
+                AcceptOutcome::OwnerMismatch
+            });
+        }
 
         if existing.request_id != envelope.request_id
             || existing.command_hash != envelope.command_hash
@@ -621,6 +650,7 @@ fn append_conflict_locked(
             command_hash: details.command_hash.to_string(),
             status: "conflict".to_string(),
             agent_id: Some(details.agent_id.to_string()),
+            hub_target: canonical.hub_target.clone(),
             command: details.command,
             result: details.result,
             reason: Some(details.reason.to_string()),
@@ -689,6 +719,7 @@ fn compact_locked(path: &Path) -> Result<()> {
                 record.request_id.clone(),
                 record.command_hash.clone(),
                 agent_id.clone(),
+                record.hub_target.clone(),
             )
         })
     };
@@ -1083,6 +1114,7 @@ mod tests {
                 command_hash: legacy.command_hash.clone(),
                 status: "accepted".to_string(),
                 agent_id: None,
+                hub_target: None,
                 command: Some(StoredCommand::Current(legacy.command.clone())),
                 result: None,
                 reason: None,
@@ -1109,6 +1141,7 @@ mod tests {
                 command_hash: adopted.command_hash.clone(),
                 status: "completed".to_string(),
                 agent_id: None,
+                hub_target: None,
                 command: Some(StoredCommand::Current(adopted_command)),
                 result: Some(serde_json::json!({"legacy": true})),
                 reason: None,
@@ -1169,6 +1202,7 @@ mod tests {
                 command_hash: hash.to_string(),
                 status: status.to_string(),
                 agent_id: owner.map(str::to_string),
+                hub_target: None,
                 command: Some(StoredCommand::Current(command.clone())),
                 result,
                 reason: None,
@@ -1260,6 +1294,7 @@ mod tests {
                 command_hash: "hash-conflict".to_string(),
                 status: "conflict".to_string(),
                 agent_id: Some("agent-a".to_string()),
+                hub_target: None,
                 command: Some(StoredCommand::Current(command.clone())),
                 result: Some(serde_json::json!({"conflict": true})),
                 reason: Some("preserve-conflict".to_string()),

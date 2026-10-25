@@ -404,11 +404,19 @@ pub(crate) async fn request_agent(
     command: HubCommand,
     timeout_secs: u64,
 ) -> std::result::Result<Value, RequestError> {
+    let timeout_secs = command_timeout_secs(&command, timeout_secs);
     let (target, admission) = lifecycle::resolve_command_target(state, agent_id)
         .await
         .map_err(RequestError::admission)?;
     let pending = state.dispatch.pending.lock().await;
     request_target(state, target, admission, pending, command, timeout_secs).await
+}
+
+fn command_timeout_secs(command: &HubCommand, default: u64) -> u64 {
+    match command {
+        HubCommand::ConfigUpdate { .. } => 180,
+        _ => default,
+    }
 }
 
 pub(crate) async fn request_room(

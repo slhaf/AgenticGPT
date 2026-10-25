@@ -157,6 +157,7 @@ pub struct EventMarkResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EventPanel {
     pub current: String,

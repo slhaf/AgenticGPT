@@ -20,6 +20,7 @@ pub(crate) fn run_config_tui(
     seed: SetupSeed,
     language: UiLanguage,
 ) -> Result<crate::config_templates::InitSummary> {
+    crate::config_catalog::entries()?;
     let session = SetupSession::new(seed, language, config_path.to_path_buf());
     let app = ConfigTuiApp::new(session);
     match crate::tui::TuiApp::config(app, language).run()? {

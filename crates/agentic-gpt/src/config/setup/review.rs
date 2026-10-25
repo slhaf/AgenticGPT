@@ -342,6 +342,7 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
         OptionalSection::Events,
+        OptionalSection::Additional,
     ]
     .into_iter()
     .map(|section| optional_group(session, section))
@@ -989,6 +990,31 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::Choice,
             ),
         ],
+        OptionalSectionDraft::Additional(value) => value
+            .values
+            .into_iter()
+            .map(|(index, value)| {
+                let entry = super::model::additional_entries().into_iter().nth(index);
+                let value = if entry.as_ref().is_some_and(|entry| entry.sensitive) {
+                    "[REDACTED]".to_owned()
+                } else {
+                    value
+                };
+                let editor = if entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.kind.contains("array"))
+                {
+                    ReviewEditorKind::List
+                } else if entry.as_ref().is_some_and(|entry| {
+                    matches!(entry.kind.as_str(), "boolean" | "object") || !entry.choices.is_empty()
+                }) {
+                    ReviewEditorKind::Choice
+                } else {
+                    ReviewEditorKind::Text
+                };
+                ReviewItem::field(SetupField::Catalog(index), "additional", value, editor)
+            })
+            .collect(),
         OptionalSectionDraft::Events(value) => {
             let mut items = vec![ReviewItem::field(
                 SetupField::EventsLowTtlSeconds,

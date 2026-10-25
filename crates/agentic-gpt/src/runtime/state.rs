@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak};
 
 use agentic_gpt_protocol::{AgentMessage, AgentRole};
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, oneshot, Mutex, OnceCell, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use crate::{browser_manager::BrowserRuntimeManager, browser_runtime::BrowserRuntimeDescriptor};
 use crate::{config::Config, confirmation, process, skills};
@@ -172,6 +172,19 @@ impl BrowserRuntimeContext {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct BrowserRuntimeSlot {
+    pub(crate) inner: Mutex<Option<Arc<BrowserRuntimeContext>>>,
+}
+
+impl BrowserRuntimeSlot {
+    pub(crate) fn new(initial: Option<Arc<BrowserRuntimeContext>>) -> Self {
+        Self {
+            inner: Mutex::new(initial),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     /// Immutable connection identity, never a local state owner.
@@ -184,7 +197,8 @@ pub(crate) struct AppState {
     pub(crate) secret: Arc<crate::secret::SecretService>,
     #[allow(dead_code)]
     pub(crate) process_history: std::sync::Arc<crate::process_history::ProcessHistoryStore>,
-    pub(crate) browser_runtime: Arc<OnceCell<Option<Arc<BrowserRuntimeContext>>>>,
+    pub(crate) browser_runtime: Arc<BrowserRuntimeSlot>,
+    pub(crate) config_runtime: Arc<crate::config_runtime::ConfigRuntime>,
     pub(crate) runtime: RuntimeModel,
     pub(crate) started_at: DateTime<Utc>,
     pub(crate) boot_generation: String,

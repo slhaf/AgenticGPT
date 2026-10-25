@@ -22,8 +22,16 @@ mod cli;
 mod cli_i18n;
 #[path = "config/config.rs"]
 mod config;
+#[path = "config/config_api.rs"]
+mod config_api;
+#[path = "config/config_apply.rs"]
+mod config_apply;
+#[path = "config/config_catalog.rs"]
+mod config_catalog;
 #[path = "config/config_cli.rs"]
 mod config_cli;
+#[path = "runtime/config_runtime.rs"]
+mod config_runtime;
 #[path = "config/setup/mod.rs"]
 mod config_setup;
 #[path = "config/config_templates.rs"]

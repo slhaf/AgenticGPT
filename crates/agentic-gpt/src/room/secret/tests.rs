@@ -145,10 +145,10 @@ else:sys.exit(2)
 "#;
 
 #[tokio::test]
-async fn secret_disk_reload_updates_policy_and_wait_without_switching_backend() {
+async fn secret_disk_reload_updates_policy_wait_and_rejects_foreign_backend_identity() {
     // Tiers ④/⑤: protect disclosure/write authorization and waiting behavior
-    // through disk reload and the native subprocess owner, including a pending
-    // backend change. Helper tests cannot detect an omitted reload consumer.
+    // through disk reload and the native subprocess owner. A backend switch must
+    // not disclose the old vault when the provider still reports its old identity.
     let fixture = Fixture::new();
     let result = AssertUnwindSafe(async {
         {
@@ -221,16 +221,24 @@ async fn secret_disk_reload_updates_policy_and_wait_without_switching_backend() 
         crate::startup::reload_live_config_once(&fixture.state)
             .await
             .unwrap();
+        let live = fixture.state.config.read().await.clone();
+        let owner = fixture
+            .state
+            .secret
+            .activate(&live.room.secret)
+            .unwrap_or_else(|_| panic!("new backend must activate after disk reload"));
+        *owner.cli.binary.write() = fixture.owner.cli.binary.read().clone();
         let disclosed = fixture
             .call(
                 "room.secret.get",
                 json!({"site":"Example","account":"Alice","type":"password"}),
             )
             .await;
-        assert_eq!(disclosed["value"], "old-test-value");
+        assert_eq!(disclosed["error"]["code"], "secret_authentication_failed");
+        assert!(!disclosed.to_string().contains("old-test-value"));
         let health = crate::agent_info::collect(&fixture.state).await;
         assert_eq!(health["config"]["liveSubsetMatchesDisk"], true);
-        assert_eq!(health["config"]["restartRequiredFields"], json!(["room"]));
+        assert_eq!(health["config"]["restartRequiredFields"], json!([]));
     })
     .catch_unwind()
     .await;
@@ -384,6 +392,62 @@ async fn secret_shutdown_reaps_sync_subprocess_after_query_returns() {
     .catch_unwind()
     .await;
     fixture.cleanup().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+// Tier ⑤: shutdown alone does not prove that a stable service can release its
+// account lease and reopen the same provider after configuration publication.
+#[tokio::test]
+async fn secret_reconfigure_reaps_old_sync_releases_owner_and_reopens_same_account() {
+    let Fixture { root, state, owner } = Fixture::new();
+    let provider_root = owner.cli.root.clone();
+    let binary = owner.cli.binary.read().clone();
+    // The fixture must not retain the very owner whose lease is under test.
+    drop(owner);
+    let result = AssertUnwindSafe(async {
+        let response = dispatch(&state, "room.secret.list", json!({})).await;
+        assert_eq!(response["stale"], true);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !provider_root.join("sync-pid").exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid: i32 = std::fs::read_to_string(provider_root.join("sync-pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let guard = state.secret.prepare_reconfigure().await.unwrap();
+        #[cfg(unix)]
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        let lease = crate::instance_lock::InstanceLock::acquire(
+            &provider_root.join("vault"),
+            ".owner.lock",
+            "secret",
+        )
+        .expect("reconfiguration must release the old account lease");
+        drop(lease);
+        assert!(dispatch(&state, "room.secret.list", json!({})).await["error"].is_object());
+        // In production the caller publishes its replacement Config here.
+        drop(guard);
+        let config = state.config.read().await.clone();
+        let owner = state
+            .secret
+            .activate(&config.room.secret)
+            .unwrap_or_else(|_| panic!("same account must activate after reconfiguration"));
+        *owner.cli.binary.write() = binary;
+        std::fs::write(provider_root.join("release-sync"), "").unwrap();
+        let response = dispatch(&state, "room.secret.list", json!({})).await;
+        assert!(response["items"].is_array(), "{response}");
+        assert!(response.get("error").is_none(), "{response}");
+    })
+    .catch_unwind()
+    .await;
+    state.secret.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }

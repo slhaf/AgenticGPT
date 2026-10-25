@@ -96,6 +96,17 @@ pub(super) async fn call_app_tool(
         .unwrap_or_else(|| json!({}));
     let result = match name {
         "agent.list" => server.list_agents().await,
+        "config.manual" => {
+            server
+                .config_manual(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "config.get" => server.config_get(Parameters(decode_args(arguments)?)).await,
+        "config.update" => {
+            server
+                .config_update(Parameters(decode_args(arguments)?))
+                .await
+        }
         "event.list" => server.event_list(Parameters(decode_args(arguments)?)).await,
         "event.get" => server.event_get(Parameters(decode_args(arguments)?)).await,
         "event.mark" => server.event_mark(Parameters(decode_args(arguments)?)).await,

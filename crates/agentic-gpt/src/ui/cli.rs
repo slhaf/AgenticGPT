@@ -31,8 +31,15 @@ pub(crate) async fn run() -> Result<()> {
             config,
             profile,
             supervisor_token,
+            startup_config,
         } => {
-            startup::run_stdio_worker(config, profile.capability_profile(), supervisor_token).await
+            startup::run_stdio_worker(
+                config,
+                profile.capability_profile(),
+                supervisor_token,
+                startup_config,
+            )
+            .await
         }
         Commands::Config { config, command } => {
             config_cli::handle_config(config_path(config), command, language).await
@@ -93,6 +100,8 @@ pub(crate) enum Commands {
         profile: WorkerProfile,
         #[arg(long, hide = true)]
         supervisor_token: Option<String>,
+        #[arg(long, hide = true)]
+        startup_config: Option<PathBuf>,
     },
     Config {
         #[arg(long, global = true)]

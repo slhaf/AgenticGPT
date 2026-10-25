@@ -81,11 +81,28 @@ struct SyncJob {
 }
 pub(crate) struct SecretService {
     root: PathBuf,
+    admission: Arc<tokio::sync::RwLock<()>>,
+    reconfiguration: Mutex<()>,
     owner: parking_lot::Mutex<Option<Arc<Owner>>>,
     job: Mutex<Option<SyncJob>>,
     status: parking_lot::Mutex<Value>,
     stopped: Arc<std::sync::atomic::AtomicBool>,
-    stopping: tokio_util::sync::CancellationToken,
+    stopping: parking_lot::Mutex<tokio_util::sync::CancellationToken>,
+}
+
+/// Keeps new calls excluded until the caller publishes the new configuration.
+pub(crate) struct SecretReconfigureGuard<'a> {
+    service: &'a SecretService,
+    _admission: tokio::sync::OwnedRwLockWriteGuard<()>,
+    _reconfiguration: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl Drop for SecretReconfigureGuard<'_> {
+    fn drop(&mut self) {
+        self.service
+            .stopped
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 impl SecretService {
     pub(crate) fn open(paths: &PrivateStatePaths) -> anyhow::Result<Arc<Self>> {
@@ -93,11 +110,13 @@ impl SecretService {
         cli::private_dir(&root)?;
         Ok(Arc::new(Self {
             root,
+            admission: Arc::new(tokio::sync::RwLock::new(())),
+            reconfiguration: Mutex::new(()),
             owner: parking_lot::Mutex::new(None),
             job: Mutex::new(None),
             status: parking_lot::Mutex::new(json!({"sync":{"status":null,"lastTriggeredAt":null}})),
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            stopping: tokio_util::sync::CancellationToken::new(),
+            stopping: parking_lot::Mutex::new(tokio_util::sync::CancellationToken::new()),
         }))
     }
     pub(crate) fn info(&self) -> Value {
@@ -171,6 +190,7 @@ impl SecretService {
         let service = self.clone();
         let event_store = state.event_store.clone();
         let ttl = state.config.read().await.events.low_ttl_seconds;
+        let stopping = self.stopping.lock().clone();
         let handle = tokio::spawn(async move {
             let synchronize = async {
                 let _lease = owner.mutation.lock().await;
@@ -184,7 +204,7 @@ impl SecretService {
                 }
                 Ok(())
             };
-            let result: Result<()> = tokio::select! { result=synchronize=>result, _=service.stopping.cancelled()=>Err(Error::Unavailable) };
+            let result: Result<()> = tokio::select! { result=synchronize=>result, _=stopping.cancelled()=>Err(Error::Unavailable) };
             service.status.lock()["sync"]["status"] = json!(if result.is_ok() {
                 "succeeded"
             } else {
@@ -213,19 +233,56 @@ impl SecretService {
         receiver
     }
     pub(crate) async fn shutdown(&self) {
+        let _reconfiguration = self.reconfiguration.lock().await;
         if self.stopped.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
-        self.stopping.cancel();
+        self.stop_commands().await;
+        let _admission = self.admission.clone().write_owned().await;
+        self.release_owner().await;
+    }
+
+    pub(crate) async fn prepare_reconfigure(&self) -> anyhow::Result<SecretReconfigureGuard<'_>> {
+        let reconfiguration = self
+            .reconfiguration
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("secret_reconfigure_busy"))?;
+        // A busy request must leave the current owner usable. Do not cancel its
+        // CLI until exclusive admission proves all request workflows finished.
+        let admission = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.admission.clone().write_owned(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("secret_reconfigure_busy"))?;
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.stop_commands().await;
+        self.release_owner().await;
+        *self.stopping.lock() = tokio_util::sync::CancellationToken::new();
+        *self.status.lock() = json!({"sync":{"status":null,"lastTriggeredAt":null}});
+        Ok(SecretReconfigureGuard {
+            service: self,
+            _admission: admission,
+            _reconfiguration: reconfiguration,
+        })
+    }
+
+    async fn stop_commands(&self) {
+        self.stopping.lock().cancel();
         let owner = self.owner.lock().clone();
         if let Some(owner) = owner {
             owner.cli.stop().await;
-            // A detached write still owns its guards until it observes CLI
-            // cancellation. Wait for that whole workflow before final cleanup.
-            let _write = owner.writes.lock().await;
-            if let Some(job) = self.job.lock().await.take() {
-                let _ = job.handle.await;
-            }
+        }
+    }
+
+    async fn release_owner(&self) {
+        // Admission is exclusive: no request can retain an owner or start a job.
+        if let Some(job) = self.job.lock().await.take() {
+            let _ = job.handle.await;
+        }
+        let owner = self.owner.lock().take();
+        if let Some(owner) = owner {
             let session = owner.session.lock().await.take();
             let mut env = BTreeMap::new();
             if let Some(session) = session {
@@ -436,6 +493,17 @@ async fn confirm(
 }
 
 pub(crate) async fn dispatch(state: &AppState, operation: &str, args: Value) -> Value {
+    let admission = match state.secret.admission.clone().try_read_owned() {
+        Ok(guard) => guard,
+        Err(_) => return Error::Unavailable.value(),
+    };
+    if state
+        .secret
+        .stopped
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Error::Unavailable.value();
+    }
     let config = state.config.read().await.clone();
     if !config.toolsets.is_enabled(ToolNamespace::Room) {
         return json!({"error":{"code":"tool_disabled","message":"Room toolset is disabled"}});
@@ -447,18 +515,24 @@ pub(crate) async fn dispatch(state: &AppState, operation: &str, args: Value) -> 
     if secret.server_url.is_empty() || secret.account.is_empty() {
         return Error::NotConfigured.value();
     }
-    if matches!(operation, "room.secret.upsert" | "room.secret.delete") {
-        let state = state.clone();
-        let operation = operation.to_owned();
-        // Own the complete transaction, including both serialization leases.
-        // Losing a caller must not let another write race a still-running CLI.
-        return tokio::spawn(async move {
-            dispatch_inner(&state, &config, &operation, args, true).await
-        })
-        .await
-        .unwrap_or_else(|_| Error::WriteUnknown.value());
-    }
-    dispatch_inner(state, &config, operation, args, false).await
+    let write = matches!(operation, "room.secret.upsert" | "room.secret.delete");
+    let state = state.clone();
+    let operation = operation.to_owned();
+    // Reads also own admission until their CLI children have been reaped, even
+    // when the ingress stops waiting for the result.
+    tokio::spawn(async move {
+        let _admission = admission;
+        dispatch_inner(&state, &config, &operation, args, write).await
+    })
+    .await
+    .unwrap_or_else(|_| {
+        if write {
+            Error::WriteUnknown
+        } else {
+            Error::Unavailable
+        }
+        .value()
+    })
 }
 
 async fn dispatch_inner(

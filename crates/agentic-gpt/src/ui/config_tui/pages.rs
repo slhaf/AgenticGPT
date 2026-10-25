@@ -40,9 +40,19 @@ fn t(language: UiLanguage, en: &'static str, zh: &'static str) -> &'static str {
     }
 }
 
+fn editor_title(session: &SetupSession, language: UiLanguage) -> &'static str {
+    if session.is_editing_existing() {
+        t(language, "AgenticGPT config edit", "AgenticGPT 编辑配置")
+    } else {
+        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化")
+    }
+}
+
 fn localized_error(code: &str, language: UiLanguage) -> String {
     let key = code.split(':').next().unwrap_or(code).trim();
     let (en, zh) = match key {
+        "config_edit_validation_failed" => ("The latest file cannot accept these edits. The configuration was not written; review the fields and retry.", "最新文件无法接受这些修改，未写入配置。请检查配置项后重试。"),
+        "config_init_catalog_value_invalid" => ("Enter a value matching this field's documented type.", "请输入符合本字段说明与类型的值。"),
         "config_init_required_value_missing" => ("Required value is missing.", "必填项不能为空。"),
         "config_init_secret_empty" => ("Secret must not be empty.", "密钥不能为空。"),
         "config_init_secret_path_invalid" => ("Secret path is invalid.", "密钥路径无效。"),
@@ -281,7 +291,7 @@ fn render_basic(
     render_surface_header(
         frame,
         header,
-        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
+        editor_title(session, language),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
@@ -529,7 +539,7 @@ fn render_connection(
     render_surface_header(
         frame,
         header,
-        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
+        editor_title(session, language),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
@@ -1244,7 +1254,7 @@ fn render_optional_center(
     render_surface_header(
         frame,
         header,
-        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
+        editor_title(session, language),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
@@ -1337,7 +1347,7 @@ fn render_optional_form(
     render_surface_header(
         frame,
         header,
-        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
+        editor_title(session, language),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
@@ -1360,6 +1370,60 @@ fn render_optional_form(
     let mut focused_line = 0usize;
 
     match section {
+        OptionalSection::Additional => {
+            for (index, entry) in crate::config_setup::additional_entries()
+                .into_iter()
+                .enumerate()
+            {
+                let field = SetupField::Catalog(index);
+                lines.push(subsection_heading_line(&entry.title, theme));
+                let value = optional_field_value(draft, field);
+                if entry.kind.contains("array") {
+                    push_list_field(
+                        &mut lines,
+                        &mut focused_line,
+                        section,
+                        draft,
+                        state,
+                        field,
+                        language,
+                        theme,
+                        errors,
+                        left.width,
+                    );
+                } else if matches!(entry.kind.as_str(), "boolean" | "object")
+                    || !entry.choices.is_empty()
+                {
+                    let focus = optional_field_index(section, draft, field).unwrap_or(usize::MAX);
+                    if state.focus == focus {
+                        focused_line = lines.len();
+                    }
+                    lines.push(choice_row_line(
+                        &value,
+                        state.focus == focus,
+                        true,
+                        24,
+                        theme,
+                    ));
+                    push_optional_error(&mut lines, errors, field, language, theme);
+                    lines.push(Line::raw(""));
+                } else {
+                    push_long_form_field(
+                        &mut lines,
+                        &mut focused_line,
+                        session,
+                        section,
+                        draft,
+                        state,
+                        field,
+                        language,
+                        theme,
+                        errors,
+                        left.width,
+                    );
+                }
+            }
+        }
         OptionalSection::Identity => push_long_form_field(
             &mut lines,
             &mut focused_line,
@@ -1825,8 +1889,22 @@ fn render_optional_form(
         let title = field
             .map(|field| optional_field_label(field, language))
             .unwrap_or_else(|| section_label(section, language));
-        let inspector_body = optional_form_inspector_body(section, field, language);
-        render_inspector(frame, inspector, title, inspector_body, theme);
+        if let Some(SetupField::Catalog(index)) = field {
+            if let Some(entry) = crate::config_setup::additional_entries().get(index) {
+                let example = format!("Example: {}", entry.example);
+                let path = entry.path.join(".");
+                let body = [
+                    entry.description.as_str(),
+                    "",
+                    path.as_str(),
+                    example.as_str(),
+                ];
+                render_inspector(frame, inspector, &entry.title, &body, theme);
+            }
+        } else {
+            let inspector_body = optional_form_inspector_body(section, field, language);
+            render_inspector(frame, inspector, title, inspector_body, theme);
+        }
     }
     render_horizontal_rule(frame, bottom_rule, theme);
     render_optional_form_footer(
@@ -1888,12 +1966,23 @@ fn push_long_form_field(
     } else {
         current.to_string()
     };
-    if matches!(
-        field,
-        SetupField::DiaryBoundaryHour
-            | SetupField::EventsLowTtlSeconds
-            | SetupField::RoomSecretSyncWaitTimeoutMs
-    ) {
+    let catalog_entry = if let SetupField::Catalog(index) = field {
+        crate::config_setup::additional_entries()
+            .into_iter()
+            .nth(index)
+    } else {
+        None
+    };
+    if catalog_entry
+        .as_ref()
+        .is_some_and(|entry| entry.kind.contains("integer"))
+        || matches!(
+            field,
+            SetupField::DiaryBoundaryHour
+                | SetupField::EventsLowTtlSeconds
+                | SetupField::RoomSecretSyncWaitTimeoutMs
+        )
+    {
         lines.push(numeric_input_value_line(
             current,
             focused,
@@ -1907,7 +1996,9 @@ fn push_long_form_field(
             focused,
             cursor.is_some(),
             cursor,
-            field == SetupField::EmailPassword || field.room_secret_is_sensitive(),
+            field == SetupField::EmailPassword
+                || field.room_secret_is_sensitive()
+                || catalog_entry.as_ref().is_some_and(|entry| entry.sensitive),
             is_default,
             width,
             theme,
@@ -2769,6 +2860,9 @@ pub(super) fn optional_list_state(
         }
         (OptionalSectionDraft::Workspace(value), SetupField::PathWritePaths) => &value.write_paths,
         (OptionalSectionDraft::Workspace(value), SetupField::PathDenyPaths) => &value.deny_paths,
+        (OptionalSectionDraft::Additional(value), SetupField::Catalog(index)) => {
+            value.values.get(&index).ok_or(())?
+        }
         _ => return Err(()),
     };
     serde_json::from_str::<Vec<String>>(raw)
@@ -2785,6 +2879,9 @@ pub(super) fn set_optional_list_state(
         return false;
     };
     match (draft, field) {
+        (OptionalSectionDraft::Additional(value), SetupField::Catalog(index)) => {
+            value.values.insert(index, serialized);
+        }
         (OptionalSectionDraft::Workspace(value), SetupField::PathReadOnlyPaths) => {
             value.read_only_paths = serialized
         }
@@ -2816,6 +2913,18 @@ pub(super) fn optional_focus_items(
     draft: &OptionalSectionDraft,
 ) -> Vec<OptionalFocusItem> {
     match section {
+        OptionalSection::Additional => crate::config_setup::additional_entries()
+            .iter()
+            .enumerate()
+            .flat_map(|(index, entry)| {
+                let field = SetupField::Catalog(index);
+                if entry.kind.contains("array") {
+                    list_focus_items(field, draft)
+                } else {
+                    vec![OptionalFocusItem::Field(field)]
+                }
+            })
+            .collect(),
         OptionalSection::Identity => vec![OptionalFocusItem::Field(SetupField::DisplayName)],
         OptionalSection::Workspace => {
             let mut items = vec![OptionalFocusItem::Field(SetupField::WorkspaceRoot)];
@@ -3319,6 +3428,7 @@ fn optional_center_inspector_body(
     match section {
         Some(section) => match language {
             UiLanguage::En => match section {
+                OptionalSection::Additional => &["Edit Browser, Skills, command policy and configuration update settings.", "Each field uses its catalog type; arrays support item editing, addition and removal."],
                 OptionalSection::Identity => &[
                     "Set the human-readable name shown for this agent.",
                     "The display name is separate from the Agent ID used for routing.",
@@ -3396,6 +3506,7 @@ fn optional_center_inspector_body(
                 ],
             },
             UiLanguage::ZhCn => match section {
+                OptionalSection::Additional => &["编辑 Browser、Skills、命令策略及配置更新设置。", "各字段按目录类型编辑；数组支持逐项编辑、增加和删除。"],
                 OptionalSection::Identity => &[
                     "设置此 Agent 的可读显示名称。",
                     "显示名称与用于路由的 Agent ID 相互独立。",
@@ -3952,7 +4063,7 @@ fn editing_cursor(state: &TuiState, field: SetupField) -> Option<usize> {
         .map(|editing| editing.cursor)
 }
 
-fn all_optional_sections() -> [OptionalSection; 13] {
+fn all_optional_sections() -> [OptionalSection; 14] {
     [
         OptionalSection::Identity,
         OptionalSection::Workspace,
@@ -3967,6 +4078,7 @@ fn all_optional_sections() -> [OptionalSection; 13] {
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
         OptionalSection::Events,
+        OptionalSection::Additional,
     ]
 }
 
@@ -3985,6 +4097,7 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
         OptionalSection::TunnelClient => t(language, "Tunnel client", "隧道客户端"),
         OptionalSection::HubReporting => t(language, "Hub reporting", "Hub 报告"),
         OptionalSection::Events => t(language, "Events", "事件"),
+        OptionalSection::Additional => t(language, "Other configuration", "其他配置"),
     }
 }
 
@@ -4099,6 +4212,13 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
 }
 
 pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
+    if let SetupField::Catalog(index) = field {
+        return crate::config_setup::additional_entries()
+            .get(index)
+            .is_some_and(|entry| {
+                matches!(entry.kind.as_str(), "boolean" | "object") || !entry.choices.is_empty()
+            });
+    }
     matches!(
         field,
         SetupField::Bubblewrap
@@ -4111,7 +4231,11 @@ pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
 }
 
 pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupField) -> String {
+    if let (OptionalSectionDraft::Additional(value), SetupField::Catalog(index)) = (draft, field) {
+        return value.values.get(&index).cloned().unwrap_or_default();
+    }
     match draft {
+        OptionalSectionDraft::Additional(_) => String::new(),
         OptionalSectionDraft::Identity(value) => match field {
             SetupField::DisplayName => value.display_name.clone(),
             _ => String::new(),
@@ -4192,6 +4316,12 @@ pub(super) fn set_optional_field(
     field: SetupField,
     value: String,
 ) {
+    if let (OptionalSectionDraft::Additional(draft), SetupField::Catalog(index)) =
+        (&mut *draft, field)
+    {
+        draft.values.insert(index, value);
+        return;
+    }
     match draft {
         OptionalSectionDraft::Identity(draft) if field == SetupField::DisplayName => {
             draft.display_name = value
@@ -4268,6 +4398,27 @@ pub(super) fn set_optional_field(
 }
 
 pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: SetupField) {
+    if let (OptionalSectionDraft::Additional(draft), SetupField::Catalog(index)) =
+        (&mut *draft, field)
+    {
+        if let Some(entry) = crate::config_setup::additional_entries().get(index) {
+            let choices = if entry.kind == "boolean" {
+                vec!["false".to_owned(), "true".to_owned()]
+            } else if entry.kind == "object" {
+                vec!["automatic".to_owned(), "explicit".to_owned()]
+            } else {
+                entry.choices.clone()
+            };
+            if !choices.is_empty() {
+                let selected = choices
+                    .iter()
+                    .position(|value| draft.values.get(&index) == Some(value));
+                let next = selected.map_or(0, |selected| (selected + 1) % choices.len());
+                draft.values.insert(index, choices[next].clone());
+            }
+        }
+        return;
+    }
     match draft {
         OptionalSectionDraft::Sandbox(draft) if field == SetupField::Bubblewrap => {
             draft.enabled = !draft.enabled
@@ -4329,7 +4480,7 @@ fn render_review(
     let label_width = groups
         .iter()
         .flat_map(|group| group.items.iter())
-        .map(|item| UnicodeWidthStr::width(review_item_label(item.label_key, language)))
+        .map(|item| UnicodeWidthStr::width(review_field_label(item, language).as_str()))
         .max()
         .unwrap_or(0)
         .min(24);
@@ -4422,9 +4573,9 @@ fn render_review(
                         | ReviewEditorKind::AutoCustom
                 );
             row_line_indices.push(lines.len());
-            let label = review_item_label(item.label_key, language);
+            let label = review_field_label(item, language);
             let label_padding =
-                " ".repeat(label_width.saturating_sub(UnicodeWidthStr::width(label)));
+                " ".repeat(label_width.saturating_sub(UnicodeWidthStr::width(label.as_str())));
             let editing = focused
                 .then_some(())
                 .and(state.editing.as_ref())
@@ -4586,9 +4737,9 @@ fn render_review(
                 theme,
             );
         } else if let Some((group, item)) = review.row(state.focus) {
-            let title = review_item_label(item.label_key, language);
+            let title = review_field_label(item, language);
             let body = review_item_inspector_body(group, item, state, language);
-            render_inspector(frame, inspector, title, body, theme);
+            render_inspector(frame, inspector, &title, body, theme);
         }
     }
 
@@ -5066,9 +5217,18 @@ pub(super) fn review_search_text(
     format!(
         "{} {} {}",
         review_target_label(group.target, language),
-        review_item_label(item.label_key, language),
+        review_field_label(item, language),
         value
     )
+}
+
+fn review_field_label(item: &ReviewItem, language: UiLanguage) -> String {
+    if let Some(SetupField::Catalog(index)) = item.field {
+        if let Some(entry) = crate::config_setup::additional_entries().get(index) {
+            return entry.path.join(".");
+        }
+    }
+    review_item_label(item.label_key, language).to_owned()
 }
 
 fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {

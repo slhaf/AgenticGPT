@@ -2237,6 +2237,278 @@ impl Drop for StdioTestRoots {
     }
 }
 
+/// Real MCP peers for configuration tests; errors still close and join the server
+/// before the surrounding temporary state roots are removed.
+struct ConfigMcpTestPeer {
+    client: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl ConfigMcpTestPeer {
+    async fn start(state: AppState) -> anyhow::Result<Self> {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client_read, client_write) = split(client_io);
+        let (server_read, server_write) = split(server_io);
+        let server = tokio::spawn(async move {
+            let transport =
+                AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+            let running = AgentMcpServer::new(state)
+                .serve(ResumableStdioTransport::new(transport))
+                .await?;
+            running.waiting().await?;
+            Ok(())
+        });
+        match ().serve((client_read, client_write)).await {
+            Ok(client) => Ok(Self { client, server }),
+            Err(error) => {
+                server.abort();
+                let _ = server.await;
+                Err(error.into())
+            }
+        }
+    }
+
+    async fn call(
+        &self,
+        name: &'static str,
+        arguments: Value,
+    ) -> anyhow::Result<rmcp::model::CallToolResult> {
+        let arguments = arguments
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("MCP arguments must be an object"))?
+            .clone();
+        Ok(self
+            .client
+            .call_tool(CallToolRequestParams::new(name).with_arguments(arguments))
+            .await?)
+    }
+
+    async fn stop(mut self) -> anyhow::Result<()> {
+        let client_result = self.client.close().await;
+        let server_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut self.server).await;
+        match server_result {
+            Ok(result) => {
+                result??;
+                client_result?;
+                Ok(())
+            }
+            Err(error) => {
+                self.server.abort();
+                let _ = (&mut self.server).await;
+                Err(error.into())
+            }
+        }
+    }
+}
+
+impl Drop for ConfigMcpTestPeer {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+fn config_mcp_data(reply: &rmcp::model::CallToolResult) -> anyhow::Result<&Value> {
+    let value = reply
+        .structured_content
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("config MCP response has no structured content"))?;
+    anyhow::ensure!(
+        value["events"].is_object(),
+        "config MCP response omitted the public event frame: {value}"
+    );
+    Ok(value)
+}
+
+// Retention value: this crosses the public MCP transport, admission, native-path
+// editing, final-candidate validation, persistence, runtime application and event
+// projection. It catches partial commits and credential disclosure after refactors.
+#[tokio::test]
+async fn config_mcp_preserves_atomic_edits_runtime_values_and_sensitive_frames(
+) -> anyhow::Result<()> {
+    let mut state = test_state(CapabilityProfile::Normal);
+    let _roots = StdioTestRoots::for_state(&state).await;
+    state.config_path = state.private_state.root.join("config.json");
+    {
+        let mut config = state.config.write().await;
+        config.toolsets.enable(crate::config::ToolNamespace::Config);
+        config.config_api.update_policy = crate::config::ConfigUpdatePolicy::Allow;
+        crate::config::write_config_with_backup(&state.config_path, &config)?;
+    }
+    let event = state.event_store.inject(
+        &agentic_gpt_protocol::EventInjectRequest {
+            message: "configuration chain reminder".into(),
+            severity: Some(agentic_gpt_protocol::EventSeverity::Low),
+            reference: "config-mcp-chain".into(),
+        },
+        state.config.read().await.events.low_ttl_seconds,
+    )?;
+    let original_agent_id = state.config.read().await.agent_id.clone();
+    let peer = ConfigMcpTestPeer::start(state.clone()).await?;
+    let scenario = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let manual = peer
+            .call(
+                "config.manual",
+                json!({"section":"mcp", "query":"transport", "detail":"summary"}),
+            )
+            .await?;
+        let manual = config_mcp_data(&manual)?;
+        anyhow::ensure!(manual["matches"].as_u64().is_some_and(|n| n > 0));
+        // EventPanel.new uses compact map keys (`eventId | summary`), shared
+        // by every public response, rather than EventRecord-shaped objects.
+        let event_prefix = format!("{} | ", event.event_id);
+        let panel: agentic_gpt_protocol::EventPanel = serde_json::from_value(manual["events"].clone())?;
+        anyhow::ensure!(panel.new.iter().flat_map(|item| item.keys())
+            .any(|key| key.starts_with(&event_prefix)));
+
+        let token = "config-mcp-persisted-sensitive-token";
+        let candidate_token = "config-mcp-preview-sensitive-token";
+        let server_id = "native.path.server";
+        // No intermediate server is valid: related fields are assembled before
+        // final validation, and a dotted ID remains one native path segment.
+        let update = peer.call("config.update", json!({"changes":[
+            {"op":"set", "path":["mcpServers",server_id,"enabled"], "value":true},
+            {"op":"set", "path":["mcpServers",server_id,"transport"], "value":"streamable-http"},
+            {"op":"set", "path":["mcpServers",server_id,"url"], "value":"https://mcp.example.test/mcp"},
+            {"op":"set", "path":["mcpServers",server_id,"auth"], "value":{"type":"bearer","token":token}},
+            {"op":"set", "path":["shell","initFile"], "value":null},
+            {"op":"set", "path":["agentId"], "value":"config-mcp-next-worker"}
+        ]})).await?;
+        let updated = config_mcp_data(&update)?;
+        anyhow::ensure!(updated["saved"] == true, "batch was not saved: {updated}");
+        anyhow::ensure!(!serde_json::to_string(&update)?.contains(token));
+        let saved_bytes = std::fs::read(&state.config_path)?;
+        let saved: Value = serde_json::from_slice(&saved_bytes)?;
+        anyhow::ensure!(saved["mcpServers"][server_id]["auth"]["token"] == token);
+        anyhow::ensure!(saved["shell"]["initFile"].is_null());
+        anyhow::ensure!(saved["shell"].get("initFile").is_some());
+
+        let get = peer.call("config.get", json!({"paths":[
+            ["mcpServers",server_id,"url"],
+            ["mcpServers",server_id,"auth","token"],
+            ["shell","initFile"],
+            ["agentId"]
+        ]})).await?;
+        let got = config_mcp_data(&get)?;
+        anyhow::ensure!(got["items"][0]["path"] == json!(["mcpServers",server_id,"url"]));
+        anyhow::ensure!(got["items"][0]["value"] == saved["mcpServers"][server_id]["url"]);
+        anyhow::ensure!(got["items"][0]["applyStatus"] == "applied");
+        anyhow::ensure!(got["items"][1]["redacted"] == true);
+        anyhow::ensure!(!serde_json::to_string(&get)?.contains(token));
+        anyhow::ensure!(got["items"][2]["value"].is_null());
+        anyhow::ensure!(got["items"][2]["explicit"] == true);
+        anyhow::ensure!(got["items"][3]["value"] == "config-mcp-next-worker");
+        anyhow::ensure!(got["items"][3]["appliedValue"] == original_agent_id);
+        anyhow::ensure!(got["items"][3]["applyStatus"] == "restart_required");
+
+        let preview = peer.call("config.update", json!({"dryRun":true,"changes":[
+            {"op":"set", "path":["mcpServers",server_id,"auth","token"], "value":candidate_token},
+            {"op":"set", "path":["displayName"], "value":"preview-only"}
+        ]})).await?;
+        let preview_data = config_mcp_data(&preview)?;
+        anyhow::ensure!(preview_data["saved"] == false && preview_data["dryRun"] == true);
+        anyhow::ensure!(preview_data["changes"][0]["redacted"] == true);
+        let preview_wire = serde_json::to_string(&preview)?;
+        anyhow::ensure!(!preview_wire.contains(token) && !preview_wire.contains(candidate_token));
+        anyhow::ensure!(std::fs::read(&state.config_path)? == saved_bytes);
+        anyhow::ensure!(state.config.read().await.display_name != "preview-only");
+
+        let invalid = peer.call("config.update", json!({"changes":[
+            {"op":"set", "path":["displayName"], "value":"must-not-partially-save"},
+            {"op":"set", "path":["mcpServers",server_id,"transport"], "value":"invalid-transport"}
+        ]})).await?;
+        let invalid = config_mcp_data(&invalid)?;
+        anyhow::ensure!(invalid["saved"] == false && invalid["error"]["code"].is_string());
+        anyhow::ensure!(std::fs::read(&state.config_path)? == saved_bytes);
+        anyhow::ensure!(state.config.read().await.display_name != "must-not-partially-save");
+
+        let unset = peer.call("config.update", json!({"changes":[
+            {"op":"unset", "path":["shell","initFile"]}
+        ]})).await?;
+        anyhow::ensure!(config_mcp_data(&unset)?["saved"] == true);
+        let get = peer.call("config.get", json!({"paths":[["shell","initFile"]]})).await?;
+        let got = config_mcp_data(&get)?;
+        anyhow::ensure!(got["items"][0]["value"] == crate::config::DEFAULT_SHELL_INIT_FILE);
+        anyhow::ensure!(got["items"][0]["explicit"] == false);
+        anyhow::ensure!(got["items"][0]["applyStatus"] == "applied");
+        let persisted: Value = serde_json::from_slice(&std::fs::read(&state.config_path)?)?;
+        anyhow::ensure!(persisted.pointer("/shell/initFile").is_none());
+        Ok::<(), anyhow::Error>(())
+    }).await;
+    peer.stop().await?;
+    scenario??;
+    Ok(())
+}
+
+// Retention value: the actual MCP entry must use the current authorization
+// snapshot, fail closed without a confirmation channel, and recheck tool admission
+// after an administrator disables a namespace on an existing connection.
+#[tokio::test]
+async fn config_mcp_cannot_authorize_its_own_policy_or_bypass_disabled_toolset(
+) -> anyhow::Result<()> {
+    let mut state = test_state(CapabilityProfile::Normal);
+    let _roots = StdioTestRoots::for_state(&state).await;
+    state.config_path = state.private_state.root.join("config.json");
+    {
+        let mut config = state.config.write().await;
+        config.toolsets.enable(crate::config::ToolNamespace::Config);
+        config.confirmation_provider.channels.clear();
+        crate::config::write_config_with_backup(&state.config_path, &config)?;
+    }
+    let before = std::fs::read(&state.config_path)?;
+    let peer = ConfigMcpTestPeer::start(state.clone()).await?;
+    let scenario = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let denied = peer
+            .call(
+                "config.update",
+                json!({"changes":[
+                    {"op":"set", "path":["config","updatePolicy"], "value":"allow"},
+                    {"op":"set", "path":["displayName"], "value":"unauthorized-change"}
+                ]}),
+            )
+            .await?;
+        let denied = config_mcp_data(&denied)?;
+        anyhow::ensure!(denied["saved"] == false);
+        anyhow::ensure!(denied["error"]["code"] == "config_confirmation_unavailable");
+        anyhow::ensure!(std::fs::read(&state.config_path)? == before);
+
+        // External configuration ownership changes the live admission snapshot;
+        // the already-open MCP peer must not retain the previous tool capability.
+        state
+            .config
+            .write()
+            .await
+            .toolsets
+            .disable(crate::config::ToolNamespace::Config);
+        for (name, arguments) in [
+            ("config.manual", json!({})),
+            ("config.get", json!({"paths":[["displayName"]]})),
+            (
+                "config.update",
+                json!({"changes":[{"op":"set","path":["displayName"],"value":"disabled-change"}]}),
+            ),
+        ] {
+            let result = peer.call(name, arguments).await;
+            anyhow::ensure!(result.is_err(), "disabled tool remained callable: {name}");
+            let error = result
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("expected disabled tool error"))?;
+            anyhow::ensure!(
+                matches!(error.downcast_ref::<rmcp::service::ServiceError>(),
+                    Some(rmcp::service::ServiceError::McpError(error))
+                        if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND),
+                "unexpected rejection: {error}"
+            );
+        }
+        anyhow::ensure!(std::fs::read(&state.config_path)? == before);
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    peer.stop().await?;
+    scenario??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn local_mcp_call_audit_uses_local_request_source() -> anyhow::Result<()> {
     let server = AgentMcpServer::with_ingress(
@@ -3389,7 +3661,8 @@ fn test_state(profile: CapabilityProfile) -> AppState {
         private_state,
         event_store,
         process_history,
-        browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
+        browser_runtime: std::sync::Arc::new(crate::state::BrowserRuntimeSlot::default()),
+        config_runtime: std::sync::Arc::new(crate::config_runtime::ConfigRuntime::default()),
         runtime: RuntimeModel::tunnel(profile, false),
         started_at: chrono::Utc::now(),
         boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -3458,8 +3731,8 @@ fn state_with_browser_runtime(docs_root: PathBuf, result: CallToolResult) -> App
         },
         manager: crate::browser_manager::test_manager_with_result(result),
     });
-    let browser_runtime_cell = Arc::new(tokio::sync::OnceCell::new());
-    let _ = browser_runtime_cell.set(Some(browser_runtime));
+    let browser_runtime_cell =
+        Arc::new(crate::state::BrowserRuntimeSlot::new(Some(browser_runtime)));
     state.browser_runtime = browser_runtime_cell;
     state
 }

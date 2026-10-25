@@ -7,6 +7,144 @@ servers:
 security:
   - bearerAuth: []
 paths:
+  /v1/config/manual:
+    post:
+      operationId: configManual
+      description: 浏览或检索目标 Agent 配置说明；无筛选返回章节目录。section/query/detail 使用共享配置目录，响应附公共 events。
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigManualHttpRequest"
+      responses:
+        "200":
+          description: 目标 Agent 返回的配置结果或操作错误；events 为共用事件面板。
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/ConfigManualResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          description: JSON 语法错误，未派发。
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON 请求格式错误，未派发。
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/config/get:
+    post:
+      operationId: configGet
+      description: 按路径段数组读取目标 Agent 最新持久配置。items 区分不存在、脱敏和应用状态；appliedValue 仅在持久值与实际值不同时返回，可为 null；响应附公共 events。
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigGetHttpRequest"
+      responses:
+        "200":
+          description: 目标 Agent 返回的配置结果或操作错误；events 为共用事件面板。
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/ConfigGetResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          description: JSON 语法错误，未派发。
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON 请求格式错误，未派发。
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/config/update:
+    post:
+      operationId: configUpdate
+      description: 对目标 Agent 最新持久配置按序执行 changes，最终校验后保存一次。dryRun 不保存本次修改；实写等待保存和本次应用尝试后返回 saved/changes，不因组件应用失败回滚整份配置。严格确认由目标 Agent 执行；Hub 最多等待 180 秒，超时不能证明未提交，不得自动重试。响应附公共 events。
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigUpdateHttpRequest"
+      responses:
+        "200":
+          description: 目标 Agent 返回的配置结果或操作错误；events 为共用事件面板。
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/ConfigUpdateResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
+        "400":
+          description: JSON 语法错误，未派发。
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON 请求格式错误，未派发。
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
   /v1/info:
     get:
       operationId: getInfo
@@ -5173,3 +5311,416 @@ components:
             $ref: "#/components/schemas/McpBatchToolChildResponse"
         events:
           $ref: "#/components/schemas/EventPanel"
+
+    # Config API schemas 由 protocol 的 config_schema 示例从共享 DTO 生成。
+    ConfigApiError:
+      {
+        "additionalProperties": false,
+        "properties": {
+          "changeIndex": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      }
+
+    ConfigApplyEffect:
+      {
+        "enum": [
+          "live_update",
+          "component_reconfigure",
+          "restart_required"
+        ],
+        "type": "string"
+      }
+
+    ConfigApplyStatus:
+      {
+        "enum": [
+          "applied",
+          "restart_required",
+          "applying",
+          "failed"
+        ],
+        "type": "string"
+      }
+
+    ConfigChange:
+      {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "op": {
+                "const": "set",
+                "type": "string"
+              },
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "value": true
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "op": {
+                "const": "unset",
+                "type": "string"
+              },
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "op",
+              "path"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "op": {
+                "const": "add",
+                "type": "string"
+              },
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "value": true
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "op": {
+                "const": "remove",
+                "type": "string"
+              },
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "value": true
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+
+    ConfigGetHttpRequest:
+      {
+        "additionalProperties": false,
+        "description": "Hub 路由字段与 Agent 原生请求共用的薄封套。",
+        "properties": {
+          "agentId": {
+            "description": "Hub 中已启用的目标 Agent；配置不属于 Hub 服务端。",
+            "type": "string"
+          },
+          "paths": {
+            "description": "配置路径段数组；含点的事件名和服务器 ID 各占一个段，不支持数组下标。",
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agentId",
+          "paths"
+        ],
+        "type": "object"
+      }
+
+    ConfigGetResponse:
+      {
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "$ref": "#/components/schemas/EventPanel"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      }
+
+    ConfigItem:
+      {
+        "additionalProperties": false,
+        "properties": {
+          "appliedValue": true,
+          "applyStatus": {
+            "$ref": "#/components/schemas/ConfigApplyStatus"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfigApiError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "explicit": {
+            "type": "boolean"
+          },
+          "path": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "redacted": {
+            "type": "boolean"
+          },
+          "value": true
+        },
+        "required": [
+          "path",
+          "value",
+          "explicit",
+          "applyStatus"
+        ],
+        "type": "object"
+      }
+
+    ConfigManualDetail:
+      {
+        "enum": [
+          "summary",
+          "full"
+        ],
+        "type": "string"
+      }
+
+    ConfigManualHttpRequest:
+      {
+        "additionalProperties": false,
+        "description": "Hub 路由字段与 Agent 原生请求共用的薄封套。",
+        "properties": {
+          "agentId": {
+            "description": "Hub 中已启用的目标 Agent；配置不属于 Hub 服务端。",
+            "type": "string"
+          },
+          "detail": {
+            "$ref": "#/components/schemas/ConfigManualDetail",
+            "default": "full",
+            "description": "文档详细程度，默认 full。"
+          },
+          "query": {
+            "description": "可选检索文字；与 section 同用时限定章节。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "section": {
+            "description": "可选章节标识；省略且不检索时返回章节目录。",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agentId"
+        ],
+        "type": "object"
+      }
+
+    ConfigManualResponse:
+      {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "events": {
+            "$ref": "#/components/schemas/EventPanel"
+          },
+          "matches": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "content",
+          "matches"
+        ],
+        "type": "object"
+      }
+
+    ConfigPreviewItem:
+      {
+        "additionalProperties": false,
+        "properties": {
+          "after": true,
+          "before": true,
+          "expectedEffect": {
+            "$ref": "#/components/schemas/ConfigApplyEffect"
+          },
+          "path": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "redacted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "before",
+          "after",
+          "expectedEffect"
+        ],
+        "type": "object"
+      }
+
+    ConfigUpdateChange:
+      {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ConfigItem"
+          },
+          {
+            "$ref": "#/components/schemas/ConfigPreviewItem"
+          }
+        ]
+      }
+
+    ConfigUpdateHttpRequest:
+      {
+        "additionalProperties": false,
+        "description": "Hub 路由字段与 Agent 原生请求共用的薄封套。",
+        "properties": {
+          "agentId": {
+            "description": "Hub 中已启用的目标 Agent；配置不属于 Hub 服务端。",
+            "type": "string"
+          },
+          "changes": {
+            "description": "按序作用于最新持久配置；整批最终校验后保存一次。",
+            "items": {
+              "$ref": "#/components/schemas/ConfigChange"
+            },
+            "type": "array"
+          },
+          "dryRun": {
+            "default": false,
+            "description": "true 只预览本次修改；后续实写重新以届时最新配置为基础。",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "agentId",
+          "changes"
+        ],
+        "type": "object"
+      }
+
+    ConfigUpdateResponse:
+      {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigUpdateChange"
+            },
+            "type": "array"
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfigApiError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events": {
+            "$ref": "#/components/schemas/EventPanel"
+          },
+          "saved": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "saved",
+          "changes"
+        ],
+        "type": "object"
+      }

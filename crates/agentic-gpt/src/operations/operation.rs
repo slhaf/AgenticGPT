@@ -127,6 +127,9 @@ pub(crate) fn is_event_api_operation(operation: &str) -> bool {
 /// admission never treats descriptor presence or annotation hints as authorization.
 pub(crate) const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("agent.info", ToolNamespace::Agent),
+    ("config.manual", ToolNamespace::Config),
+    ("config.get", ToolNamespace::Config),
+    ("config.update", ToolNamespace::Config),
     ("browser.acquire", ToolNamespace::Browser),
     ("browser.list", ToolNamespace::Browser),
     ("browser.manual", ToolNamespace::Browser),
@@ -188,7 +191,8 @@ pub(crate) fn tool_namespace(name: &str) -> Option<ToolNamespace> {
 pub(crate) fn tool_is_read_only(name: &str) -> bool {
     !matches!(
         name,
-        "room.secret.upsert"
+        "config.update"
+            | "room.secret.upsert"
             | "room.secret.delete"
             | "process.exec"
             | "browser.acquire"
@@ -222,7 +226,8 @@ pub(crate) fn tool_is_read_only(name: &str) -> bool {
 pub(crate) fn tool_is_destructive(name: &str) -> bool {
     matches!(
         name,
-        "room.secret.upsert"
+        "config.update"
+            | "room.secret.upsert"
             | "room.secret.delete"
             | "file.edit"
             | "browser.repl"
@@ -251,7 +256,8 @@ pub(crate) fn tool_is_destructive(name: &str) -> bool {
 pub(crate) fn tool_is_open_world(name: &str) -> bool {
     matches!(
         name,
-        "room.secret.list"
+        "config.update"
+            | "room.secret.list"
             | "room.secret.get"
             | "room.secret.upsert"
             | "room.secret.delete"
@@ -386,6 +392,9 @@ pub(crate) fn authorize(
 
 pub(crate) fn hub_command_name(command: &HubCommand) -> &'static str {
     match command {
+        HubCommand::ConfigManual { .. } => "config.manual",
+        HubCommand::ConfigGet { .. } => "config.get",
+        HubCommand::ConfigUpdate { .. } => "config.update",
         HubCommand::Exec { .. } => "process.exec",
         HubCommand::ProcessBatch { .. } => "process.batch",
         HubCommand::ProcessList { .. } => "process.list",

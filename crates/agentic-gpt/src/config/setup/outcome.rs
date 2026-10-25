@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -23,12 +23,13 @@ use super::validation::{ValidationError, ValidationErrors};
 // write plan and can therefore own secret bytes.
 pub(crate) struct WizardOutcome {
     pub(crate) build: InitBuild,
+    pub(crate) changes: Option<Vec<agentic_gpt_protocol::ConfigChange>>,
     pub(crate) secret_write: Option<SecretWritePlan>,
     pub(crate) summary: String,
 }
 
 impl SetupSession {
-    pub(crate) fn into_wizard_outcome(self) -> Result<WizardOutcome, ValidationErrors> {
+    pub(crate) fn prepare_wizard_outcome(&self) -> Result<WizardOutcome, ValidationErrors> {
         self.validate_for_review()?;
         let review = self.review_model()?;
         let input = self.build_active_input()?;
@@ -65,7 +66,26 @@ impl SetupSession {
                 .retain(|action| *action != PendingAction::ProvisionTunnelSecret);
         }
 
+        let changes = if self.edit_existing {
+            let before = self.imported_base().ok_or_else(|| {
+                vec![ValidationError {
+                    field: SetupField::Mode,
+                    code: "config_edit_base_missing",
+                }]
+            })?;
+            Some(
+                crate::config_apply::changes_between(before, &build.config).map_err(|_| {
+                    vec![ValidationError {
+                        field: SetupField::Mode,
+                        code: "config_edit_intent_invalid",
+                    }]
+                })?,
+            )
+        } else {
+            None
+        };
         Ok(WizardOutcome {
+            changes,
             build,
             secret_write,
             summary: outcome_summary(&review),
@@ -293,9 +313,18 @@ pub(crate) fn commit_wizard_outcome(
     }
     let WizardOutcome {
         mut build,
+        changes,
         secret_write,
         summary,
     } = outcome;
+    if let Some(changes) = changes {
+        let latest =
+            crate::config::Config::load_locked(config_path).context("config_edit_reload_failed")?;
+        build.config = crate::config_apply::apply_changes(&latest, &changes)
+            .context("config_edit_validation_failed")?;
+        build.mode = build.config.mode;
+        build.profile = build.config.profile;
+    }
     let _summary = summary;
     let summary = InitSummary {
         mode: build.mode,
@@ -304,6 +333,11 @@ pub(crate) fn commit_wizard_outcome(
         pending: build.pending.clone(),
     };
 
+    if secret_write.is_some()
+        && build.config.mode != crate::config_templates::RuntimeMode::Standalone
+    {
+        return Err(anyhow!("config_edit_validation_failed"));
+    }
     let Some(plan) = secret_write else {
         write_config_with_backup(config_path, &build.config)?;
         return Ok(summary);
@@ -628,7 +662,7 @@ mod tests {
         );
         session.standalone_mut().provision_secret_now = true;
         session.standalone_mut().secret_value = Some(SecretValue::new(value));
-        session.into_wizard_outcome().unwrap()
+        session.prepare_wizard_outcome().unwrap()
     }
 
     #[test]
@@ -693,7 +727,7 @@ mod tests {
         session.standalone_mut().secret_value = Some(SecretValue::new("path-regression-secret"));
         let workspace = session.optional_draft(OptionalSection::Workspace);
         session.save_optional_section_for_review(workspace).unwrap();
-        let outcome = session.into_wizard_outcome().unwrap();
+        let outcome = session.prepare_wizard_outcome().unwrap();
         commit_wizard_outcome(&config_path, outcome).unwrap();
         let config = crate::config::Config::load(&config_path).unwrap();
         let reference = &config.tunnel.as_ref().unwrap().api_key;
@@ -894,7 +928,7 @@ mod tests {
             UiLanguage::En,
             config_path.clone(),
         );
-        let outcome = session.into_wizard_outcome().unwrap();
+        let outcome = session.prepare_wizard_outcome().unwrap();
         assert!(outcome.secret_write.is_none());
         commit_wizard_outcome(&config_path, outcome).unwrap();
         assert!(config_path.exists());
@@ -973,7 +1007,7 @@ mod tests {
             completed.choice_values(),
             &["inherit", "low", "medium", "high", "off"]
         );
-        commit_wizard_outcome(&config_path, session.into_wizard_outcome().unwrap()).unwrap();
+        commit_wizard_outcome(&config_path, session.prepare_wizard_outcome().unwrap()).unwrap();
 
         let written: serde_json::Value =
             serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
@@ -1089,12 +1123,81 @@ mod tests {
             config_path,
         );
         session.hub_mut().hub_url = "ftp://invalid.example.com".to_string();
-        let errors = match session.into_wizard_outcome() {
+        let errors = match session.prepare_wizard_outcome() {
             Ok(_) => panic!("invalid Hub URL unexpectedly reached outcome"),
             Err(errors) => errors,
         };
         assert_eq!(errors[0].field, SetupField::HubUrl);
         assert_eq!(errors[0].code, "hub_url_invalid");
         let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn editor_replays_leaf_and_collection_intents_on_latest_persisted_config() {
+        // This exercises the real editor -> latest-file transaction -> reload,
+        // protecting concurrent edits in the same section and collection.
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("agentic-config-editor-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let _cleanup = Cleanup(root.clone());
+        let path = root.join("config.json");
+        let mut baseline = crate::config::Config::default_config().unwrap();
+        baseline.mode = RuntimeMode::Local;
+        baseline.workspace_root = root.join("workspace");
+        baseline.confirmation_provider.channels =
+            vec![crate::config::ConfirmationChannel::Freedesktop];
+        baseline.policy.command.allow = vec!["echo old".into()];
+        write_config_with_backup(&path, &baseline).unwrap();
+        let mut editor = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Local),
+                profile: Some(baseline.profile),
+                imported_base: Some(baseline.clone()),
+                edit_existing: true,
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            path.clone(),
+        );
+        let mut limits = editor.optional_draft(OptionalSection::Limits);
+        if let OptionalSectionDraft::Limits(draft) = &mut limits {
+            draft.max_file_search_context_lines = "23".into();
+        }
+        editor.save_optional_section(limits).unwrap();
+        let mut additional = editor.optional_draft(OptionalSection::Additional);
+        let policy_index = super::super::model::additional_entries()
+            .iter()
+            .position(|entry| entry.path == ["policy", "command", "allow"])
+            .unwrap();
+        if let OptionalSectionDraft::Additional(draft) = &mut additional {
+            draft
+                .values
+                .insert(policy_index, r#"["echo local"]"#.into());
+        }
+        editor.save_optional_section(additional).unwrap();
+        let outcome = editor.prepare_wizard_outcome().unwrap();
+        let mut concurrent = baseline;
+        concurrent.limits.max_concurrent_tasks = 17;
+        concurrent.display_name = "concurrent writer".into();
+        concurrent
+            .policy
+            .command
+            .allow
+            .push("echo concurrent".into());
+        write_config_with_backup(&path, &concurrent).unwrap();
+        commit_wizard_outcome(&path, outcome).unwrap();
+        let saved = crate::config::Config::load(&path).unwrap();
+        assert_eq!(saved.limits.max_file_search_context_lines, 23);
+        assert_eq!(saved.limits.max_concurrent_tasks, 17);
+        assert_eq!(saved.display_name, "concurrent writer");
+        assert_eq!(
+            saved.policy.command.allow,
+            ["echo concurrent", "echo local"]
+        );
     }
 }

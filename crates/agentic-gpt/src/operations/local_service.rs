@@ -171,6 +171,15 @@ pub(crate) async fn dispatch(
     snapshots: Option<&mut Vec<ProcessInfo>>,
 ) -> Result<serde_json::Value> {
     match command {
+        HubCommand::ConfigManual { payload, .. } => {
+            Box::pin(crate::config_api::manual(&state, payload)).await
+        }
+        HubCommand::ConfigGet { payload, .. } => {
+            Box::pin(crate::config_api::get(&state, payload)).await
+        }
+        HubCommand::ConfigUpdate { payload, .. } => {
+            Box::pin(crate::config_api::update(&state, &context, payload)).await
+        }
         HubCommand::Exec { payload, .. } => {
             dispatch_process(state, context, snapshots, move |_| {
                 Ok(ProcessCall::Exec {
@@ -526,8 +535,12 @@ async fn dispatch_inner(
                 Err(error) => Ok(skills::skill_run_command_error(error)),
             }
         }
-        HubCommand::Exec { .. } | HubCommand::ProcessBatch { .. } => {
-            unreachable!("process commands are dispatched before dispatch_inner")
+        HubCommand::Exec { .. }
+        | HubCommand::ProcessBatch { .. }
+        | HubCommand::ConfigManual { .. }
+        | HubCommand::ConfigGet { .. }
+        | HubCommand::ConfigUpdate { .. } => {
+            unreachable!("process and configuration commands are dispatched before dispatch_inner")
         }
     }
 }

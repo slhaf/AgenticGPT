@@ -1,5 +1,6 @@
 use agentic_gpt_protocol::AcquireConfirmation;
 use agentic_gpt_protocol::{
+    ConfigAgentRequest, ConfigGetRequest, ConfigManualRequest, ConfigUpdateRequest,
     EventGetRequest, EventListRequest, EventMarkRequest, EventSeverity, EventStatus, HubCommand,
     McpBatchRequest, McpCallToolRequest, McpListServersRequest, McpListToolsRequest,
     ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecRequest, ProcessListRequest,
@@ -34,6 +35,69 @@ pub(crate) fn process_routes() -> axum::Router<HubState> {
         .route("/v1/process", get(list_processes))
         .route("/v1/process/:process_id/read", get(get_process_read))
         .route("/v1/process/:process_id/cancel", post(cancel_process))
+}
+
+pub(crate) fn config_routes() -> axum::Router<HubState> {
+    use axum::routing::post;
+
+    axum::Router::new()
+        .route("/v1/config/manual", post(config_manual))
+        .route("/v1/config/get", post(config_get))
+        .route("/v1/config/update", post(config_update))
+}
+
+pub(crate) async fn config_manual(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(request): Json<ConfigAgentRequest<ConfigManualRequest>>,
+) -> Response {
+    let command = HubCommand::ConfigManual {
+        request_id: random_id("req"),
+        payload: request.request,
+    };
+    dispatch_config(state, headers, request.agent_id, command).await
+}
+
+pub(crate) async fn config_get(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(request): Json<ConfigAgentRequest<ConfigGetRequest>>,
+) -> Response {
+    let command = HubCommand::ConfigGet {
+        request_id: random_id("req"),
+        payload: request.request,
+    };
+    dispatch_config(state, headers, request.agent_id, command).await
+}
+
+pub(crate) async fn config_update(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(request): Json<ConfigAgentRequest<ConfigUpdateRequest>>,
+) -> Response {
+    let command = HubCommand::ConfigUpdate {
+        request_id: random_id("req"),
+        payload: request.request,
+    };
+    dispatch_config(state, headers, request.agent_id, command).await
+}
+
+async fn dispatch_config(
+    state: HubState,
+    headers: HeaderMap,
+    agent_id: String,
+    command: HubCommand,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &agent_id) {
+        return response;
+    }
+    match request_agent(&state, &agent_id, command, REQUEST_TIMEOUT_SECS).await {
+        Ok(value) => Json(value).into_response(),
+        Err(reason) => api_error(reason.status, reason.code, reason),
+    }
 }
 
 #[derive(Deserialize)]

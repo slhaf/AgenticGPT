@@ -76,7 +76,9 @@
 - Browser failure None 目前会被缓存到OnceCell；新配置或依赖恢复需要允许重新发现。单lease reset/release不构成服务级shutdown_all；repl/原地reset部分路径没有Agent侧外层超时，不能宣称现有排空有界（runtime/startup.rs:232-235；ingress/stdio_server.rs:1421-1435；browser/browser_manager.rs:279-448）。
 - 组件替换后的回滚不能承诺总能保留旧实例：同端口重绑、排他账户lease及旧service永久shutdown等情况下，准备新实例前可能必须先停止旧实例；旧配置重新启动也可能受外部环境影响而失败。
 
-## 启动契约与局部控制结构（本轮建议，尚未批准实现）
+## 启动契约与局部控制结构（设计已确认，尚未修改实现）
+
+用户已确认本节的实例启动契约、Tunnel 分字段处理和具体 owner 配合串行协调入口。以下源码分析与设计方向保留，具体应用失败/响应规则仍按 task_plan.md 标记为待定。
 
 ### 实例角色、身份与启动参数
 
@@ -100,3 +102,19 @@
 - 建议分别管理持久目标与实际已应用配置：启动字段在当前实例保留启动值，其余字段按实际应用结果更新。应用候选按当前启动契约构造/校验，不能拿未来模式验证当前实例；目标配置自身的有效性仍须校验。
 - 局部组件失败时不能直接将整个 desired Config 宣布已生效。具体失败保留/重试/响应合同仍待讨论，未在本轮擅定。
 - 启动契约同样必须约束故障恢复：当前 supervisor 的 worker 命令固定旧 profile，但 worker 重新从可变 config_path 读取并检查 mode/profile（runtime/supervisor.rs:359-370；runtime/startup.rs:85-96）。保存未来 mode/profile 后，当前 worker 一旦故障重启会被 stdio_worker_config_mismatch 拒绝。后续设计须让同一 Agent 生命周期的重拉子进程使用当前启动契约；只有用户重启整个实例才采用新的启动值。不能只修热更新过滤而遗漏恢复路径。
+
+## 已确认的工具集默认、update 权限与入口
+
+- “默认关闭”指 config init/预设初始选择不包含 config，而不是工具未选中时仍允许部分 config 调用。当前 normal() 由 all() 排除Room、room() 直接all()（config/config.rs:118-143），新增Config枚举时必须同时修正各预设，避免机械新增后默认开启。
+- 当前普通操作统一检查 Toolset（operations/operation.rs:367-374），工具发现也按同集合过滤（ingress/stdio_schema.rs:46-58）；远程入口都须最终走目标Agent门禁。已有显式集合保持不变。
+- 用户选择整个 update 操作级 allow/confirm，不做字段级 ACL。现有 authorize_sensitive_operation 的 Confirm 分支仅 allow_once 成功，其余返回错误（operations/confirmation.rs:185-234），能复用其严格语义；不能复用主动 acquisition 的 timeout/unavailable 允许回退路径。
+- 更新 config.updatePolicy 自身也须按当前有效策略授权。确认在文件锁之外等待，批准针对该次 changes 的操作意图；实际写入继续按既定规则作用于最新持久配置，不能因此恢复 revision 机制。
+- 独立字段建议使用 config.updatePolicy，默认confirm；这两个具体值是实现建议，不冒充用户逐字指定。
+- 全入口范围已由用户确认，需新增共享协议DTO/HubCommand、Agent operation/local_service、Hub HTTP/OpenAPI/Apps MCP 的真实链路与响应映射，而不只注册Agent工具表。配置对象始终是目标Agent。
+- 权限只对API的config.update操作施加；共享底层修改引擎不应将本地CLI/TUI配置管理误绑到默认关闭的Toolset。敏感输入/输出/报告统一脱敏，沿用已有配置凭据格式，不扩成逐字段权限体系。
+
+## 实施与验收补充
+
+- Shared Config目录以真实Serde结构和已有字段描述组合；Serde省略的可选字段仍由既有字段描述补入，避免optional path在CLI/TUI/API消失。公开请求/结果DTO只定义于protocol/config_api.rs；Agent及Hub MCP输入schema复用该定义，OpenAPI由同一schema导出工具维护。
+- ConfigRuntime只串行协调具体owner，不重建AppState。锁顺序是先协调锁，再读取最新文件；服务排空在Config写锁之外，准备完成后发布对应active快照。Browser slot与lazy discovery使用同一锁；HTTP观察attempt目标而非仅收到Notify。
+- 旧固定断言不用于阻止已批准的行为升级。具名真实链路保障涵盖config_mcp_*、hub_reconfiguration_waits_for_reply_ack_and_does_not_replay_to_new_target、standalone_http_config_update_self_disable_and_failed_rebind_preserve_service、editor_replays_leaf_and_collection_intents_on_latest_persisted_config及secret_reconfigure_reaps_old_sync_releases_owner_and_reopens_same_account；实际通过情况以progress中的远端结果为准。

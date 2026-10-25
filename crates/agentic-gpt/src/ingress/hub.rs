@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+
 use crate::process_model::ProcessInfo;
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, EventOrigin,
-    EventResponseDisposition, EventSource, HubCommand, HubCommandEnvelope, HubMessage,
+    AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, ConfigApplyStatus,
+    EventOrigin, EventResponseDisposition, EventSource, HubCommand, HubCommandEnvelope, HubMessage,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -9,7 +12,7 @@ use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Response as WsResponse;
@@ -17,6 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{
     client_async_tls_with_config, connect_async, MaybeTlsStream, WebSocketStream,
 };
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -27,193 +31,216 @@ use crate::{
     state::AppState,
     transport_ledger::{self, StoredCommand},
     utils::{
-        log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
-        HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
+        log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS, HEARTBEAT_INTERVAL_SECS,
+        RECONNECT_DELAY_SECS,
     },
 };
 
-pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
-    if state.runtime.hub_mode == crate::state::HubMode::ReportingOnly {
-        return connect_reporting_loop(state).await;
+/// Current connection attempt, independent of the durable desired configuration.
+#[derive(Clone, Debug)]
+pub(crate) struct HubConnectionState {
+    pub(crate) target: Option<String>,
+    pub(crate) status: ConfigApplyStatus,
+    pub(crate) error: Option<String>,
+}
+
+impl Default for HubConnectionState {
+    fn default() -> Self {
+        Self {
+            target: None,
+            status: ConfigApplyStatus::Applied,
+            error: None,
+        }
     }
+}
+
+#[derive(Clone)]
+struct ConnectionRoute {
+    target: String,
+    sender: mpsc::UnboundedSender<AgentMessage>,
+    config_requests: Arc<StdMutex<HashMap<String, String>>>,
+    progress: Arc<Notify>,
+}
+
+impl ConnectionRoute {
+    fn new(target: String, sender: mpsc::UnboundedSender<AgentMessage>) -> Self {
+        Self {
+            target,
+            sender,
+            config_requests: Arc::new(StdMutex::new(HashMap::new())),
+            progress: Arc::new(Notify::new()),
+        }
+    }
+
+    fn track_config(&self, envelope: &HubCommandEnvelope) {
+        self.track_config_command(&envelope.run_id, &envelope.request_id, &envelope.command);
+    }
+
+    fn track_config_command(&self, run_id: &str, request_id: &str, command: &HubCommand) {
+        if matches!(command, HubCommand::ConfigUpdate { .. }) {
+            self.config_requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(run_id.to_string(), request_id.to_string());
+        }
+    }
+
+    fn acknowledge(&self, run_id: &str, request_id: &str) {
+        let mut pending = self
+            .config_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if pending
+            .get(run_id)
+            .is_some_and(|expected| expected == request_id)
+        {
+            pending.remove(run_id);
+            self.progress.notify_one();
+        }
+    }
+
+    fn has_pending_config(&self) -> bool {
+        !self
+            .config_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+}
+
+struct ConnectionTask(tokio::task::JoinHandle<()>);
+
+impl ConnectionTask {
+    async fn stop(&mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
+    }
+}
+
+impl Drop for ConnectionTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn hub_target(config: &Config) -> String {
+    if let Ok(mut url) = reqwest::Url::parse(&config.hub.url) {
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        url.set_fragment(None);
+        return url.as_str().trim_end_matches('/').to_owned();
+    }
+    // Invalid endpoints cannot connect; avoid retaining credential-like input in diagnostics.
+    "invalid_hub_target".to_owned()
+}
+
+async fn connection_status(
+    state: &AppState,
+    target: Option<String>,
+    status: ConfigApplyStatus,
+    error: Option<&str>,
+) {
+    *state.config_runtime.hub_connection.write().await = HubConnectionState {
+        target,
+        status,
+        error: error.map(str::to_owned),
+    };
+}
+
+pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
+    connect_loop_with_shutdown(state, CancellationToken::new()).await
+}
+
+pub(crate) async fn connect_loop_with_shutdown(
+    state: AppState,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    // Non-Hub runtimes retain this owner even when the auxiliary connection starts disabled.
+    let reporting = state.runtime.transport != crate::state::Transport::Hub;
     loop {
         let config = state.config.read().await.clone();
-        if config.hub.transport == "sse" {
-            match connect_sse(state.clone(), config).await {
-                Err(error) => log_warn(format!("sse connection failed: {error}")),
-                Ok(()) => log_warn("sse connection closed".to_string()),
+        let enabled = !reporting || config.auxiliary_hub_enabled();
+        if !enabled {
+            // No connection is the successfully applied disabled configuration.
+            *state.config_runtime.hub_applied.write().await = Some(config);
+            connection_status(&state, None, ConfigApplyStatus::Applied, None).await;
+            tokio::select! {
+                _ = state.config_runtime.hub_changed.notified() => {},
+                _ = shutdown.cancelled() => return Ok(()),
             }
-            confirmation::fail_pending_confirmations(&state, "provider_unavailable").await;
-            log_info(format!("reconnecting in {RECONNECT_DELAY_SECS}s"));
-            sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
             continue;
         }
-        let url = format!(
-            "{}/v1/agents/{}/connect",
-            config.hub.url.trim_end_matches('/'),
-            config.agent_id
+        *state.config_runtime.hub_applied.write().await = None;
+        let target = hub_target(&config);
+        connection_status(
+            &state,
+            Some(target.clone()),
+            ConfigApplyStatus::Applying,
+            None,
         )
-        .replace("http://", "ws://")
-        .replace("https://", "wss://");
-        let mut request = url.into_client_request()?;
-        request
-            .headers_mut()
-            .insert("x-agent-secret", config.hub.agent_secret.parse()?);
-
-        let proxy = proxy_url(&config.hub.url);
-        log_info(format!(
-            "connecting to hub; agentId={}; proxy={}",
-            config.agent_id,
-            proxy.as_deref().unwrap_or("none")
-        ));
-        match timeout(
-            Duration::from_secs(CONNECT_TIMEOUT_SECS),
-            connect_hub(request, proxy),
-        )
-        .await
-        {
-            Err(_) => {
-                log_warn(format!("connect timed out after {CONNECT_TIMEOUT_SECS}s"));
-            }
-            Ok(Err(error)) => {
-                log_warn(format!("connect failed: {error}"));
-            }
-            Ok(Ok((stream, _))) => {
-                log_info("connected to hub".to_string());
-                let (mut write, mut read) = stream.split();
-                let (tx, mut rx) = mpsc::unbounded_channel::<AgentMessage>();
-                *state.hub_sender.lock().await = Some(tx.clone());
-                let writer = tokio::spawn(async move {
-                    while let Some(message) = rx.recv().await {
-                        let Ok(text) = serde_json::to_string(&message) else {
-                            break;
-                        };
-                        if write.send(Message::Text(text.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-                let hello = AgentMessage::Hello {
-                    boot_generation: state.boot_generation.clone(),
-                    role: state.runtime.profile.role(),
-                    connection_mode: AgentConnectionMode::CommandCapable,
-                    config_summary: config.safe_summary(),
-                    notification_channels: notify::freedesktop_notification_channel(&config)
-                        .into_iter()
-                        .collect(),
-                };
-                tx.send(hello)?;
-                reconcile_transport_runs(&state, &tx).await;
-                let mut heartbeat =
-                    tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                let mut last_heartbeat_ack = Instant::now();
-                loop {
-                    tokio::select! {
-                        maybe_message = read.next() => {
-                            let Some(message) = maybe_message else {
-                                log_warn("hub connection closed".to_string());
-                                break;
-                            };
-                            let message = match message {
-                                Ok(Message::Text(text)) => text.to_string(),
-                                Ok(Message::Close(frame)) => {
-                                    log_warn(format!("hub closed websocket; frame={frame:?}"));
-                                    break;
-                                }
-                                Ok(Message::Pong(_)) => {
-                                    last_heartbeat_ack = Instant::now();
-                                    continue;
-                                }
-                                Ok(_) => continue,
-                                Err(error) => {
-                                    log_warn(format!("hub websocket error: {error}"));
-                                    break;
-                                }
-                            };
-                            let value: serde_json::Value = match serde_json::from_str(&message) {
-                                Ok(value) => value,
-                                Err(error) => {
-                                    log_warn(format!("ignored invalid hub message: {error}"));
-                                    continue;
-                                }
-                            };
-                            if let Ok(message) = serde_json::from_value::<HubMessage>(value.clone()) {
-                                match message {
-                                    HubMessage::SecretCommand { dispatch_id, command } => {
-                                        handle_secret_command(&state, &tx, dispatch_id, *command);
-                                    }
-                                    HubMessage::HeartbeatAck { .. } => {
-                                        last_heartbeat_ack = Instant::now();
-                                    }
-                                    HubMessage::ConfirmationResponse { request_id, decision, reason } => {
-                                        let value = confirmation::confirmation_decision_value(decision);
-                                        log_info(format!(
-                                            "confirmation response received; requestId={request_id}; decision={value}; reason={reason}"
-                                        ));
-                                        if let Some(sender) = state.pending_confirmations.lock().await.remove(&request_id) {
-                                            let _ = sender.send(value);
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                            let envelope: HubCommandEnvelope = match serde_json::from_value(value) {
-                                Ok(envelope) => envelope,
-                                Err(_) => {
-                                    log_warn("ignored invalid reliable hub envelope".to_string());
-                                    continue;
-                                }
-                            };
-                            handle_reliable_envelope(&state, &tx, envelope).await;
-                        }
-                        _ = heartbeat.tick() => {
-                            if last_heartbeat_ack.elapsed() > Duration::from_secs(HEARTBEAT_ACK_TIMEOUT_SECS) {
-                                log_warn("heartbeat ack timeout; reconnecting".to_string());
-                                break;
-                            }
-                            let heartbeat = AgentMessage::Heartbeat { sent_at: Utc::now() };
-                            if let Err(error) = tx.send(heartbeat) {
-                                log_warn(format!("heartbeat send failed: {error}"));
-                                break;
-                            }
-                        }
-                    }
-                }
-                *state.hub_sender.lock().await = None;
-                confirmation::fail_pending_confirmations(&state, "provider_unavailable").await;
-                writer.abort();
-            }
-        }
-        log_info(format!("reconnecting in {RECONNECT_DELAY_SECS}s"));
-        sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
-    }
-}
-
-async fn connect_reporting_loop(state: AppState) -> Result<()> {
-    loop {
-        let config = state.config.read().await.clone();
-        let enabled = config.auxiliary_hub_enabled();
-        if !enabled {
-            return Ok(());
-        }
+        .await;
         let result = if config.hub.transport == "sse" {
-            connect_reporting_sse(state.clone(), config).await
+            connect_sse_session(state.clone(), config, reporting, shutdown.clone()).await
         } else {
-            connect_reporting_websocket(state.clone(), config).await
+            connect_websocket_session(state.clone(), config, reporting, shutdown.clone()).await
         };
-        if let Err(error) = result {
-            log_warn(format!("hub reporting connection failed: {error}"));
+        // Also cover failures/cancellation before a transport reached its ready point.
+        *state.config_runtime.hub_applied.write().await = None;
+        if shutdown.is_cancelled() {
+            return result;
         }
+        let reconfigured = result.is_ok()
+            && state.config_runtime.hub_connection.read().await.status
+                == ConfigApplyStatus::Applying;
         confirmation::fail_pending_confirmations(&state, "provider_unavailable").await;
-        log_info(format!(
-            "reconnecting reporting connection in {RECONNECT_DELAY_SECS}s"
-        ));
-        sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+        if let Err(error) = result {
+            log_warn(format!("hub connection ended: {error}"));
+            connection_status(
+                &state,
+                Some(target),
+                ConfigApplyStatus::Failed,
+                Some("hub_connection_failed"),
+            )
+            .await;
+        } else if !reconfigured {
+            // A normal peer close still leaves no applied connection during backoff.
+            connection_status(&state, Some(target), ConfigApplyStatus::Applying, None).await;
+        }
+        if reconfigured {
+            continue;
+        }
+        let desired = state.config.read().await.clone();
+        if hub_target(&desired) != hub_target_from_state_config(&state).await
+            || (reporting && !desired.auxiliary_hub_enabled())
+        {
+            continue;
+        }
+        // Notifications interrupt backoff. No spawned transport tasks remain at this point.
+        tokio::select! {
+            _ = state.config_runtime.hub_changed.notified() => {},
+            _ = sleep(Duration::from_secs(RECONNECT_DELAY_SECS)) => {},
+            _ = shutdown.cancelled() => return Ok(()),
+        }
     }
 }
 
-async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<()> {
+async fn hub_target_from_state_config(state: &AppState) -> String {
+    state
+        .config_runtime
+        .hub_connection
+        .read()
+        .await
+        .target
+        .clone()
+        .unwrap_or_default()
+}
+
+async fn connect_websocket_session(
+    state: AppState,
+    config: Config,
+    reporting: bool,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let url = format!(
         "{}/v1/agents/{}/connect",
         config.hub.url.trim_end_matches('/'),
@@ -225,226 +252,139 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
     request
         .headers_mut()
         .insert("x-agent-secret", config.hub.agent_secret.parse()?);
-    let proxy = proxy_url(&config.hub.url);
-    let (stream, _) = timeout(
+    let connecting = timeout(
         Duration::from_secs(CONNECT_TIMEOUT_SECS),
-        connect_hub(request, proxy),
-    )
-    .await
-    .map_err(|_| anyhow!("hub reporting connect timeout"))??;
+        connect_hub(request, proxy_url(&config.hub.url)),
+    );
+    let (stream, _) = tokio::select! {
+        result = connecting => result.map_err(|_| anyhow!("hub_connect_timeout"))??,
+        _ = state.config_runtime.hub_changed.notified() => return Ok(()),
+        _ = shutdown.cancelled() => return Ok(()),
+    };
     let (mut write, mut read) = stream.split();
-    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<AgentMessage>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<AgentMessage>();
     let (event_tx, mut event_rx) = mpsc::channel::<AgentMessage>(64);
-    *state.hub_sender.lock().await = Some(control_tx.clone());
-    *state.reporting_sender.lock().await = config.hub_reporting_enabled().then(|| event_tx.clone());
-    let writer = tokio::spawn(async move {
+    let route = ConnectionRoute::new(hub_target(&config), tx.clone());
+    *state.hub_sender.lock().await = Some(tx.clone());
+    *state.reporting_sender.lock().await =
+        (reporting && config.hub_reporting_enabled()).then(|| event_tx.clone());
+    let mut writer = ConnectionTask(tokio::spawn(async move {
         loop {
             let message = tokio::select! {
                 biased;
-                Some(message) = control_rx.recv() => message,
+                Some(message) = rx.recv() => message,
                 Some(message) = event_rx.recv() => message,
                 else => break,
             };
-            let Ok(text) = serde_json::to_string(&message) else {
-                continue;
+            let text = match serde_json::to_string(&message) {
+                Ok(text) => text,
+                Err(_) => continue,
             };
             if write.send(Message::Text(text.into())).await.is_err() {
                 break;
             }
         }
-    });
-    control_tx.send(AgentMessage::Hello {
-        boot_generation: state.boot_generation.clone(),
-        role: state.runtime.profile.role(),
-        connection_mode: AgentConnectionMode::ReportingOnly,
-        config_summary: config.safe_summary(),
-        notification_channels: notify::freedesktop_notification_channel(&config)
-            .into_iter()
-            .collect(),
-    })?;
-    log_info(format!(
-        "hub reporting connected; transport=websocket; agentId={}",
-        config.agent_id
-    ));
-    if config.hub_reporting_enabled() {
-        send_current_process_snapshots(&state, &event_tx).await;
-    }
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut last_heartbeat_ack = Instant::now();
-    loop {
-        tokio::select! {
-            maybe_message = read.next() => {
-                let Some(message) = maybe_message else { break; };
-                let text = match message {
-                    Ok(Message::Text(text)) => text.to_string(),
-                    Ok(Message::Close(_)) => break,
-                    Ok(Message::Pong(_)) => { last_heartbeat_ack = Instant::now(); continue; }
-                    Ok(_) => continue,
-                    Err(error) => return Err(anyhow!("hub reporting websocket error: {error}")),
-                };
-                handle_reporting_inbound(&state, &text).await;
-            }
-            _ = heartbeat.tick() => {
-                if last_heartbeat_ack.elapsed() > Duration::from_secs(HEARTBEAT_ACK_TIMEOUT_SECS) {
-                    return Err(anyhow!("hub reporting heartbeat timeout"));
+    }));
+    let result = async {
+        tx.send(AgentMessage::Hello {
+            boot_generation: state.boot_generation.clone(), role: state.runtime.profile.role(),
+            connection_mode: if reporting { AgentConnectionMode::ReportingOnly } else { AgentConnectionMode::CommandCapable },
+            config_summary: config.safe_summary(),
+            notification_channels: notify::freedesktop_notification_channel(&config).into_iter().collect(),
+        })?;
+        *state.config_runtime.hub_applied.write().await = Some(config.clone());
+        connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applied, None).await;
+        if reporting {
+            if config.hub_reporting_enabled() { send_current_process_snapshots(&state, &event_tx).await; }
+        } else { reconcile_transport_runs(&state, &route).await; }
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_heartbeat_ack = Instant::now();
+        let mut reconfigure = false;
+        let mut reconfigure_started = None;
+        loop {
+            if reconfigure && !route.has_pending_config() { break; }
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = state.config_runtime.hub_changed.notified() => {
+                    reconfigure = true;
+                    reconfigure_started.get_or_insert_with(Instant::now);
+                    connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applying, None).await;
                 }
-                if control_tx.send(AgentMessage::Heartbeat { sent_at: Utc::now() }).is_err() {
-                    break;
+                _ = route.progress.notified(), if reconfigure => {},
+                message = read.next() => {
+                    let Some(message) = message else { break; };
+                    match message? {
+                        Message::Text(text) => {
+                            if handle_connection_inbound(&state, &route, &text, reporting, !reconfigure).await {
+                                last_heartbeat_ack = Instant::now();
+                            }
+                        }
+                        Message::Pong(_) => last_heartbeat_ack = Instant::now(),
+                        Message::Close(_) => break,
+                        _ => {},
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    if reconfigure_started.is_some_and(|started: Instant| started.elapsed() > Duration::from_secs(180)) {
+                        return Err(anyhow!("hub_reconfigure_reply_timeout"));
+                    }
+                    if last_heartbeat_ack.elapsed() > Duration::from_secs(HEARTBEAT_ACK_TIMEOUT_SECS) {
+                        return Err(anyhow!("hub_heartbeat_timeout"));
+                    }
+                    tx.send(AgentMessage::Heartbeat { sent_at: Utc::now() })?;
                 }
             }
         }
-    }
-    writer.abort();
-    let _ = writer.await;
-    clear_reporting_senders(&state, &control_tx, &event_tx).await;
-    log_info("hub reporting disconnected; transport=websocket".to_string());
-    Ok(())
+        Ok(())
+    }.await;
+    writer.stop().await;
+    clear_reporting_senders(&state, &tx, &event_tx).await;
+    *state.config_runtime.hub_applied.write().await = None;
+    result
 }
 
-async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
-    let connection_id = format!("conn_{}", Uuid::new_v4().simple());
-    let base = config.hub.url.trim_end_matches('/');
-    let events_url = format!(
-        "{}/v1/agents/{}/events?connectionId={}",
-        base, config.agent_id, connection_id
-    );
-    let messages_url = format!(
-        "{}/v1/agents/{}/messages?connectionId={}",
-        base, config.agent_id, connection_id
-    );
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
-        .build()
-        .map_err(|error| anyhow!("{error}"))?;
-    let response = client
-        .get(events_url)
-        .header("x-agent-secret", &config.hub.agent_secret)
-        .send()
-        .await
-        .map_err(|error| anyhow!("{error}"))?;
-    if !response.status().is_success() {
-        return Err(anyhow!(
-            "sse reporting connect failed: {}",
-            response.status()
-        ));
-    }
-    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<AgentMessage>();
-    let (event_tx, mut event_rx) = mpsc::channel::<AgentMessage>(64);
-    *state.hub_sender.lock().await = Some(control_tx.clone());
-    *state.reporting_sender.lock().await = config.hub_reporting_enabled().then(|| event_tx.clone());
-    let post_client = client.clone();
-    let post_url = messages_url.clone();
-    let post_secret = config.hub.agent_secret.clone();
-    let writer = tokio::spawn(async move {
-        loop {
-            let message = tokio::select! {
-                biased;
-                Some(message) = control_rx.recv() => message,
-                Some(message) = event_rx.recv() => message,
-                else => break,
-            };
-            let result = post_client
-                .post(&post_url)
-                .header("x-agent-secret", &post_secret)
-                .json(&message)
-                .send()
-                .await;
-            if let Err(error) = result {
-                log_warn(format!("sse reporting event dropped: {error}"));
-            }
-        }
-    });
-    control_tx.send(AgentMessage::Hello {
-        boot_generation: state.boot_generation.clone(),
-        role: state.runtime.profile.role(),
-        connection_mode: AgentConnectionMode::ReportingOnly,
-        config_summary: config.safe_summary(),
-        notification_channels: notify::freedesktop_notification_channel(&config)
-            .into_iter()
-            .collect(),
-    })?;
-    log_info(format!(
-        "hub reporting connected; transport=sse; agentId={}",
-        config.agent_id
-    ));
-    if config.hub_reporting_enabled() {
-        send_current_process_snapshots(&state, &event_tx).await;
-    }
-    let heartbeat_tx = control_tx.clone();
-    let heartbeat = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            interval.tick().await;
-            if heartbeat_tx
-                .send(AgentMessage::Heartbeat {
-                    sent_at: Utc::now(),
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    let mut data = String::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| anyhow!("{error}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(index) = buffer.find('\n') {
-            let mut line = buffer[..index].to_string();
-            buffer = buffer[index + 1..].to_string();
-            if line.ends_with('\r') {
-                line.pop();
-            }
-            if line.is_empty() {
-                if !data.is_empty() {
-                    handle_reporting_inbound(&state, &data).await;
-                    data.clear();
-                }
-            } else if let Some(value) = line.strip_prefix("data:") {
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                data.push_str(value.trim_start());
-            }
-        }
-    }
-    writer.abort();
-    heartbeat.abort();
-    let _ = writer.await;
-    let _ = heartbeat.await;
-    clear_reporting_senders(&state, &control_tx, &event_tx).await;
-    log_info("hub reporting disconnected; transport=sse".to_string());
-    Ok(())
-}
-
-async fn handle_reporting_inbound(state: &AppState, text: &str) {
+async fn handle_connection_inbound(
+    state: &AppState,
+    route: &ConnectionRoute,
+    text: &str,
+    reporting: bool,
+    admit_commands: bool,
+) -> bool {
     if let Ok(message) = serde_json::from_str::<HubMessage>(text) {
         match message {
-            HubMessage::SecretCommand { .. } => {
-                log_warn("ignored execution command on reporting-only connection".to_string());
+            HubMessage::ResponseAck { run_id, request_id } => {
+                route.acknowledge(&run_id, &request_id)
             }
-            HubMessage::HeartbeatAck { .. } => {}
+            HubMessage::HeartbeatAck { .. } => return true,
+            HubMessage::SecretCommand {
+                dispatch_id,
+                command,
+            } => {
+                if !reporting && admit_commands {
+                    handle_secret_command(state, &route.sender, dispatch_id, *command);
+                }
+            }
             HubMessage::ConfirmationResponse {
                 request_id,
                 decision,
-                reason,
+                ..
             } => {
-                let value = confirmation::confirmation_decision_value(decision);
-                log_info(format!(
-                    "reporting confirmation response received; requestId={request_id}; decision={value}; reason={reason}"
-                ));
                 if let Some(sender) = state.pending_confirmations.lock().await.remove(&request_id) {
-                    let _ = sender.send(value);
+                    let _ = sender.send(confirmation::confirmation_decision_value(decision));
                 }
             }
         }
-    } else if serde_json::from_str::<HubCommandEnvelope>(text).is_ok() {
-        log_warn("ignored execution command on reporting-only connection".to_string());
+        return false;
     }
+    if reporting {
+        log_warn("ignored execution command on reporting-only connection".to_owned());
+    } else if admit_commands {
+        if let Ok(envelope) = serde_json::from_str::<HubCommandEnvelope>(text) {
+            handle_reliable_envelope(state, route, envelope).await;
+        }
+    }
+    false
 }
 
 async fn clear_reporting_senders(
@@ -660,148 +600,156 @@ fn bounded_reason(value: &str) -> String {
     output
 }
 
-async fn connect_sse(state: AppState, config: Config) -> Result<()> {
+async fn connect_sse_session(
+    state: AppState,
+    config: Config,
+    reporting: bool,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let connection_id = format!("conn_{}", Uuid::new_v4().simple());
     let base = config.hub.url.trim_end_matches('/');
     let events_url = format!(
-        "{}/v1/agents/{}/events?connectionId={}",
-        base, config.agent_id, connection_id
+        "{base}/v1/agents/{}/events?connectionId={connection_id}",
+        config.agent_id
     );
     let messages_url = format!(
-        "{}/v1/agents/{}/messages?connectionId={}",
-        base, config.agent_id, connection_id
+        "{base}/v1/agents/{}/messages?connectionId={connection_id}",
+        config.agent_id
     );
-    log_info(format!(
-        "connecting to hub via sse; agentId={}; connectionId={}",
-        config.agent_id, connection_id
-    ));
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
-        .build()
-        .map_err(|error| anyhow!("{error}"))?;
-    let response = client
+        .build()?;
+    let connecting = client
         .get(events_url)
         .header("x-agent-secret", &config.hub.agent_secret)
-        .send()
-        .await
-        .map_err(|error| anyhow!("{error}"))?;
+        .send();
+    let response = tokio::select! {
+        response = timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), connecting) => response.map_err(|_| anyhow!("hub_connect_timeout"))??,
+        _ = state.config_runtime.hub_changed.notified() => return Ok(()),
+        _ = shutdown.cancelled() => return Ok(()),
+    };
     if !response.status().is_success() {
-        return Err(anyhow!("sse connect failed: {}", response.status()));
+        return Err(anyhow!("sse_connect_failed"));
     }
-    log_info("connected to hub via sse".to_string());
-
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentMessage>();
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentMessage>(64);
+    let route = ConnectionRoute::new(hub_target(&config), tx.clone());
     *state.hub_sender.lock().await = Some(tx.clone());
+    *state.reporting_sender.lock().await =
+        (reporting && config.hub_reporting_enabled()).then(|| event_tx.clone());
     let post_client = client.clone();
-    let agent_secret = config.hub.agent_secret.clone();
-    let writer = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            let secret_response = matches!(message, AgentMessage::SecretResponse { .. });
+    let secret = config.hub.agent_secret.clone();
+    let writer_route = route.clone();
+    let mut writer = ConnectionTask(tokio::spawn(async move {
+        loop {
+            let message = tokio::select! {
+                biased;
+                Some(message) = rx.recv() => message,
+                Some(message) = event_rx.recv() => message,
+                else => break,
+            };
+            let secret_response = matches!(&message, AgentMessage::SecretResponse { .. });
             let mut delay = Duration::from_millis(250);
             loop {
                 let response = post_client
                     .post(&messages_url)
-                    .header("x-agent-secret", &agent_secret)
+                    .header("x-agent-secret", &secret)
                     .json(&message)
+                    .timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
                     .send()
                     .await;
                 match response {
-                    Ok(response) if response.status().is_success() => break,
-                    Ok(response) => {
-                        if classify_sse_post_status(response.status()) == SsePostStatus::Stale {
-                            log_warn(
-                                "sse post rejected as stale connection; stopping writer"
-                                    .to_string(),
-                            );
-                            return;
+                    Ok(response) if response.status().is_success() => {
+                        if let AgentMessage::Response {
+                            run_id: Some(run_id),
+                            request_id,
+                            ..
+                        } = &message
+                        {
+                            // POST success means the Hub has processed/store_result'd the reply.
+                            writer_route.acknowledge(run_id, request_id);
                         }
-                        log_warn(format!("sse post failed; status={}", response.status()));
+                        break;
                     }
-                    Err(error) => log_warn(format!("sse post failed: {error}")),
-                }
-                if secret_response {
-                    // Secret results have no replay contract, including in-memory POST retries.
-                    break;
+                    Ok(response)
+                        if classify_sse_post_status(response.status()) == SsePostStatus::Stale =>
+                    {
+                        return
+                    }
+                    _ if secret_response || reporting => break,
+                    _ => {}
                 }
                 sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(10));
             }
         }
-    });
-
-    let heartbeat_tx = tx.clone();
-    let heartbeat = tokio::spawn(async move {
-        let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            heartbeat.tick().await;
-            if heartbeat_tx
-                .send(AgentMessage::Heartbeat {
-                    sent_at: Utc::now(),
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
+    }));
     let result = async {
         tx.send(AgentMessage::Hello {
-            boot_generation: state.boot_generation.clone(),
-            role: state.runtime.profile.role(),
-            connection_mode: AgentConnectionMode::CommandCapable,
+            boot_generation: state.boot_generation.clone(), role: state.runtime.profile.role(),
+            connection_mode: if reporting { AgentConnectionMode::ReportingOnly } else { AgentConnectionMode::CommandCapable },
             config_summary: config.safe_summary(),
-            notification_channels: notify::freedesktop_notification_channel(&config)
-                .into_iter()
-                .collect(),
+            notification_channels: notify::freedesktop_notification_channel(&config).into_iter().collect(),
         })?;
-        reconcile_transport_runs(&state, &tx).await;
-
+        *state.config_runtime.hub_applied.write().await = Some(config.clone());
+        connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applied, None).await;
+        if reporting {
+            if config.hub_reporting_enabled() { send_current_process_snapshots(&state, &event_tx).await; }
+        } else { reconcile_transport_runs(&state, &route).await; }
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut data = String::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| anyhow!("{error}"))?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(index) = buffer.find('\n') {
-                let mut line = buffer[..index].to_string();
-                buffer = buffer[index + 1..].to_string();
-                if line.ends_with('\r') {
-                    line.pop();
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_heartbeat_ack = Instant::now();
+        let mut reconfigure = false;
+        let mut reconfigure_started = None;
+        loop {
+            if reconfigure && !route.has_pending_config() { break; }
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = state.config_runtime.hub_changed.notified() => {
+                    reconfigure = true;
+                    reconfigure_started.get_or_insert_with(Instant::now);
+                    connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applying, None).await;
                 }
-                if line.is_empty() {
-                    if !data.is_empty() {
-                        handle_sse_data(&state, &tx, std::mem::take(&mut data)).await;
+                _ = route.progress.notified(), if reconfigure => {},
+                chunk = stream.next() => {
+                    let Some(chunk) = chunk else { break; };
+                    buffer.push_str(&String::from_utf8_lossy(&chunk?));
+                    while let Some(index) = buffer.find('\n') {
+                        let line = buffer[..index].trim_end_matches('\r').to_owned();
+                        buffer = buffer[index + 1..].to_owned();
+                        if line.is_empty() {
+                            if !data.is_empty() {
+                                if handle_connection_inbound(&state, &route, &data, reporting, !reconfigure).await {
+                                    last_heartbeat_ack = Instant::now();
+                                }
+                                data.clear();
+                            }
+                        } else if let Some(value) = line.strip_prefix("data:") {
+                            if !data.is_empty() { data.push('\n'); }
+                            data.push_str(value.trim_start());
+                        }
                     }
-                    continue;
                 }
-                if let Some(value) = line.strip_prefix("data:") {
-                    if !data.is_empty() {
-                        data.push('\n');
+                _ = heartbeat.tick() => {
+                    if reconfigure_started.is_some_and(|started: Instant| started.elapsed() > Duration::from_secs(180)) {
+                        return Err(anyhow!("hub_reconfigure_reply_timeout"));
                     }
-                    data.push_str(value.trim_start());
+                    if last_heartbeat_ack.elapsed() > Duration::from_secs(HEARTBEAT_ACK_TIMEOUT_SECS) {
+                        return Err(anyhow!("hub_heartbeat_timeout"));
+                    }
+                    tx.send(AgentMessage::Heartbeat { sent_at: Utc::now() })?;
                 }
             }
         }
         Ok(())
-    }
-    .await;
-    writer.abort();
-    heartbeat.abort();
-    clear_hub_sender_if_current(&state, &tx).await;
+    }.await;
+    writer.stop().await;
+    clear_reporting_senders(&state, &tx, &event_tx).await;
+    *state.config_runtime.hub_applied.write().await = None;
     result
-}
-
-async fn clear_hub_sender_if_current(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>) {
-    let mut current = state.hub_sender.lock().await;
-    if current
-        .as_ref()
-        .map(|sender| sender.same_channel(tx))
-        .unwrap_or(false)
-    {
-        *current = None;
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -819,42 +767,6 @@ pub(crate) fn classify_sse_post_status(status: reqwest::StatusCode) -> SsePostSt
     } else {
         SsePostStatus::Retry
     }
-}
-
-async fn handle_sse_data(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>, data: String) {
-    if let Ok(message) = serde_json::from_str::<HubMessage>(&data) {
-        match message {
-            HubMessage::SecretCommand {
-                dispatch_id,
-                command,
-            } => {
-                handle_secret_command(state, tx, dispatch_id, *command);
-            }
-            HubMessage::HeartbeatAck { .. } => {}
-            HubMessage::ConfirmationResponse {
-                request_id,
-                decision,
-                reason,
-            } => {
-                let value = confirmation::confirmation_decision_value(decision);
-                log_info(format!(
-                    "confirmation response received; requestId={request_id}; decision={value}; reason={reason}"
-                ));
-                if let Some(sender) = state.pending_confirmations.lock().await.remove(&request_id) {
-                    let _ = sender.send(value);
-                }
-            }
-        }
-        return;
-    }
-    let envelope = match serde_json::from_str::<HubCommandEnvelope>(&data) {
-        Ok(envelope) => envelope,
-        Err(_) => {
-            log_warn("ignored invalid sse envelope".to_string());
-            return;
-        }
-    };
-    handle_reliable_envelope(state, tx, envelope).await;
 }
 
 fn handle_secret_command(
@@ -892,21 +804,31 @@ fn handle_secret_command(
 
 async fn handle_reliable_envelope(
     state: &AppState,
-    tx: &mpsc::UnboundedSender<AgentMessage>,
+    route: &ConnectionRoute,
     envelope: HubCommandEnvelope,
 ) {
+    let tx = &route.sender;
     if envelope.command.is_room_secret() {
         log_warn("rejected persistent secret command".to_string());
         return;
     }
     let agent_id = state.config.read().await.agent_id.clone();
-    let outcome = match transport_ledger::accept(&envelope, &agent_id) {
+    let outcome = match transport_ledger::accept_for_target(&envelope, &agent_id, &route.target) {
         Ok(outcome) => outcome,
         Err(error) => {
             log_warn(format!("transport ledger accept failed: {error}"));
             return;
         }
     };
+    if matches!(
+        &outcome,
+        transport_ledger::AcceptOutcome::FirstAccepted
+            | transport_ledger::AcceptOutcome::DuplicateAccepted
+            | transport_ledger::AcceptOutcome::DuplicateStarted
+            | transport_ledger::AcceptOutcome::Completed(_)
+    ) {
+        route.track_config(&envelope);
+    }
     match outcome {
         transport_ledger::AcceptOutcome::HashMismatch => {
             let _ = tx.send(AgentMessage::TransportRunStatus {
@@ -985,9 +907,15 @@ async fn handle_reliable_envelope(
                 agent_id,
             };
             let command_state = state.clone();
+            let command_route = route.clone();
             tokio::spawn(async move {
-                if let Err(error) =
-                    handle_hub_command(command_state, envelope.command, Some(identity)).await
+                if let Err(error) = handle_hub_command_on_connection(
+                    command_state,
+                    envelope.command,
+                    Some(identity),
+                    Some(command_route),
+                )
+                .await
                 {
                     log_warn(format!("hub command failed: {error}"));
                 }
@@ -1041,10 +969,24 @@ fn pending_remote_event_sources(state: &AppState) -> Result<Vec<(EventOrigin, Ve
     Ok(groups)
 }
 
-async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>) {
+async fn reconcile_transport_runs(state: &AppState, route: &ConnectionRoute) {
+    let tx = &route.sender;
+    let records = match transport_ledger::latest_records() {
+        Ok(records) => records,
+        Err(error) => {
+            log_warn(format!("transport ledger scan failed: {error}"));
+            return;
+        }
+    };
     match pending_remote_event_sources(state) {
         Ok(groups) => {
             for (origin, sources) in groups {
+                if !records.get(&origin.run_id).is_some_and(|record| {
+                    record.hub_target.as_deref() == Some(route.target.as_str())
+                        && record.agent_id.as_deref() == Some(state.transport_agent_id.as_str())
+                }) {
+                    continue;
+                }
                 if let Err(error) = tx.send(AgentMessage::EventSources { origin, sources }) {
                     log_warn(format!(
                         "pending event source recovery send failed: {error}"
@@ -1058,15 +1000,10 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
         )),
     }
     let agent_id = state.config.read().await.agent_id.clone();
-    let records = match transport_ledger::latest_records() {
-        Ok(records) => records,
-        Err(error) => {
-            log_warn(format!("transport ledger scan failed: {error}"));
-            return;
-        }
-    };
     for record in records.into_values() {
-        if record.agent_id.as_deref() != Some(agent_id.as_str()) {
+        if record.agent_id.as_deref() != Some(agent_id.as_str())
+            || record.hub_target.as_deref() != Some(route.target.as_str())
+        {
             // Legacy records and records owned by another Agent remain durable
             // evidence, but cannot be replayed or disclosed from this process.
             continue;
@@ -1120,6 +1057,7 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
                 if !matches!(claim, transport_ledger::ClaimOutcome::Claimed) {
                     continue;
                 }
+                route.track_config_command(&record.run_id, &record.request_id, &command);
                 let identity = RunIdentity {
                     run_id: record.run_id.clone(),
                     request_id: record.request_id.clone(),
@@ -1127,9 +1065,15 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
                     agent_id: agent_id.clone(),
                 };
                 let command_state = state.clone();
+                let command_route = route.clone();
                 tokio::spawn(async move {
-                    if let Err(error) =
-                        handle_hub_command(command_state, command, Some(identity)).await
+                    if let Err(error) = handle_hub_command_on_connection(
+                        command_state,
+                        command,
+                        Some(identity),
+                        Some(command_route),
+                    )
+                    .await
                     {
                         log_warn(format!("hub command failed during reconciliation: {error}"));
                     }
@@ -1290,6 +1234,7 @@ fn event_response_sources(
 
 async fn report_unreturned_event_sources(
     state: &AppState,
+    route: Option<&ConnectionRoute>,
     origin: Option<&EventOrigin>,
     dispositions: &[EventResponseDisposition],
 ) {
@@ -1303,8 +1248,9 @@ async fn report_unreturned_event_sources(
     if sources.is_empty() {
         return;
     }
-    if let Err(error) = send_agent_message(
+    if let Err(error) = send_bound_message(
         state,
+        route,
         AgentMessage::EventSources {
             origin: origin.clone(),
             sources,
@@ -1318,10 +1264,20 @@ async fn report_unreturned_event_sources(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn handle_hub_command(
     state: AppState,
     command: HubCommand,
     identity: Option<RunIdentity>,
+) -> Result<()> {
+    handle_hub_command_on_connection(state, command, identity, None).await
+}
+
+async fn handle_hub_command_on_connection(
+    state: AppState,
+    command: HubCommand,
+    identity: Option<RunIdentity>,
+    route: Option<ConnectionRoute>,
 ) -> Result<()> {
     let suppress_event_panel = matches!(
         &command,
@@ -1368,7 +1324,13 @@ pub(crate) async fn handle_hub_command(
             .panel()
             .and_then(|panel| crate::operation_result::attach_event_panel(&mut data, &panel));
         if let Err(error) = panel_result {
-            report_unreturned_event_sources(&state, event_origin.as_ref(), &event_sources).await;
+            report_unreturned_event_sources(
+                &state,
+                route.as_ref(),
+                event_origin.as_ref(),
+                &event_sources,
+            )
+            .await;
             return Err(error);
         }
     }
@@ -1383,7 +1345,13 @@ pub(crate) async fn handle_hub_command(
             &identity.agent_id,
             &data,
         ) {
-            report_unreturned_event_sources(&state, event_origin.as_ref(), &event_sources).await;
+            report_unreturned_event_sources(
+                &state,
+                route.as_ref(),
+                event_origin.as_ref(),
+                &event_sources,
+            )
+            .await;
             return Err(error);
         }
     }
@@ -1396,20 +1364,51 @@ pub(crate) async fn handle_hub_command(
     let mut delivery_error = None;
     for process in snapshots {
         let process = process_for_reporting(&state, process);
-        if let Err(error) =
-            send_agent_message(&state, AgentMessage::ProcessUpdate { process }).await
+        if let Err(error) = send_bound_message(
+            &state,
+            route.as_ref(),
+            AgentMessage::ProcessUpdate { process },
+        )
+        .await
         {
             if delivery_error.is_none() {
                 delivery_error = Some(error);
             }
         }
     }
-    if let Err(error) = send_agent_message(&state, response).await {
+    if let Err(error) = send_bound_message(&state, route.as_ref(), response).await {
         if delivery_error.is_none() {
             delivery_error = Some(error);
         }
     }
     delivery_error.map_or(Ok(()), Err)
+}
+
+async fn send_bound_message(
+    state: &AppState,
+    route: Option<&ConnectionRoute>,
+    message: AgentMessage,
+) -> Result<()> {
+    let Some(route) = route else {
+        return send_agent_message(state, message).await;
+    };
+    let message = match route.sender.send(message) {
+        Ok(()) => return Ok(()),
+        Err(error) => error.0,
+    };
+    // Same-authority reconnect may recover a running request. Holding the target read lock
+    // through sender selection prevents an endpoint replacement from racing this fallback.
+    let current = state.config_runtime.hub_connection.read().await;
+    if current.target.as_deref() != Some(route.target.as_str()) {
+        return Err(anyhow!("hub_response_target_changed"));
+    }
+    let sender = state
+        .hub_sender
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| anyhow!("hub_sender_unavailable"))?;
+    sender.send(message).map_err(|_| anyhow!("hub_send_failed"))
 }
 
 pub(crate) async fn send_agent_message(state: &AppState, message: AgentMessage) -> Result<()> {
@@ -1473,7 +1472,8 @@ mod reporting_tests {
             private_state,
             event_store,
             process_history,
-            browser_runtime: std::sync::Arc::new(tokio::sync::OnceCell::new()),
+            browser_runtime: std::sync::Arc::new(crate::state::BrowserRuntimeSlot::default()),
+            config_runtime: std::sync::Arc::new(crate::config_runtime::ConfigRuntime::default()),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
             started_at: Utc::now(),
             boot_generation: "recovery-test".to_string(),
@@ -1603,7 +1603,12 @@ mod reporting_tests {
             };
             let (transport, peer) = timeout(Duration::from_secs(5), async {
                 tokio::join!(
-                    connect_reporting_websocket(state.clone(), config.clone()),
+                    connect_websocket_session(
+                        state.clone(),
+                        config.clone(),
+                        true,
+                        CancellationToken::new()
+                    ),
                     peer
                 )
             })
@@ -1614,6 +1619,145 @@ mod reporting_tests {
             anyhow::ensure!(!marker.exists());
             anyhow::ensure!(state.hub_sender.lock().await.is_none());
         }
+        Ok(())
+    }
+
+    // ⑤ Real WebSocket ingress, durable config/receipt, acknowledgement and endpoint
+    // replacement. Protects against losing a self-update reply or disclosing it to a new Hub.
+    #[tokio::test]
+    async fn hub_reconfiguration_waits_for_reply_ack_and_does_not_replay_to_new_target(
+    ) -> Result<()> {
+        async fn next_agent_message(
+            socket: &mut WebSocketStream<TcpStream>,
+        ) -> Result<AgentMessage> {
+            loop {
+                let message = socket
+                    .next()
+                    .await
+                    .ok_or_else(|| anyhow!("socket closed"))??;
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let message: AgentMessage = serde_json::from_str(&text)?;
+                if let AgentMessage::Heartbeat { sent_at } = message {
+                    socket
+                        .send(Message::Text(
+                            serde_json::to_string(&HubMessage::HeartbeatAck {
+                                sent_at,
+                                received_at: Utc::now(),
+                            })?
+                            .into(),
+                        ))
+                        .await?;
+                } else {
+                    return Ok(message);
+                }
+            }
+        }
+
+        let home = recovery_test_home();
+        let state = recovery_test_state(&home.root);
+        let original = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let replacement = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let replacement_url = format!("http://{}", replacement.local_addr()?);
+        let mut config = state.config.read().await.clone();
+        config.mode = crate::config::RuntimeMode::Hub;
+        config.hub.enabled = true;
+        config.hub.url = format!("http://{}", original.local_addr()?);
+        let original_url = config.hub.url.clone();
+        config.hub.agent_secret = "test-agent-secret".to_owned();
+        config.toolsets.enable(crate::config::ToolNamespace::Config);
+        config.config_api.update_policy = crate::config::ConfigUpdatePolicy::Allow;
+        crate::config::write_config_with_backup(&state.config_path, &config)?;
+        *state.config.write().await = config;
+        let shutdown = CancellationToken::new();
+        let owner_state = state.clone();
+        let owner_shutdown = shutdown.clone();
+        let mut owner = ConnectionTask(tokio::spawn(async move {
+            let _ = connect_loop_with_shutdown(owner_state, owner_shutdown).await;
+        }));
+        let scenario = timeout(Duration::from_secs(15), async {
+            let (stream, _) = original.accept().await?;
+            let mut socket = tokio_tungstenite::accept_async(stream).await?;
+            anyhow::ensure!(matches!(
+                next_agent_message(&mut socket).await?,
+                AgentMessage::Hello { .. }
+            ));
+            let envelope = HubCommandEnvelope {
+                event_id: "config-change-event".to_owned(),
+                run_id: "config-change-run".to_owned(),
+                request_id: "config-change-request".to_owned(),
+                command_hash: "config-change-hash".to_owned(),
+                command: HubCommand::ConfigUpdate {
+                    request_id: "config-change-request".to_owned(),
+                    payload: agentic_gpt_protocol::ConfigUpdateRequest {
+                        changes: vec![agentic_gpt_protocol::ConfigChange::Set {
+                            path: vec!["hub".into(), "url".into()],
+                            value: serde_json::json!(replacement_url),
+                        }],
+                        dry_run: false,
+                    },
+                },
+            };
+            socket
+                .send(Message::Text(serde_json::to_string(&envelope)?.into()))
+                .await?;
+            loop {
+                match next_agent_message(&mut socket).await? {
+                    AgentMessage::TransportAck { .. } => {}
+                    AgentMessage::Response { run_id, data, .. } => {
+                        anyhow::ensure!(run_id.as_deref() == Some(envelope.run_id.as_str()));
+                        anyhow::ensure!(data["saved"] == true, "update failed: {data}");
+                        anyhow::ensure!(data.get("events").is_some());
+                        anyhow::ensure!(data["changes"][0]["appliedValue"] == original_url);
+                        anyhow::ensure!(data["changes"][0]["applyStatus"] == "applying");
+                        break;
+                    }
+                    _ => return Err(anyhow!("unexpected message before config reply")),
+                }
+            }
+            anyhow::ensure!(
+                timeout(Duration::from_millis(250), replacement.accept())
+                    .await
+                    .is_err(),
+                "replacement connected before the original Hub acknowledged its reply"
+            );
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&HubMessage::ResponseAck {
+                        run_id: envelope.run_id.clone(),
+                        request_id: envelope.request_id.clone(),
+                    })?
+                    .into(),
+                ))
+                .await?;
+            let (stream, _) = timeout(Duration::from_secs(5), replacement.accept()).await??;
+            let mut next = tokio_tungstenite::accept_async(stream).await?;
+            anyhow::ensure!(matches!(
+                next_agent_message(&mut next).await?,
+                AgentMessage::Hello { .. }
+            ));
+            anyhow::ensure!(
+                timeout(Duration::from_millis(250), next_agent_message(&mut next))
+                    .await
+                    .is_err(),
+                "replacement Hub received a response/receipt belonging to the original target"
+            );
+            next.close(None).await?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| anyhow!("Hub configuration switch test timed out"))
+        .and_then(|result| result);
+        // Expected failures also take this path: stop the owner cooperatively and await its
+        // writer cleanup before RecoveryTestHome can remove the private fixture.
+        shutdown.cancel();
+        let cleaned = timeout(Duration::from_secs(5), &mut owner.0).await;
+        if cleaned.is_err() {
+            owner.stop().await;
+        }
+        scenario?;
+        anyhow::ensure!(matches!(cleaned, Ok(Ok(()))), "Hub owner cleanup failed");
         Ok(())
     }
 
@@ -1666,6 +1810,7 @@ mod reporting_tests {
                 "commandHash": "hash-old-exec",
                 "status": "accepted",
                 "agentId": "recovery-agent",
+                "hubTarget": "recovery-hub",
                 "command": old_exec,
             }),
             serde_json::json!({
@@ -1674,6 +1819,7 @@ mod reporting_tests {
                 "commandHash": "hash-old-batch",
                 "status": "started",
                 "agentId": "recovery-agent",
+                "hubTarget": "recovery-hub",
                 "command": old_batch,
             }),
             serde_json::json!({
@@ -1682,6 +1828,7 @@ mod reporting_tests {
                 "commandHash": "hash-old-completed",
                 "status": "completed",
                 "agentId": "recovery-agent",
+                "hubTarget": "recovery-hub",
                 "command": old_completed,
                 "result": old_result,
             }),
@@ -1691,6 +1838,7 @@ mod reporting_tests {
                 "commandHash": "hash-current",
                 "status": "accepted",
                 "agentId": "recovery-agent",
+                "hubTarget": "recovery-hub",
                 "command": current,
             }),
         ];
@@ -1703,7 +1851,11 @@ mod reporting_tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut state = state;
         state.hub_sender = Arc::new(tokio::sync::Mutex::new(Some(tx.clone())));
-        reconcile_transport_runs(&state, &tx).await;
+        reconcile_transport_runs(
+            &state,
+            &ConnectionRoute::new("recovery-hub".to_owned(), tx.clone()),
+        )
+        .await;
 
         let mut saw_completed = false;
         let mut saw_accepted_retired = false;

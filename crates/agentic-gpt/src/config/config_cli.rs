@@ -1,4 +1,4 @@
-mod config_keys;
+pub(crate) mod config_keys;
 
 use std::{
     io::IsTerminal,
@@ -123,6 +123,7 @@ pub(crate) fn setup_seed_from_args(args: &ConfigInitArgs) -> SetupSeed {
             .map(|value| SecretValue::new(value.clone())),
         http_mcp_allow_hosts: args.http_mcp_allow_hosts.clone(),
         imported_base: None,
+        edit_existing: false,
         tunnel_id: args.tunnel_id.clone(),
         tunnel_api_key: args.tunnel_api_key.clone(),
         hub_url: args.hub_url.clone(),
@@ -230,6 +231,29 @@ pub(crate) enum ConfigCommand {
     Init(ConfigInitArgs),
     Import(ConfigImportArgs),
     Show,
+    /// Edit the current configuration without overwriting unrelated concurrent changes.
+    Edit,
+    /// Read a configuration value by its key or JSON Pointer.
+    Get {
+        key: Option<String>,
+    },
+    /// Search the complete configuration manual.
+    Manual {
+        #[arg(long)]
+        section: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long, default_value = "full", value_parser = ["summary", "full"])]
+        detail: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a JSON array of typed set/unset/add/remove changes atomically.
+    Update {
+        changes: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     Keys {
         #[arg(long, value_enum)]
         section: Option<config_keys::ConfigSection>,
@@ -237,6 +261,16 @@ pub(crate) enum ConfigCommand {
         json: bool,
     },
     Set {
+        key: String,
+        value: String,
+    },
+    /// Add one native JSON value to a supported collection.
+    Add {
+        key: String,
+        value: String,
+    },
+    /// Remove one native JSON value from a supported collection.
+    Remove {
         key: String,
         value: String,
     },
@@ -329,6 +363,58 @@ pub(crate) async fn handle_config(
     match command {
         ConfigCommand::Init(args) => handle_init(&config_path, args, language)?,
         ConfigCommand::Import(args) => handle_import(&config_path, args, language)?,
+        ConfigCommand::Edit => {
+            let config = Config::load(&config_path)?;
+            let seed = SetupSeed {
+                mode: Some(config.mode),
+                profile: Some(config.profile),
+                imported_base: Some(config),
+                edit_existing: true,
+                ..SetupSeed::default()
+            };
+            match crate::config_tui::run_config_tui(&config_path, seed, language) {
+                Ok(_) => println!(
+                    "{} {}",
+                    cli_i18n::text(language).initialized,
+                    config_path.display()
+                ),
+                Err(error) if error.to_string() == "config_init_cancelled" => {
+                    println!("{}", cli_i18n::text(language).cancelled)
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        ConfigCommand::Get { key } => {
+            let config = Config::load(&config_path)?;
+            let value: serde_json::Value = serde_json::from_str(&ordered_config_json(&config)?)?;
+            let selected = if let Some(key) = key {
+                let path = crate::config_catalog::resolve_cli_key(&key)?;
+                let mut selected = &value;
+                for part in &path {
+                    selected = selected
+                        .get(part)
+                        .ok_or_else(|| anyhow!("config_value_not_set"))?;
+                }
+                selected.clone()
+            } else {
+                value
+            };
+            println!("{}", serde_json::to_string_pretty(&selected)?);
+        }
+        ConfigCommand::Manual {
+            section,
+            query,
+            detail,
+            json,
+        } => {
+            print_catalog(section.as_deref(), query.as_deref(), &detail, json)?;
+        }
+        ConfigCommand::Update { changes, dry_run } => {
+            let changes: Vec<agentic_gpt_protocol::ConfigChange> = serde_json::from_str(&changes)?;
+            let _lock = acquire_config_mutation_lock(&config_path)?;
+            let (_, result) = crate::config_apply::mutate_locked(&config_path, &changes, dry_run)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         ConfigCommand::Show => {
             let config = Config::load(&config_path)?;
             println!("{}", ordered_config_json(&config)?);
@@ -338,15 +424,21 @@ pub(crate) async fn handle_config(
         }
         ConfigCommand::Set { key, value } => {
             let _lock = acquire_config_mutation_lock(&config_path)?;
-            let mut config = Config::load_or_default_locked(&config_path)?;
-            config_keys::apply_config_key(&mut config, &key, &value)?;
-            write_config_with_backup(&config_path, &config)?;
+            let change = crate::config_catalog::parse_cli_change(&key, &value)?;
+            crate::config_apply::mutate_locked(&config_path, &[change], false)?;
+        }
+        ConfigCommand::Add { key, value } => mutate_collection(&config_path, &key, &value, true)?,
+        ConfigCommand::Remove { key, value } => {
+            mutate_collection(&config_path, &key, &value, false)?
         }
         ConfigCommand::Unset { key } => {
             let _lock = acquire_config_mutation_lock(&config_path)?;
-            let mut config = Config::load_or_default_locked(&config_path)?;
-            config_keys::unset_config_key(&mut config, &key)?;
-            write_config_with_backup(&config_path, &config)?;
+            let path = crate::config_catalog::resolve_cli_key(&key)?;
+            crate::config_apply::mutate_locked(
+                &config_path,
+                &[agentic_gpt_protocol::ConfigChange::Unset { path }],
+                false,
+            )?;
         }
         ConfigCommand::Allow { command } => {
             policy::mutate_rule(config_path, PolicyDecision::Allow, command)?
@@ -410,6 +502,10 @@ fn toolset_description(namespace: ToolNamespace, language: UiLanguage) -> &'stat
             "Agent runtime information and health diagnostics."
         }
         (ToolNamespace::Agent, UiLanguage::ZhCn) => "Agent 运行信息与健康诊断。",
+        (ToolNamespace::Config, UiLanguage::En) => {
+            "Configuration manual, query, and authorized updates (disabled by default)."
+        }
+        (ToolNamespace::Config, UiLanguage::ZhCn) => "配置手册、查询与授权修改（默认不启用）。",
         (ToolNamespace::File, UiLanguage::En) => "Workspace file reading, search, and editing.",
         (ToolNamespace::File, UiLanguage::ZhCn) => "工作区文件读取、搜索与编辑。",
         (ToolNamespace::Mcp, UiLanguage::En) => "Downstream MCP server discovery and tool calls.",
@@ -446,6 +542,43 @@ fn toolset_mutation_message(
         (UiLanguage::ZhCn, true) => format!("已启用工具集：{namespace}。"),
         (UiLanguage::ZhCn, false) => format!("已禁用工具集：{namespace}。"),
     }
+}
+
+fn print_catalog(
+    section: Option<&str>,
+    query: Option<&str>,
+    detail: &str,
+    json: bool,
+) -> Result<()> {
+    let request = agentic_gpt_protocol::ConfigManualRequest {
+        section: section.map(str::to_owned),
+        query: query.map(str::to_owned),
+        detail: if detail == "full" {
+            agentic_gpt_protocol::ConfigManualDetail::Full
+        } else {
+            agentic_gpt_protocol::ConfigManualDetail::Summary
+        },
+    };
+    let response = crate::config_catalog::manual(&request)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", response.content);
+    }
+    Ok(())
+}
+
+fn mutate_collection(config_path: &Path, key: &str, raw: &str, add: bool) -> Result<()> {
+    let path = crate::config_catalog::resolve_cli_key(key)?;
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    let change = if add {
+        agentic_gpt_protocol::ConfigChange::Add { path, value }
+    } else {
+        agentic_gpt_protocol::ConfigChange::Remove { path, value }
+    };
+    let _lock = acquire_config_mutation_lock(config_path)?;
+    crate::config_apply::mutate_locked(config_path, &[change], false)?;
+    Ok(())
 }
 
 #[cfg(test)]

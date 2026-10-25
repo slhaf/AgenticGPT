@@ -74,6 +74,9 @@ pub(super) fn tool_descriptor(name: &str) -> Tool {
 }
 
 fn tool_input_schema(name: &str) -> Map<String, Value> {
+    if let Some(schema) = config_input_schema(name) {
+        return schema;
+    }
     let (properties, required) = tool_schema(name);
     // Keep the exposed schema in the simple object/property subset supported by
     // MCP consumers. Conditional relationships (for example single vs batch
@@ -133,6 +136,13 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
 }
 
 pub(super) fn properties_for(name: &str) -> Map<String, Value> {
+    if let Some(schema) = config_input_schema(name) {
+        return schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+    }
     let mut properties = Map::new();
     let mut add = |key: &str, value: Value| {
         properties.insert(key.to_string(), value);
@@ -1078,6 +1088,9 @@ fn output_schema() -> Map<String, Value> {
 
 fn tool_description(name: &str) -> String {
     match name {
+        "config.manual" => "查阅当前版本完整配置手册。省略section/query返回章节目录；按section或query检索，detail=summary/full控制详细程度。说明包含真实路径段、类型、缺省、集合操作、确认与生效边界；不读取配置值或修改配置。".to_owned(),
+        "config.get" => "按paths路径段数组读取当前Agent的配置项及显式/有效状态，敏感值脱敏；包含点的事件类型或MCP服务器ID使用一个完整路径段。只读；先用config.manual查可用字段，不返回凭据原文。".to_owned(),
+        "config.update" => "按序把set/unset/add/remove意图作用于最新持久配置，整批最终校验后保存一次。set替换目标，unset恢复缺省或删除条目；支持的集合add/remove幂等，有序列表整体set。dryRun=true只预览，实写重新基于届时最新配置；按修改前config.updatePolicy确认，拒绝/取消/不可用不写盘。保存成功与运行态生效分别报告；组件应用失败保留最后可用运行态，applyStatus=restart_required时不自动重启。敏感值不进入预览或公共上报。".to_owned(),
         "agent.info" => "查看本地 Agent 的身份/profile、工作区与路径策略、进程/MCP 容量、确认通道、连接、配置和健康状态；只读，不执行操作。".to_string(),
         "browser.manual" => "需要 Browser SDK 用法或不确定 API 时，先读/搜当前 runtime 附带的官方文档；返回路径、行号、内容或匹配及截断/跳过统计。路径、运行时或文档错误以 error 返回；只读、不联网。".to_string(),
         "browser.acquire" => "创建或复用命名 Browser lease/kernel，再用同名 browser.repl 连续操作；返回 ready、版本和 channel，初始化失败返回 error。复用会更新空闲时限，闲置后自动清理。".to_string(),
@@ -1146,4 +1159,20 @@ fn tool_description(name: &str) -> String {
 
         _ => "未知本地工具；请使用已列出的工具名，输入和结果由对应工具合同定义。".to_string(),
     }
+}
+
+fn config_input_schema(name: &str) -> Option<Map<String, Value>> {
+    let schema = match name {
+        "config.manual" => schemars::schema_for!(agentic_gpt_protocol::ConfigManualRequest),
+        "config.get" => schemars::schema_for!(agentic_gpt_protocol::ConfigGetRequest),
+        "config.update" => schemars::schema_for!(agentic_gpt_protocol::ConfigUpdateRequest),
+        _ => return None,
+    };
+    Some(
+        serde_json::to_value(schema)
+            .expect("protocol schema serializes")
+            .as_object()
+            .expect("protocol request schema is an object")
+            .clone(),
+    )
 }

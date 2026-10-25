@@ -189,8 +189,33 @@ pub(super) async fn handle_agent_message(
     }
 
     if reliable {
+        let response_ack = match &parsed {
+            AgentMessage::Response {
+                run_id: Some(run_id),
+                request_id,
+                ..
+            } => Some((run_id.clone(), request_id.clone())),
+            _ => None,
+        };
+        let response_sender = agents
+            .get(agent_id)
+            .filter(|connection| connection.connection_id == connection_id)
+            .map(|connection| connection.sender.clone());
         drop(agents);
-        return dispatch::handle_reliable_message(state, agent_id, parsed).await;
+        dispatch::handle_reliable_message(state, agent_id, parsed).await?;
+        if let (Some((run_id, request_id)), Some(sender)) = (response_ack, response_sender) {
+            // Dispatch returns success only after store_result Stored/Duplicate. Keep the
+            // acknowledgement on the originating connection, even if it was replaced.
+            if runs::get_run(state, &run_id)
+                .map_err(|error| error.to_string())?
+                .is_some_and(|run| run.command_type == "config.update")
+            {
+                let message = HubMessage::ResponseAck { run_id, request_id };
+                let text = serde_json::to_string(&message).map_err(|error| error.to_string())?;
+                let _ = sender.send(OutboundAgentMessage::Text(text));
+            }
+        }
+        return Ok(());
     }
 
     let mut confirmation_publication = None;

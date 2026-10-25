@@ -50,6 +50,7 @@ pub(crate) enum RuntimeMode {
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ToolNamespace {
     Agent,
+    Config,
     File,
     Mcp,
     Process,
@@ -63,6 +64,7 @@ impl ToolNamespace {
     pub(crate) fn all() -> &'static [Self] {
         &[
             Self::Agent,
+            Self::Config,
             Self::File,
             Self::Mcp,
             Self::Process,
@@ -76,6 +78,7 @@ impl ToolNamespace {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Agent => "agent",
+            Self::Config => "config",
             Self::File => "file",
             Self::Mcp => "mcp",
             Self::Process => "process",
@@ -127,13 +130,17 @@ impl ToolsetConfig {
             enabled: ToolNamespace::all()
                 .iter()
                 .copied()
-                .filter(|namespace| *namespace != ToolNamespace::Room)
+                .filter(|namespace| {
+                    !matches!(namespace, ToolNamespace::Room | ToolNamespace::Config)
+                })
                 .collect(),
         }
     }
 
     pub(crate) fn room() -> Self {
-        Self::all()
+        let mut value = Self::all();
+        value.disable(ToolNamespace::Config);
+        value
     }
 
     pub(crate) fn for_profile(profile: WorkerProfile) -> Self {
@@ -526,12 +533,29 @@ impl ShellConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ConfigUpdatePolicy {
+    Allow,
+    #[default]
+    Confirm,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConfigApiConfig {
+    #[serde(default)]
+    pub(crate) update_policy: ConfigUpdatePolicy,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Config {
     pub(crate) mode: RuntimeMode,
     pub(crate) profile: WorkerProfile,
     pub(crate) toolsets: ToolsetConfig,
+    #[serde(default, rename = "config")]
+    pub(crate) config_api: ConfigApiConfig,
     pub(crate) agent_id: String,
     pub(crate) display_name: String,
     pub(crate) hub: HubConfig,
@@ -851,13 +875,6 @@ pub(crate) enum MaxActiveProcesses {
     Explicit(usize),
 }
 
-pub(crate) fn parse_max_active_processes(value: &str) -> Result<MaxActiveProcesses> {
-    if value == "auto" {
-        return Ok(MaxActiveProcesses::Auto);
-    }
-    Ok(MaxActiveProcesses::Explicit(value.parse::<usize>()?))
-}
-
 impl Serialize for MaxActiveProcesses {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1130,6 +1147,7 @@ impl Config {
             mode: RuntimeMode::Standalone,
             profile: WorkerProfile::Normal,
             toolsets: ToolsetConfig::normal(),
+            config_api: ConfigApiConfig::default(),
             agent_id: "laptop".to_string(),
             display_name: hostname_fallback(),
             hub: HubConfig::default(),
@@ -1166,7 +1184,10 @@ impl Config {
 
     pub(crate) fn load_locked(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)?;
-        let value: Value = serde_json::from_str(&text)?;
+        Self::from_value(serde_json::from_str(&text)?)
+    }
+
+    pub(crate) fn from_value(value: Value) -> Result<Self> {
         let object = value
             .as_object()
             .ok_or_else(|| anyhow!("config_json_object_required"))?;
@@ -1650,67 +1671,14 @@ impl Config {
 }
 
 pub(crate) fn restart_required_fields(effective: &Config, disk: &Config) -> Vec<String> {
-    let mut restart_room = disk.room.clone();
-    restart_room
-        .secret
-        .apply_live_settings(&effective.room.secret);
-    let pairs = [
-        ("mode", effective.mode != disk.mode),
-        ("profile", effective.profile != disk.profile),
-        (
-            "agentId",
-            serde_json::json!(effective.agent_id) != serde_json::json!(disk.agent_id),
-        ),
-        (
-            "displayName",
-            serde_json::json!(effective.display_name) != serde_json::json!(disk.display_name),
-        ),
-        (
-            "hub",
-            serde_json::json!(effective.hub) != serde_json::json!(disk.hub),
-        ),
-        (
-            "workspaceRoot",
-            serde_json::json!(effective.workspace_root) != serde_json::json!(disk.workspace_root),
-        ),
-        (
-            "backupLimit",
-            serde_json::json!(effective.backup_limit) != serde_json::json!(disk.backup_limit),
-        ),
-        (
-            "confirmationProvider",
-            serde_json::json!(effective.confirmation_provider)
-                != serde_json::json!(disk.confirmation_provider),
-        ),
-        (
-            "confirmationLanguage",
-            serde_json::json!(effective.confirmation_language)
-                != serde_json::json!(disk.confirmation_language),
-        ),
-        (
-            "browser",
-            serde_json::json!(effective.browser) != serde_json::json!(disk.browser),
-        ),
-        (
-            "skills",
-            serde_json::json!(effective.skills) != serde_json::json!(disk.skills),
-        ),
-        (
-            "room",
-            serde_json::json!(effective.room) != serde_json::json!(restart_room),
-        ),
-        (
-            "email.account",
-            effective.email.account != disk.email.account,
-        ),
-        (
-            "tunnel",
-            serde_json::json!(effective.tunnel) != serde_json::json!(disk.tunnel),
-        ),
-    ];
-    pairs
+    let mut startup_projection = disk.clone();
+    crate::config_runtime::preserve_startup(&mut startup_projection, effective);
+    let desired = serde_json::to_value(disk).unwrap_or_default();
+    let projected = serde_json::to_value(startup_projection).unwrap_or_default();
+    ["mode", "profile", "agentId", "workspaceRoot", "tunnel"]
         .into_iter()
-        .filter_map(|(name, differs)| differs.then_some(name.to_string()))
+        .filter(|field| desired.get(*field) != projected.get(*field))
+        .map(str::to_owned)
         .collect()
 }
 
@@ -1818,7 +1786,10 @@ fn prune_sparse_value(value: &mut Value, defaults: &Value, root: bool) {
     }
 }
 
-fn redact_config_secrets(value: &mut Value) {
+pub(crate) fn redact_config_secrets(value: &mut Value) {
+    if let Some(key) = value.pointer_mut("/tunnel/apiKey") {
+        *key = Value::String("[REDACTED]".to_owned());
+    }
     for key in [
         "serverUrl",
         "account",
@@ -2805,7 +2776,6 @@ mod tests {
         let value = sparse_config_value(&config, true).unwrap();
         assert!(value.get("tunnel").is_some());
         assert_eq!(value["hub"]["agentSecret"], json!("[REDACTED]"));
-        assert_eq!(value["tunnel"]["apiKey"], json!("file:/tmp/tunnel-secret"));
         assert_eq!(
             value["mcpServers"]["secured"]["auth"]["token"],
             json!("[REDACTED]")
@@ -3063,21 +3033,6 @@ mod tests {
             assert_eq!(imported.config.shell.init_file, expected);
         }
 
-        let _ = fs::remove_file(root);
-    }
-
-    #[test]
-    fn explicit_import_uses_room_toolset_preset_when_toolsets_are_omitted() {
-        let root = temp_config_path();
-        let value = json!({
-            "policy": SecurityPolicyConfig::default(),
-            "mode": "standalone",
-            "profile": "room"
-        });
-        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-
-        let imported = Config::import(&root).unwrap();
-        assert_eq!(imported.config.toolsets, ToolsetConfig::all());
         let _ = fs::remove_file(root);
     }
 

@@ -326,6 +326,7 @@ pub(super) fn available_optional_sections(
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
         OptionalSection::Events,
+        OptionalSection::Additional,
     ]
     .into_iter()
     .filter(|section| section_is_legal(*section, mode, toolsets))
@@ -567,6 +568,10 @@ pub(super) fn validate_field(
         | SetupField::AgentId
         | SetupField::AgentSecret
         | SetupField::HubEnabled => validate_connection(session).err().unwrap_or_default(),
+        SetupField::Catalog(_) => validate_optional(
+            OptionalSection::Additional,
+            &session.optional_draft(OptionalSection::Additional),
+        ),
         SetupField::DisplayName => validate_optional(
             OptionalSection::Identity,
             &session.optional_draft(OptionalSection::Identity),
@@ -896,6 +901,14 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 ));
             }
         }
+        (OptionalSection::Additional, OptionalSectionDraft::Additional(value)) => {
+            if let Err(index) = value.changes() {
+                errors.push(error(
+                    SetupField::Catalog(index),
+                    "config_init_catalog_value_invalid",
+                ));
+            }
+        }
         (OptionalSection::Events, OptionalSectionDraft::Events(value)) => {
             if let Err(event_errors) = events_config_from_draft(value) {
                 errors.extend(event_errors);
@@ -1163,6 +1176,10 @@ fn configured_draft(
             .clone()
             .map(OptionalSectionDraft::HubReporting),
         OptionalSection::Events => drafts.events.clone().map(OptionalSectionDraft::Events),
+        OptionalSection::Additional => drafts
+            .additional
+            .clone()
+            .map(OptionalSectionDraft::Additional),
     }
 }
 
@@ -1432,6 +1449,14 @@ fn apply_optional_draft(
             };
             input.shell = Some(ShellConfig { init_file });
         }
+        (OptionalSection::Additional, OptionalSectionDraft::Additional(value)) => {
+            input.additional = value.changes().map_err(|index| {
+                vec![error(
+                    SetupField::Catalog(index),
+                    "config_init_catalog_value_invalid",
+                )]
+            })?;
+        }
         (OptionalSection::Events, OptionalSectionDraft::Events(value)) => {
             input.events = Some(events_config_from_draft(value)?);
         }
@@ -1527,5 +1552,6 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::TunnelClient => SetupField::TunnelClientVersion,
         OptionalSection::HubReporting => SetupField::HubReportingDetail,
         OptionalSection::Events => SetupField::EventsLowTtlSeconds,
+        OptionalSection::Additional => SetupField::Catalog(0),
     }
 }

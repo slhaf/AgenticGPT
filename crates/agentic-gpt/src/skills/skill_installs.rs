@@ -20,7 +20,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, Notify};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
@@ -49,7 +49,63 @@ pub(crate) struct InstallManager {
     cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     target_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     changed: Arc<Notify>,
-    worker_slots: Arc<Semaphore>,
+    worker_slots: Arc<InstallWorkerSlots>,
+}
+
+struct InstallWorkerSlots {
+    state: parking_lot::Mutex<InstallWorkerState>,
+    changed: Notify,
+}
+
+struct InstallWorkerState {
+    limit: usize,
+    running: usize,
+}
+
+struct InstallWorkerPermit {
+    slots: Arc<InstallWorkerSlots>,
+}
+
+impl InstallWorkerSlots {
+    fn new(limit: usize) -> Self {
+        Self {
+            state: parking_lot::Mutex::new(InstallWorkerState {
+                limit: limit.max(1),
+                running: 0,
+            }),
+            changed: Notify::new(),
+        }
+    }
+
+    async fn acquire(self: Arc<Self>) -> InstallWorkerPermit {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut state = self.state.lock();
+                if state.running < state.limit {
+                    state.running += 1;
+                    return InstallWorkerPermit {
+                        slots: self.clone(),
+                    };
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn reconfigure(&self, limit: usize) {
+        self.state.lock().limit = limit.max(1);
+        self.changed.notify_waiters();
+    }
+}
+
+impl Drop for InstallWorkerPermit {
+    fn drop(&mut self) {
+        self.slots.state.lock().running -= 1;
+        self.slots.changed.notify_waiters();
+    }
 }
 
 impl InstallManager {
@@ -74,8 +130,14 @@ impl InstallManager {
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             target_locks: Arc::new(Mutex::new(HashMap::new())),
             changed: Arc::new(Notify::new()),
-            worker_slots: Arc::new(Semaphore::new(max_concurrent_installs.max(1))),
+            worker_slots: Arc::new(InstallWorkerSlots::new(max_concurrent_installs)),
         }
+    }
+
+    /// Applies to subsequent worker admission; existing installs keep their
+    /// permits and configuration snapshots until their workflows finish.
+    pub(crate) fn reconfigure(&self, max_concurrent_installs: usize) {
+        self.worker_slots.reconfigure(max_concurrent_installs);
     }
 
     pub(crate) async fn recover(&self, state: AppState) -> Result<()> {
@@ -424,10 +486,7 @@ impl InstallManager {
     }
 
     async fn run_worker(&self, state: AppState, install_id: String) {
-        let permit = match self.worker_slots.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => return,
-        };
+        let permit = self.worker_slots.clone().acquire().await;
         let result = self.execute_worker(&state, &install_id, permit).await;
         if let Err(error) = result {
             if let Err(failure) = self
@@ -452,7 +511,7 @@ impl InstallManager {
         &self,
         state: &AppState,
         install_id: &str,
-        _permit: OwnedSemaphorePermit,
+        _permit: InstallWorkerPermit,
     ) -> Result<()> {
         let config = state.config.read().await.clone();
         let mut record = self.load_record(&config, install_id).await?;
@@ -1993,7 +2052,8 @@ mod tests {
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state: private_state.clone(),
             process_history,
-            browser_runtime: Arc::new(tokio::sync::OnceCell::new()),
+            browser_runtime: Arc::new(crate::state::BrowserRuntimeSlot::default()),
+            config_runtime: Arc::new(crate::config_runtime::ConfigRuntime::default()),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -2164,18 +2224,8 @@ mod tests {
         assert!(recovered.cancellations.lock().await.is_empty());
 
         state.runtime = crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room);
-        let permit_a = recovered
-            .worker_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .unwrap();
-        let permit_b = recovered
-            .worker_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .unwrap();
+        let permit_a = recovered.worker_slots.clone().acquire().await;
+        let permit_b = recovered.worker_slots.clone().acquire().await;
         recovered.resume_queued(&state).await.unwrap();
         recovered.resume_queued(&state).await.unwrap();
         assert_eq!(recovered.cancellations.lock().await.len(), 1);

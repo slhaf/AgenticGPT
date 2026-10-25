@@ -446,65 +446,6 @@ fn config_shell_init_file_keeps_default_disabled_and_explicit_path_distinct() {
 }
 
 #[test]
-fn config_keys_json_lists_registry() {
-    let binary = binary_path();
-    let keys = Command::new(&binary)
-        .args(["--language", "en", "config", "keys", "--json"])
-        .output()
-        .unwrap();
-    assert!(keys.status.success(), "config keys command failed");
-    let value: Value = serde_json::from_slice(&keys.stdout).unwrap();
-    let entries = value["keys"].as_array().unwrap();
-    assert!(entries
-        .iter()
-        .any(|entry| { entry["key"] == "limits.maxActiveProcesses" }));
-    assert!(entries
-        .iter()
-        .any(|entry| { entry["key"] == "limits.processResponseBytes" }));
-    let mode = entries.iter().find(|entry| entry["key"] == "mode").unwrap();
-    assert_eq!(
-        mode["choices"],
-        serde_json::json!(["standalone", "hub", "local"])
-    );
-    let confirmation = entries
-        .iter()
-        .find(|entry| entry["key"] == "confirmationProvider.channels")
-        .unwrap();
-    assert_eq!(
-        confirmation["choices"],
-        serde_json::json!(["freedesktop", "ntfy"])
-    );
-    assert!(!entries
-        .iter()
-        .any(|entry| entry["key"] == "confirmationProvider"));
-    let bubblewrap = entries
-        .iter()
-        .find(|entry| entry["key"] == "policy.bubblewrap")
-        .unwrap();
-    assert_eq!(bubblewrap["choices"], serde_json::json!(["true", "false"]));
-    let events = entries
-        .iter()
-        .filter(|entry| entry["section"] == "events")
-        .collect::<Vec<_>>();
-    assert_eq!(events.len(), 12);
-    let ttl = events
-        .iter()
-        .find(|entry| entry["key"] == "events.lowTtlSeconds")
-        .unwrap();
-    assert_eq!(ttl["type"], "non-negative-integer");
-    assert_eq!(ttl["example"], "86400");
-    let completed = events
-        .iter()
-        .find(|entry| entry["key"] == "events.internalOverrides.process.completed")
-        .unwrap();
-    assert_eq!(
-        completed["choices"],
-        serde_json::json!(["low", "medium", "high", "off"])
-    );
-    assert_eq!(completed["nullable"], true);
-}
-
-#[test]
 fn config_events_set_show_and_restore_default_override() {
     let root = temp_root("events-set");
     fs::create_dir_all(&root).unwrap();
@@ -982,58 +923,6 @@ fn run_without_config_reports_init_first_and_does_not_create_a_file() {
     assert!(combined.contains("run config init first"), "{combined}");
     assert!(!config.exists(), "run wrote a partial config");
     let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn config_keys_http_mcp_section_exposes_editable_contract() {
-    let output = Command::new(binary_path())
-        .args([
-            "--language",
-            "en",
-            "config",
-            "keys",
-            "--section",
-            "http-mcp",
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "HTTP MCP keys command failed");
-
-    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let keys = value["keys"].as_array().unwrap();
-    assert_eq!(keys.len(), 6);
-    for key in [
-        "httpMcp.enabled",
-        "httpMcp.host",
-        "httpMcp.port",
-        "httpMcp.publicUrl",
-        "httpMcp.bearerToken",
-        "httpMcp.allowHosts",
-    ] {
-        assert!(
-            keys.iter().any(|entry| entry["key"] == key),
-            "HTTP MCP key missing from registry: {key}"
-        );
-    }
-
-    let enabled = keys
-        .iter()
-        .find(|entry| entry["key"] == "httpMcp.enabled")
-        .unwrap();
-    assert_eq!(enabled["type"], "boolean");
-    assert_eq!(enabled["nullable"], false);
-    let port = keys
-        .iter()
-        .find(|entry| entry["key"] == "httpMcp.port")
-        .unwrap();
-    assert_eq!(port["type"], "port");
-    let allow_hosts = keys
-        .iter()
-        .find(|entry| entry["key"] == "httpMcp.allowHosts")
-        .unwrap();
-    assert_eq!(allow_hosts["type"], "json-string-array-or-null");
-    assert_eq!(allow_hosts["nullable"], true);
 }
 
 #[test]

@@ -43,6 +43,7 @@ pub(crate) struct NodeReplKernel {
     client: RunningService<RoleClient, ClientInfo>,
     session_id: String,
     turn_id: String,
+    unavailable: bool,
 }
 
 impl NodeReplKernel {
@@ -56,6 +57,7 @@ impl NodeReplKernel {
             client,
             session_id,
             turn_id,
+            unavailable: false,
         })
     }
 
@@ -88,7 +90,7 @@ impl NodeReplKernel {
     }
 
     pub(crate) fn is_closed(&self) -> bool {
-        self.client.is_closed()
+        self.unavailable || self.client.is_closed()
     }
 
     pub(crate) async fn shutdown(self) -> Result<()> {
@@ -100,6 +102,9 @@ impl NodeReplKernel {
     }
 
     pub(crate) async fn js(&mut self, code: &str, timeout_ms: u64) -> Result<CallToolResult> {
+        if self.unavailable {
+            return Err(anyhow!("browser_runtime_node_repl_session_unavailable"));
+        }
         let arguments: JsonObject = Map::from_iter([
             ("code".to_string(), Value::String(code.to_string())),
             ("timeout_ms".to_string(), json!(timeout_ms)),
@@ -114,10 +119,22 @@ impl NodeReplKernel {
         let mut request = CallToolRequestParams::new("js").with_arguments(arguments);
         request.set_meta(metadata);
 
-        self.client
-            .call_tool(request)
-            .await
-            .map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))
+        let result = tokio::time::timeout(
+            Duration::from_millis(timeout_ms.saturating_add(1_000)),
+            self.client.call_tool(request),
+        )
+        .await;
+        match result {
+            Ok(result) => {
+                result.map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))
+            }
+            Err(_) => {
+                // Ending the wait does not prove remote JS stopped. Require a
+                // fresh kernel before another call can reuse this session.
+                self.unavailable = true;
+                Err(anyhow!("browser_runtime_node_repl_call_timeout"))
+            }
+        }
     }
 
     pub(crate) async fn turn_ended(&mut self) -> Result<()> {
@@ -126,11 +143,14 @@ impl NodeReplKernel {
             ("session_id".to_string(), json!(self.session_id)),
             ("turn_id".to_string(), json!(self.turn_id)),
         ]);
-        let result = self
-            .client
-            .call_tool(CallToolRequestParams::new("turn_ended").with_arguments(arguments))
-            .await
-            .map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(6),
+            self.client
+                .call_tool(CallToolRequestParams::new("turn_ended").with_arguments(arguments)),
+        )
+        .await
+        .map_err(|_| anyhow!("browser_runtime_turn_ended_timeout"))?
+        .map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))?;
         if result.is_error == Some(true) {
             return Err(anyhow!("browser_runtime_turn_ended_failed"));
         }
@@ -138,11 +158,14 @@ impl NodeReplKernel {
     }
 
     pub(crate) async fn reset_js(&mut self) -> Result<()> {
-        let result = self
-            .client
-            .call_tool(CallToolRequestParams::new("js_reset").with_arguments(Map::new()))
-            .await
-            .map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(6),
+            self.client
+                .call_tool(CallToolRequestParams::new("js_reset").with_arguments(Map::new())),
+        )
+        .await
+        .map_err(|_| anyhow!("browser_runtime_js_reset_timeout"))?
+        .map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))?;
         if result.is_error == Some(true) {
             return Err(anyhow!("browser_runtime_js_reset_failed"));
         }

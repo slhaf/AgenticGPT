@@ -1,4 +1,5 @@
 mod acquire_confirmation;
+mod config_api;
 mod email;
 mod envelopes;
 mod events;
@@ -11,6 +12,7 @@ mod secret;
 mod skill_bootstrap;
 
 pub use acquire_confirmation::*;
+pub use config_api::*;
 pub use email::*;
 pub use envelopes::*;
 pub use events::*;

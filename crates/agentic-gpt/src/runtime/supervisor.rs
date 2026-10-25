@@ -6,7 +6,7 @@
 //! it is never included in either command line.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime};
@@ -70,6 +70,7 @@ pub(crate) async fn run(config_path: PathBuf) -> Result<()> {
     let runtime_paths = RuntimePaths::prepare(&config.agent_id)?;
     let runtime_identity = StartupIdentity::from_config(&config, profile)?;
     let result = async {
+        runtime_paths.write_startup_config(&config)?;
         let tunnel = config
             .tunnel
             .as_ref()
@@ -108,6 +109,36 @@ pub(crate) fn authorize_worker(token: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Read the supervisor's private immutable snapshot without running config-file
+/// mutation recovery or creating a second lock beside this runtime artifact.
+pub(crate) fn load_startup_config(path: &Path) -> Result<Config> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| anyhow!("startup_config_unavailable"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| anyhow!("startup_config_unavailable"))?;
+    if !metadata.is_file() {
+        return Err(anyhow!("startup_config_unavailable"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(anyhow!("startup_config_not_private"));
+        }
+    }
+    let value = serde_json::from_reader(file).map_err(|_| anyhow!("startup_config_invalid"))?;
+    Config::from_value(value).map_err(|_| anyhow!("startup_config_invalid"))
+}
+
 fn resolve_secret(reference: &str) -> Result<String> {
     validate_secret_reference(reference)?;
     let value = if let Some(name) = reference.strip_prefix("env:") {
@@ -136,6 +167,7 @@ struct RuntimePaths {
     health_url: PathBuf,
     log: PathBuf,
     pid: PathBuf,
+    startup_config: PathBuf,
 }
 
 impl RuntimePaths {
@@ -151,12 +183,18 @@ impl RuntimePaths {
             .join("runtime")
             .join("tunnel")
             .join(agent_id);
+        if let Ok(metadata) = fs::symlink_metadata(&root) {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(anyhow!("runtime_directory_unavailable"));
+            }
+        }
         fs::create_dir_all(&root).map_err(|_| anyhow!("runtime_directory_unavailable"))?;
         set_private_dir(&root)?;
         let paths = Self {
             health_url: root.join("health.url"),
             log: root.join("tunnel-client.log"),
             pid: root.join("tunnel-client.pid"),
+            startup_config: root.join(format!("startup-config-{}.json", Uuid::new_v4())),
         };
         fs::write(&paths.log, []).map_err(|_| anyhow!("runtime_directory_unavailable"))?;
         set_private_file(&paths.log)?;
@@ -170,23 +208,58 @@ impl RuntimePaths {
         }
     }
 
+    fn write_startup_config(&self, config: &Config) -> Result<()> {
+        let bytes = serde_json::to_vec(config).map_err(|_| anyhow!("startup_config_invalid"))?;
+        let temporary = self.startup_config.with_extension("tmp");
+        let mut created_temporary = false;
+        let result = (|| -> Result<()> {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            }
+            let mut file = options.open(&temporary)?;
+            created_temporary = true;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, &self.startup_config)?;
+            created_temporary = false;
+            if let Some(parent) = self.startup_config.parent() {
+                fs::File::open(parent)?.sync_all()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            if created_temporary {
+                let _ = fs::remove_file(temporary);
+            }
+            return Err(anyhow!("startup_config_unavailable"));
+        }
+        Ok(())
+    }
+
     fn cleanup(&self) {
         let _ = fs::remove_file(&self.health_url);
         let _ = fs::remove_file(&self.pid);
+        let _ = fs::remove_file(&self.startup_config);
+        let _ = fs::remove_file(self.startup_config.with_extension("tmp"));
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StartupIdentity {
     agent_id: String,
-    agent_secret: String,
     workspace_root: PathBuf,
-    hub_url: String,
-    hub_transport: String,
-    hub_enabled: bool,
-    hub_reporting_enabled: bool,
-    hub_reporting_detail: crate::config::ReportingDetail,
-    skill_max_concurrent_installs: usize,
     tunnel_id: String,
     api_key_reference: String,
     version: Option<String>,
@@ -206,14 +279,7 @@ impl StartupIdentity {
             .ok_or_else(|| anyhow!("tunnel_config_required"))?;
         Ok(Self {
             agent_id: config.agent_id.clone(),
-            agent_secret: config.hub.agent_secret.clone(),
             workspace_root: config.workspace_root.clone(),
-            hub_url: config.hub.url.clone(),
-            hub_transport: config.hub.transport.clone(),
-            hub_enabled: config.hub.enabled,
-            hub_reporting_enabled: tunnel.hub_reporting.enabled,
-            hub_reporting_detail: tunnel.hub_reporting.detail,
-            skill_max_concurrent_installs: config.skills.max_concurrent_installs,
             tunnel_id: tunnel.tunnel_id.clone(),
             api_key_reference: tunnel.api_key.clone(),
             version: tunnel.client.version.clone(),
@@ -360,7 +426,7 @@ impl Invocation {
             std::env::current_exe().map_err(|_| anyhow!("worker_executable_unavailable"))?;
         let worker_token = Uuid::new_v4().to_string();
         let worker_command = format!(
-            "{} stdio-worker --config {} --profile {} --supervisor-token {}",
+            "{} stdio-worker --config {} --profile {} --supervisor-token {} --startup-config {}",
             quote_arg(worker.to_string_lossy()),
             quote_arg(config_path.to_string_lossy()),
             match profile {
@@ -368,6 +434,7 @@ impl Invocation {
                 CapabilityProfile::Room => "room",
             },
             quote_arg(&worker_token),
+            quote_arg(paths.startup_config.to_string_lossy()),
         );
         Ok(Self {
             tunnel_id,
@@ -1015,6 +1082,7 @@ mod tests {
             health_url: root.join("health.url"),
             log: root.join("tunnel.log"),
             pid: root.join("tunnel.pid"),
+            startup_config: root.join("startup-config.json"),
         };
         fs::write(&paths.health_url, "stale").unwrap();
         fs::write(&paths.pid, "stale").unwrap();
@@ -1079,6 +1147,7 @@ mod tests {
                 health_url: root.join("health.url"),
                 log: root.join("tunnel.log"),
                 pid: root.join("tunnel.pid"),
+                startup_config: root.join("startup-config.json"),
             },
         };
 
@@ -1105,6 +1174,7 @@ mod tests {
                 health_url: root.join("health.url"),
                 log: root.join("tunnel.log"),
                 pid: root.join("tunnel.pid"),
+                startup_config: root.join("startup-config.json"),
             },
         };
 
@@ -1147,6 +1217,7 @@ mod tests {
             health_url: root.join("health.url"),
             log: root.join("tunnel.log"),
             pid: root.join("tunnel.pid"),
+            startup_config: root.join("startup-config.json"),
         };
         let invocation = Invocation {
             tunnel_id: "tunnel_test".to_owned(),

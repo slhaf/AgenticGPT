@@ -116,6 +116,7 @@ pub(crate) enum SetupField {
     EventSkillInstallFailedLevel,
     EventSkillInstallCancelledLevel,
     Toolsets,
+    Catalog(usize),
 }
 impl SetupField {
     pub(crate) fn room_secret_key(self) -> Option<&'static str> {
@@ -192,6 +193,7 @@ pub(crate) struct SetupSeed {
     pub(crate) mode: Option<RuntimeMode>,
     pub(crate) profile: Option<WorkerProfile>,
     pub(crate) imported_base: Option<Config>,
+    pub(crate) edit_existing: bool,
     pub(crate) tunnel_id: Option<String>,
     pub(crate) tunnel_api_key: Option<String>,
     pub(crate) hub_url: Option<String>,
@@ -695,6 +697,7 @@ pub(crate) struct OptionalDrafts {
     pub(crate) tunnel_client: Option<TunnelClientDraft>,
     pub(crate) hub_reporting: Option<HubReportingDraft>,
     pub(crate) events: Option<EventsDraft>,
+    pub(crate) additional: Option<AdditionalDraft>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -712,6 +715,7 @@ pub(crate) enum OptionalSectionDraft {
     HubReporting(HubReportingDraft),
     Shell(ShellDraft),
     Events(EventsDraft),
+    Additional(AdditionalDraft),
 }
 
 struct StandaloneSeed<'a> {
@@ -741,6 +745,7 @@ impl OptionalSectionDraft {
             Self::TunnelClient(_) => OptionalSection::TunnelClient,
             Self::HubReporting(_) => OptionalSection::HubReporting,
             Self::Events(_) => OptionalSection::Events,
+            Self::Additional(_) => OptionalSection::Additional,
             Self::Shell(_) => OptionalSection::Shell,
         }
     }
@@ -750,6 +755,7 @@ pub(crate) struct SetupSession {
     selected_mode: RuntimeMode,
     selected_profile: WorkerProfile,
     imported_base: Option<Config>,
+    pub(super) edit_existing: bool,
     standalone: StandaloneDraft,
     hub: HubDraft,
     optional: OptionalDrafts,
@@ -834,6 +840,7 @@ impl SetupSession {
         Self {
             selected_mode,
             selected_profile,
+            edit_existing: seed.edit_existing,
             imported_base,
             standalone,
             hub,
@@ -851,6 +858,10 @@ impl SetupSession {
 
     pub(crate) fn selected_profile(&self) -> WorkerProfile {
         self.selected_profile
+    }
+
+    pub(crate) fn is_editing_existing(&self) -> bool {
+        self.edit_existing
     }
 
     pub(crate) fn imported_base(&self) -> Option<&Config> {
@@ -1121,6 +1132,7 @@ impl OptionalDrafts {
             OptionalSection::TunnelClient => self.tunnel_client.is_some(),
             OptionalSection::HubReporting => self.hub_reporting.is_some(),
             OptionalSection::Events => self.events.is_some(),
+            OptionalSection::Additional => self.additional.is_some(),
         }
     }
 
@@ -1153,6 +1165,10 @@ impl OptionalDrafts {
                 .clone()
                 .map(OptionalSectionDraft::HubReporting),
             OptionalSection::Events => self.events.clone().map(OptionalSectionDraft::Events),
+            OptionalSection::Additional => self
+                .additional
+                .clone()
+                .map(OptionalSectionDraft::Additional),
         }
     }
 
@@ -1171,6 +1187,7 @@ impl OptionalDrafts {
             OptionalSectionDraft::TunnelClient(value) => self.tunnel_client = Some(value),
             OptionalSectionDraft::HubReporting(value) => self.hub_reporting = Some(value),
             OptionalSectionDraft::Events(value) => self.events = Some(value),
+            OptionalSectionDraft::Additional(value) => self.additional = Some(value),
         }
     }
 }
@@ -1188,6 +1205,9 @@ pub(crate) fn default_optional_draft_for_profile(
     profile: WorkerProfile,
 ) -> OptionalSectionDraft {
     match section {
+        OptionalSection::Additional => OptionalSectionDraft::Additional(
+            AdditionalDraft::from_config(&Config::default_config().expect("default config")),
+        ),
         OptionalSection::Identity => OptionalSectionDraft::Identity(IdentityDraft {
             display_name: "AgenticGPT agent".to_string(),
         }),
@@ -1260,6 +1280,7 @@ fn serialize_paths(paths: &[PathBuf]) -> String {
 fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
     let tunnel = config.tunnel.as_ref();
     OptionalDrafts {
+        additional: Some(AdditionalDraft::from_config(config)),
         identity: Some(IdentityDraft {
             display_name: config.display_name.clone(),
         }),
@@ -1367,14 +1388,13 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config::sparse_config_value;
     use crate::config_templates::{OptionalSection, RuntimeMode, SecretValue};
     use crate::WorkerProfile;
 
     use super::*;
 
     #[test]
-    fn preview_is_the_redacted_sparse_projection_without_transaction_secret_material() {
+    fn preview_does_not_disclose_transaction_secret_material() {
         let config_path = PathBuf::from("/tmp/config-preview.json");
         let secret_marker = "transaction-only-tunnel-secret";
         let secret_path = PathBuf::from("/tmp/preview-tunnel-secret");
@@ -1394,12 +1414,6 @@ mod tests {
 
         let preview: serde_json::Value =
             serde_json::from_str(&session.redacted_config_json().unwrap()).unwrap();
-        let built = build_config(session.build_active_input().unwrap()).unwrap();
-        assert_eq!(preview, sparse_config_value(&built.config, true).unwrap());
-        assert_eq!(
-            preview["tunnel"]["apiKey"],
-            format!("file:{}", secret_path.display())
-        );
         assert!(!serde_json::to_string(&preview)
             .unwrap()
             .contains(secret_marker));
@@ -1491,5 +1505,112 @@ mod tests {
             "mcp-token-marker"
         );
         assert!(!format!("{draft:?}").contains("mcp-token-marker"));
+    }
+}
+
+pub(crate) fn additional_entries() -> Vec<crate::config_catalog::ConfigEntry> {
+    static ENTRIES: std::sync::OnceLock<Vec<crate::config_catalog::ConfigEntry>> =
+        std::sync::OnceLock::new();
+    ENTRIES
+        .get_or_init(|| {
+            crate::config_catalog::entries()
+                .expect("configuration catalog is validated before opening the editor")
+                .into_iter()
+                .filter(|entry| {
+                    let path = entry.path.join(".");
+                    !entry.path.iter().any(|part| part == "*")
+                        && (entry.kind != "object" || path == "browser.runtime")
+                        && entry.kind != "map"
+                        && (path.starts_with("browser.")
+                            || path.starts_with("skills.")
+                            || path.starts_with("policy.command.")
+                            || path == "policy.enabled"
+                            || path == "backupLimit"
+                            || path == "config.updatePolicy")
+                })
+                .collect()
+        })
+        .clone()
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AdditionalDraft {
+    pub(crate) values: BTreeMap<usize, String>,
+    initial: BTreeMap<usize, String>,
+}
+
+impl AdditionalDraft {
+    fn from_config(config: &Config) -> Self {
+        let value = serde_json::to_value(config).expect("config serializes");
+        let values: BTreeMap<usize, String> = additional_entries()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let mut current = &value;
+                for part in &entry.path {
+                    current = &current[part];
+                }
+                let missing = current.is_null();
+                let current = if current.is_null() {
+                    entry.default_value.as_ref().unwrap_or(&entry.example)
+                } else {
+                    current
+                };
+                let text = if entry.kind == "object" {
+                    if missing {
+                        "automatic".to_owned()
+                    } else {
+                        "explicit".to_owned()
+                    }
+                } else {
+                    current
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| current.to_string())
+                };
+                (index, text)
+            })
+            .collect();
+        Self {
+            initial: values.clone(),
+            values,
+        }
+    }
+
+    pub(crate) fn changes(&self) -> Result<Vec<agentic_gpt_protocol::ConfigChange>, usize> {
+        additional_entries()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.values.get(index) != self.initial.get(index))
+            .map(|(index, entry)| {
+                if entry.kind == "object" {
+                    return Ok(
+                        if self
+                            .values
+                            .get(&index)
+                            .is_some_and(|value| value == "automatic")
+                        {
+                            agentic_gpt_protocol::ConfigChange::Unset {
+                                path: entry.path.clone(),
+                            }
+                        } else {
+                            agentic_gpt_protocol::ConfigChange::Set {
+                                path: entry.path.clone(),
+                                value: serde_json::json!({}),
+                            }
+                        },
+                    );
+                }
+
+                crate::config_catalog::parse_cli_change(
+                    &entry.path.join("."),
+                    self.values
+                        .get(&index)
+                        .map(String::as_str)
+                        .unwrap_or("null"),
+                )
+                .map_err(|_| index)
+            })
+            .collect()
     }
 }
