@@ -31,3 +31,8 @@
 - 按用户取舍再删除config_keys_json_lists_registry、config_keys_http_mcp_section_exposes_editable_contract：二者只固定元数据字段/数量，无状态或实际副作用。CLI真实写盘/非法值不写盘/脱敏/默认-null-explicit区别保障仍保留；完整目录由共享metadata及真实manual/get/update链路验收。
 
 - 最终完整remote-build test成功：所有workspace测试通过（Agent 411通过/1既有忽略，CLI 22，HTTP 5，supervisor 6，Hub 92，及其余crate/集成/doc-tests）。Apps未知字段测试进一步发现flatten封套吞掉inner deny_unknown_fields，已用单份泛型封套反序列化分离agentId并将其余交给共享请求DTO，HTTP/Apps同时受益，未复制字段或改测试绕过。
+
+- remote-build build及parity已成功，实时HTTP/MCP/OpenAPI gate明确PASS（不仅START）；最新协议/Agent/Hub各入口均验收。最终lint再次通过。
+- root额外源码核查确认HTTP重构曾改变原凭据失效边界：不可解析时错误地保留旧token/监听器。已恢复退役入口、拒绝新请求、保留已准入响应排空的行为；现有真实文件凭据⑤测试增加删除文件关端口/恢复文件重新认证，正在远端最终回归。文档同步fail-closed及私有可靠派发原请求与公开脱敏投影的实际区别。
+
+- 最终凭据失效修复已通过remote-build lint及完整remote-build test；真实文件删除/恢复后的HTTP关闭与重新认证用例通过。源码修复与追加⑤保障作为单独fix阶段提交；随后只剩最终二进制契约验收和文档阶段提交。

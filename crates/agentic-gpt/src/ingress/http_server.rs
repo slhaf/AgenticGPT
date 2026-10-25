@@ -209,8 +209,15 @@ async fn reconcile(
         }
         return Ok(());
     }
-    let resolved_token = config::resolve_secret_reference(&desired.bearer_token)
-        .map_err(|_| anyhow!("http_mcp_bearer_token_unavailable"))?;
+    let resolved_token = match config::resolve_secret_reference(&desired.bearer_token) {
+        Ok(token) => token,
+        Err(_) => {
+            // Revoking the credential also revokes admission through the old
+            // listener. Accepted responses still drain before sessions close.
+            stop_active(active);
+            return Err(anyhow!("http_mcp_bearer_token_unavailable"));
+        }
+    };
     let endpoint = EndpointKey::from(desired);
     if let Some(server) = active.as_mut() {
         if server.endpoint == endpoint {

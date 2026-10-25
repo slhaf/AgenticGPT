@@ -605,6 +605,14 @@ fn run_file_scenario(root: &Path) -> Result<(), String> {
         "re-enabled file-token HTTP endpoint returned no tools",
     )?;
 
+    // Credential deletion must revoke the real listening ingress, including
+    // admission with the previously resolved token. Recovery needs no config edit.
+    fs::remove_file(&replacement_file).map_err(|error| error.to_string())?;
+    wait_for_tcp(&replacement_endpoint, false)?;
+    fs::write(&replacement_file, "http-file-rotated-token\n").map_err(|error| error.to_string())?;
+    wait_for_tcp(&replacement_endpoint, true)?;
+    http_initialize(&replacement_endpoint, "http-file-rotated-token", 109)?;
+
     drop(worker);
     wait_for_tcp(&replacement_endpoint, false)?;
     Ok(())
