@@ -331,7 +331,7 @@ def init_agent(binary: Path, root: Path, mode: str, profile: str, agent_id: str,
     config["policy"]["bubblewrap"] = False
     config["confirmationProvider"] = {"channels": []}
     config["toolsets"] = {
-        "enabled": ["agent", "file", "mcp", "process", "skills", "tmux", "room"]
+        "enabled": ["agent", "file", "mcp", "process", "skills", "tmux", "room.bootstrap", "room.diary", "room.notebook", "room.state", "room.maintenance"]
     }
     if mode == "hub":
         config["hub"] = {
@@ -7329,10 +7329,9 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub Full MCP maintenance ownership", "MCP submit did not mutate only the Agent-owned repository")
         reports.append("PASS Hub Full MCP dispatched all nine current Room operations and real local maintenance")
 
-        # Exercise the shared email DTOs through both real Hub adapters. The
-        # fixture has email disabled, so even send/trash have no external effect.
-        # This protects dispatch, enum parsing and the common Agent error frame;
-        # enabled mail content/render/export is covered by the Local binary test.
+        # Exercise both Hub adapters through the independent Email admission gate.
+        # Its toolset is disabled, so send/trash must be rejected before service effects.
+        # Enabled mail content/render/export remains covered by the Local binary test.
         for request_id, (action, payload) in enumerate((
             ("list", {}),
             ("read", {"id": "fixture", "view": "imageWithRemote"}),
@@ -7359,14 +7358,13 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 fail(label, f"MCP did not preserve the Agent business error: {result}")
             for value in (http_value, json_result(reply, label)):
                 validate_instance(document, schemas, "AgentErrorResponse", value, label)
-                if value.get("error", {}).get("code") != "email_disabled":
-                    fail(label, f"request did not reach the active Room email service: {value}")
+                if value.get("error", {}).get("code") != "toolset_required":
+                    fail(label, f"request bypassed the Room email toolset gate: {value}")
                 event_panel(value, label)
         reports.append("PASS all six Hub email HTTP/MCP calls used shared requests and retained Agent events/error frames")
 
-        # Real HTTP and Apps MCP must reach the ephemeral Secret dispatch path,
-        # even when the Room's Secret capability is disabled. This protects the
-        # public adapters and common error/event frame without using a vault.
+        # Secret uses its independent toolset gate and ephemeral dispatch path;
+        # disabled requests retain the common error/event frame without using a vault.
         for request_id, (action, payload) in enumerate((
             ("list", {}),
             ("get", {"site": "parity.invalid", "account": "fixture", "type": "password"}),
@@ -7379,8 +7377,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 hub_port, "POST", f"/v1/room/secret/{action}", payload,
                 {"Authorization": f"Bearer {hub_key}"}, label,
             )
-            if response.status != 503:
-                fail(label, f"expected unconfigured Agent response, got HTTP {response.status}: {response.body[:500]!r}")
+            if response.status != 403:
+                fail(label, f"expected disabled Secret toolset response, got HTTP {response.status}: {response.body[:500]!r}")
             reply = mcp_call(
                 hub_port, hub_key, full_session, request_id, "tools/call",
                 {"name": f"room.secret.{action}", "arguments": payload}, label,
@@ -7389,8 +7387,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 fail(label, "MCP discarded the Agent business error")
             for value in (response.json(label), json_result(reply, label)):
                 validate_instance(document, schemas, "AgentErrorResponse", value, label)
-                if value.get("error", {}).get("code") != "secret_not_configured":
-                    fail(label, f"request did not reach the active Room secret service: {value}")
+                if value.get("error", {}).get("code") != "toolset_required":
+                    fail(label, f"request bypassed the Room secret toolset gate: {value}")
                 event_panel(value, label)
         reports.append("PASS all four Hub secret HTTP/MCP calls used ephemeral dispatch and retained Agent events/error frames")
 

@@ -12,11 +12,13 @@
 
 本地 Unix、Tunnel stdio、HTTP MCP 工作进程、Hub 命令和 CLI 路径保留各自不同的封装/身份验证/错误封套。Agent 审计来源前缀分别为 `local:`、`tunnel:`、`http:`、`hub:` 和 `localadmin:`。CLI 接口面仅包含现有四项本地 tmux 管理操作：`tmux.listSessions`、`tmux.attach`、`tmux.createSession` 和 `tmux.closeSession`；MCP `tmux.sessions`、`tmux.panes`、`tmux.exec` 和 `tmux.pasteText` 是单独的 MCP 操作，不是 CLI 别名。共享 Skill 执行和 Process 结果投影仍由 Agent 操作/资源层负责。
 
-Normal 不代表 Room：只有显式启用 `room` 命名空间后，Normal 才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力行为。实际副作用仍由策略、路径、确认、租约和资源所有者控制；不能因此声称外部 MCP、Browser JavaScript、tmux、tunnel 子进程或 Browser 宿主副作用受到通用 OS 沙箱保护。
+Normal 不代表 Room：Normal 运行时需显式启用相应 `room.*` 子工具集才可使用对应 Room 能力。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力行为。实际副作用仍由策略、路径、确认、租约和资源所有者控制；不能因此声称外部 MCP、Browser JavaScript、tmux、tunnel 子进程或 Browser 宿主副作用受到通用 OS 沙箱保护。
 
 ## Standalone 公布接口面与命名空间预设
 
-Standalone 公布的接口面有 Normal 和 Room 两种预设。Normal 预设启用除 `room/config` 以外的命名空间，Room 预设额外启用 `room`；`config` 在两种预设中均不选中。可用命名空间为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`room` 和 `config`。逻辑 `room` 命名空间包括 `bootstrap`、`bootstrap.read`、语义读取工具以及 Room 维护状态/提交操作。显式设置的 `toolsets.enabled` 无论配置档为何都具有权威性，只筛选这些已公布名称；它不会暴露仅供派发使用的别名。
+Standalone 提供 Normal 和 Room 工具集预设。Normal 不选择任何 `room.*` 子项，Room 额外选择 `room.bootstrap`、`room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
+`config`、`room.email`、`room.secret` 默认不选中。七个 Room 子工具集独立控制发现、准入和资源启停，没有聚合 `room` 授权开关。
+Bootstrap 工具集对应 `bootstrap` 与 `bootstrap.read`，其他子工具集对应同名前缀的 API。显式 `toolsets.enabled` 是最终依据，不暴露 dispatch-only 别名。
 
 Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路径策略、审计和 Process 注册表。Standalone 调用不接受仅 Hub 支持的 `agentId` 字段；所有受影响请求均拒绝旧 `needConfirm`／`confirmMethod` 字段。
 
@@ -78,7 +80,7 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 
 ## Room 密钥接口
 
-四项操作共用 Agent 本地 Vaultwarden 服务，要求 `room` 工具集与 `room.secret.enabled=true`。Standalone／Local 使用本地入口；Hub Full 经活动 Room 路由，不接收 `agentId`，HTTP 为 `/v1/room/secret/<action>` POST。Coordinator 隐藏并拒绝。配置和部署边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
+四项操作共用 Agent 本地 Vaultwarden 服务，要求 `room.secret` 工具集。Standalone／Local 使用本地入口；Hub Full 经活动 Room 路由，不接收 `agentId`，HTTP 为 `/v1/room/secret/<action>` POST。Coordinator 隐藏并拒绝。配置和部署边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
 
 | 名称 | 用途与输入 | 结果与副作用 |
 | --- | --- | --- |
@@ -91,7 +93,7 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 
 ## Room 邮件接口
 
-六项邮件操作要求 `room` 工具集；Standalone/Local 使用本地 Agent，Hub Full 经活动 Room 路由且不接收 `agentId`，Coordinator 隐藏并拒绝。HTTP 对应 `/v1/room/email/<action>` POST 路由。配置与完整例子见[Room 邮件使用指南](email.zh-CN.md)，字段以 [OpenAPI](../openapi/hub.yaml) 为准。
+六项邮件操作要求 `room.email` 工具集；Standalone/Local 使用本地 Agent，Hub Full 经活动 Room 路由且不接收 `agentId`，Coordinator 隐藏并拒绝。HTTP 对应 `/v1/room/email/<action>` POST 路由。配置与完整例子见[Room 邮件使用指南](email.zh-CN.md)，字段以 [OpenAPI](../openapi/hub.yaml) 为准。
 
 | 名称 | 用途与输入 | 结果与副作用 |
 | --- | --- | --- |

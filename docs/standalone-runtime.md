@@ -73,10 +73,9 @@ Local 模式下 `httpMcp` 不会添加 TCP listener。
 
 传输方式不会改变本地策略。Tunnel、HTTP 和本地 Unix 入口对按 profile 选择的工具集使用相同的 Agent 工具表面和策略边界。
 
-Normal 预设默认不包含逻辑 `room` namespace；Room 预设会启用它。显式设置的 `toolsets.enabled` 是最终依据。进入同一个
-worker 的调用共享其实时配置、确认状态、审计、容量和托管执行注册表。Room bootstrap、diary 和 notebook 执行遵循实时
-`room` namespace，而非启动时的 profile。因此，Normal-profile worker 可在不重启的情况下启用 `room`；若该 namespace
-仍处于禁用状态，直接 dispatch Room 操作会返回 `room_toolset_required`。
+Normal 预设不选择 Room 子工具集；Room 预设选择 bootstrap、diary、notebook、state、maintenance，Email/Secret 默认关闭。
+显式的 `toolsets.enabled` 是最终依据。进入同一个 worker 的调用共享其实时配置、确认状态、审计、容量和托管执行注册表。
+每项 Room API 只检查自己的子工具集；Normal-profile worker 可显式启用某个子项而无须重启，关闭时返回 `toolset_required`。
 
 ## 本地 Unix MCP 控制通道
 
@@ -158,9 +157,10 @@ printf '%s' '{"message":"需要查看部署状态","ref":"deploy-42","severity":
 
 ## Tunnel、HTTP 与本地工具表面
 
-Normal 与 Room profile 选择 namespace 预设，而不是固定最终运行时表面：Normal 启用 `agent`、`file`、`mcp`、`process`、`skills`、
-`tmux` 和 `browser`；Room 在此基础上还启用 `room`。显式设置的
-`toolsets.enabled` 是最终依据。`config` 是额外可选 namespace，Normal/Room 预设均不选中，显式启用后提供 `config.manual/get/update`。逻辑 `room` namespace 包含 `bootstrap`、`bootstrap.read`、语义读取工具以及维护状态/提交工具。
+Normal 与 Room profile 选择工具集预设，而不是固定最终接口面。普通工具集为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`；
+Room 核心预设额外选择 `room.bootstrap`、`room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
+`config`、`room.email`、`room.secret` 在两个预设中都默认关闭；显式 `toolsets.enabled` 是最终依据。
+七个 Room 子工具集分别控制 API 和相应资源，聚合 `room` 不再是合法值。Bootstrap 对应公开的 `bootstrap`、`bootstrap.read` 名称。
 
 这些过滤器只会从已公布的工具表面移除名称，不会暴露仅供 dispatch 使用的别名。
 
@@ -179,7 +179,7 @@ event.list, event.get, event.mark
 隐藏事件不会因此变为已处理。事件工具只管理收件箱状态，不是进程控制接口。规范说明见
 [`接口说明：持久事件收件箱`](interfaces.md#持久事件收件箱)。
 
-启用逻辑 `room` namespace 后，还会公布以下工具名称：
+分别启用对应 `room.*` 子工具集后，公布相应工具名称：
 
 ```text
 bootstrap, bootstrap.read
@@ -189,7 +189,7 @@ room.state.list, room.state.read
 room.maintenance.status, room.maintenance.submit
 ```
 
-另有六项 `room.email.*` 邮件工具；启用 `room.secret.enabled=true` 后，密钥工具为 `room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete`。密钥子开关默认关闭，修改通过 Secret 局部服务协调；已知工具名的直接调用也受准入约束。配置、已验证的 `bw` 版本、严格确认与无敏感回执边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
+另有六项 `room.email.*` 邮件工具；启用 `room.secret` 工具集后，密钥工具为 `room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete`。密钥工具集默认关闭，修改通过 Secret 局部服务协调；已知工具名的直接调用也受准入约束。配置、已验证的 `bw` 版本、严格确认与无敏感回执边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
 
 相同的九个文档／维护语义 Room 名称是本地 Unix MCP、Tunnel stdio 和 Hub Full MCP/HTTP 当前合同的一部分。Hub Full 会通过捕获的活动 Room lease 转发
 `room.diary.active/read`、`room.notebook.recent/search/read`、

@@ -2,7 +2,7 @@
 
 Room 邮件通过 IMAP 同步一个邮箱，通过 SMTP 发送纯文本邮件。六个 `room.email.*` API 使用 Agent 本地保存的邮件；调用列表不会临时触发收信，也不会将邮件标为已读。
 
-Standalone 和 Local 需要启用 `room` 工具集。Hub Full 通过活动 Room Agent 路由这些操作，请求不带 `agentId`；Coordinator 不提供邮件操作。HTTP 路由为 `POST /v1/room/email/list`、`read`、`search`、`attachment`、`send` 和 `operate`。请求字段以 [OpenAPI](../openapi/hub.yaml) 和 [共享邮件请求类型](../crates/agentic-gpt-protocol/src/email.rs) 为准。
+Standalone 和 Local 需要启用 `room.email` 工具集。Hub Full 通过活动 Room Agent 路由这些操作，请求不带 `agentId`；Coordinator 不提供邮件操作。HTTP 路由为 `POST /v1/room/email/list`、`read`、`search`、`attachment`、`send` 和 `operate`。请求字段以 [OpenAPI](../openapi/hub.yaml) 和 [共享邮件请求类型](../crates/agentic-gpt-protocol/src/email.rs) 为准。
 
 ## 配置账户
 
@@ -11,7 +11,6 @@ Standalone 和 Local 需要启用 `room` 工具集。Hub Full 通过活动 Room 
 ```json
 {
   "email": {
-    "enabled": true,
     "account": {
       "imapHost": "imap.example.invalid",
       "imapPort": 993,
@@ -32,10 +31,10 @@ Standalone 和 Local 需要启用 `room` 工具集。Hub Full 通过活动 Room 
 }
 ```
 
-启用邮件还需要启用 Room 工具集：
+先保存完整账户配置，再开启邮件子工具集：
 
 ```bash
-agentic-gpt config toolset enable room
+agentic-gpt config toolset enable room.email
 ```
 
 运行 Agent 的环境中必须存在 `AGENTIC_EMAIL_PASSWORD`。也可以使用 `file:/absolute/path` 或 `file:~/…` 引用保存密码的文件。文件只保存密码或应用专用密码；不要把密码写进命令参数、日志或配置示例。此版本不提供 OAuth2 登录，也不创建或管理邮箱服务商的应用密码。
@@ -44,7 +43,6 @@ agentic-gpt config toolset enable room
 
 | 配置键 | 默认值 | 范围或要求 |
 | --- | --- | --- |
-| `email.enabled` | `false` | `true` 或 `false`；启用时必须有完整账户。 |
 | `email.account` | 无 | 单账户连接对象；可设为 `null` 清除，但必须先关闭邮件。 |
 | `email.account.imapHost`、`smtpHost` | 无 | 服务器主机名；不带 URL 协议前缀、路径或用户名。 |
 | `email.account.imapPort`、`smtpPort` | `993`、`465` | 1–65535。 |
@@ -68,7 +66,7 @@ agentic-gpt config set email.sendPolicy confirm
 agentic-gpt config set email.trashPolicy deny
 ```
 
-`email.account` 连接配置变化通过邮件服务局部切换：先停止新准入并排空在途请求与同步，再释放旧账户 owner，保留本地数据库、游标和发送结果。繁忙或准备失败时保留旧账户并报告应用失败，不因重配置自动重发邮件；静态校验不保证远程登录成功。`enabled`、同步间隔、保存天数、容量上限和两个策略用于后续同步与请求，已接纳请求保留原策略。关闭 Room 工具集或邮件开关停止继续安排同步。通过配置 API 的 `value/appliedValue/applyStatus/error` 区分已保存与已应用，详见[配置生效边界](configuration.zh-CN.md#热加载与重启边界)。
+`email.account` 连接配置变化通过邮件服务局部切换：先停止新准入并排空在途请求与同步，再释放旧账户 owner，保留本地数据库、游标和发送结果。繁忙或准备失败时保留旧账户并报告应用失败，不因重配置自动重发邮件；静态校验不保证远程登录成功。同步间隔、保存天数、容量上限和两个策略用于后续同步与请求，已接纳请求保留原策略。`room.email` 是唯一启停开关，关闭时排空请求与同步并释放账户 owner；重开后恢复。其他 Room 子工具集不影响邮件。通过配置 API 的 `value/appliedValue/applyStatus/error` 区分已保存与已应用，详见[配置生效边界](configuration.zh-CN.md#热加载与重启边界)。
 
 ## 收信、提醒与本地保存
 
@@ -257,7 +255,7 @@ agentic-gpt email --config PATH recover --skip-existing-notifications
 - `confirm`：通过现有确认通道取得明确批准后执行；拒绝、超时、取消或通道不可用都不执行。全局 `policy.enabled=false` 不会放宽这项要求。
 - `deny`：拒绝该操作，调用方不能用请求参数绕过。
 
-普通读取、搜索及四项已读/标星操作不要求邮件专属确认；它们仍受 Room 工具集和入口认证限制。附件导出另外接受文件写入权限检查。邮件正文和附件属于外部内容，里面的命令、链接或指令不会自动获得执行权限。
+普通读取、搜索及四项已读/标星操作不要求邮件专属确认；它们仍受 `room.email` 工具集和入口认证限制。附件导出另外接受文件写入权限检查。邮件正文和附件属于外部内容，里面的命令、链接或指令不会自动获得执行权限。
 
 连接失败时检查服务器、端口、TLS 方式、密码引用和服务商 IMAP/SMTP 开关。图片文字缺失时检查系统字体；只有 `imageWithRemote` 会下载远程图片，离线模式缺少外部图片不属于收信失败。附件不能内联时改用下载。内容已被清理、服务器邮件不可用或身份需要恢复时，应按错误处理，不能把失败当成空邮箱或已经成功执行。
 

@@ -38,14 +38,17 @@ agentic-gpt config show
 模式与配置档是两个独立选择：
 
 - `--mode standalone|hub|local` 选择运行时连接方式与配置形状。
-- `--profile normal|room` 选择默认 toolset preset。normal preset 启用除 `room`、`config` 外的
-  namespace；room preset 额外启用 `room`，仍不默认选中 `config`。配置档本身不会固定最终 runtime surface 或数量，
-  因为显式的 `toolsets.enabled` 选择具有权威性。
+- `--profile normal|room` 选择默认工具集预设。Normal 不选择 Room 子工具集；Room 额外选择
+  `room.bootstrap`、`room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
+  `config`、`room.email`、`room.secret` 在两个预设中都默认关闭，邮箱和密钥服务配置完成后按需启用。
+  显式的 `toolsets.enabled` 是最终选择；profile 不会覆盖已有列表。
 
-可用 namespace 为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`room`、`config`。
-`config` 默认不选中，已有显式列表也不会自动追加；关闭时三个配置工具均不可调用，本地 CLI/TUI 配置管理仍可使用。
-逻辑上的 `room` namespace 包含 Room bootstrap（`bootstrap` 与 `bootstrap.read`）以及全部
-`room.*` 工具。选择只会过滤既有的 Normal/Room advertised names，不会暴露 dispatch-only alias。
+可用工具集为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`config`，以及
+上述七个 `room.*` 子工具集。Room 是 API 和配置目录的归属，没有父级授权开关。
+`room.bootstrap` 管理公开的 `bootstrap`、`bootstrap.read`；其余子工具集对应同名前缀的 API。
+工具集关闭后，本地 MCP 隐藏相关工具，调用时也会拒绝；Email 同步和 Secret owner 随各自子工具集排空、释放和恢复。
+关闭不会删除账户设置或持久数据。仅 Diary、Notebook、State、Maintenance 会按需准备 Room 仓库；
+Bootstrap、Email、Secret 不会因此初始化该仓库。`config` 关闭不影响本地 CLI/TUI 管理。
 使用以下命令固定选择；将 `<namespace>` 替换为上列 namespace 名称：
 
 ```bash
@@ -61,8 +64,7 @@ agentic-gpt config toolset disable '<namespace>'
 - 有效修改会在 worker 运行时热加载，并对后续工具发现与调用生效，无需重启。
 - 无效候选会保留上一次有效的 live selection。
 - 该选择同时约束 Hub 下发及本地 MCP/Unix/HTTP 的普通工具调用。
-- Room 命令先检查实时 `room` namespace；禁用时，共享操作层返回
-  `room_toolset_required`。
+- Room 命令检查对应子工具集；禁用时，共享操作层返回 `toolset_required`，错误说明包含具体工具集。
 
 已有运行时能力和 Hub Room Profile 限制继续生效；基础 Event API、CLI 管理入口等例外见
 [操作准入边界](interfaces.md#agent-接入与操作边界wp2)。
@@ -102,6 +104,14 @@ agentic-gpt config init \
 使用 `file:` 或 `env:` 引用可以避免把 tunnel secret 放进命令行；明文 tunnel API key
 会被拒绝。
 
+### Room 子工具集配置
+
+`toolsets.enabled` 保存具体子工具集；API 名称和活动 Room 路由保持不变。
+Email/Secret 在连接配置完整后分别加入 `room.email`、`room.secret`，关闭时保留配置和数据。
+
+TUI 工具集中的 Room 分组提供批量选择和取消选择，实际只保存具体子项。配置目录独立提供 Room 通用、Email、Secret、
+Browser、Skills、安全策略和配置管理，不再有“其他配置”兜底页；关闭能力仍可修改、Review 和保存其设置。
+
 ### 交互式流程
 
 全屏流程为 Basic → Connection → Optional settings → Review → Completion。Local 的 Connection
@@ -111,9 +121,8 @@ agentic-gpt config init \
 - Optional settings 可配置身份/显示名称、工作区/路径策略、确认方式/语言、限制、沙箱、
   Toolsets、Events 与下游 MCP server 集合。
 - Toolsets 从配置档 preset 开始；一旦显式编辑，其 namespace selection 具有权威性。
-  Room 设置仅当当前有效的 selection 启用 `room` namespace 时才会提供。profile 通过默认
-  preset 影响该 selection；显式 `toolsets.enabled` 会覆盖 preset，因此显示条件是有效
-  namespace selection，而不是 `profile` 字段本身。
+  Room 通用、Email、Secret 配置在工具集关闭时仍可进入和预配置；启停状态来自相应子工具集，
+  不再单独保存 Email 或 Secret 的 enabled 字段。启用时要求完整配置，关闭时允许保留部分设置。
 - 只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会
   显示这些 tunnel 部分。
 - Standalone 和 Local 的 Connection 页默认关闭 Hub 辅助连接。打开后可配置 Hub URL、传输方式、
@@ -202,8 +211,7 @@ agentic-gpt config set tunnel.client.autoDownload true
 agentic-gpt run
 ```
 
-将 `profile` 设为 `room` 会选择启用所有 namespace 的 Room preset（例如
-`agentic-gpt config set profile room`）；如果存在 `toolsets.enabled`，则以它为准。
+将 `profile` 设为 `room` 会选择核心 Room 子工具集预设；如果存在 `toolsets.enabled`，则以显式列表为准。邮箱、密钥与配置 API 仍须单独启用。
 
 私有持久状态不绑定 `agentId`。更改连接身份不会切换事件、进程历史或 Skill 激活/安装状态；需要独立持久状态的实例应使用独立 `HOME`。启动不会迁移旧目录，当前仓库也不提供通用迁移脚本；旧部署数据的备份与升级边界见[私有状态布局](operations.md#私有状态布局)。
 
@@ -832,7 +840,7 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 `room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；
 `room.maintenance.autoPush` 默认是 `false`。
 
-Room namespace 的九个文档／维护语义操作是 Diary active/read、Notebook recent/search/read、
+Room 子工具集的九个文档／维护语义操作是 Diary active/read、Notebook recent/search/read、
 State list/read，以及 maintenance status/submit。Notebook recent/search 的 `limit`
 默认 20、范围为 1–100；search query 必须非空且不超过 256 个 Unicode 字符；
 Markdown read 限制为 512 KiB。Maintenance submit 接受 1–5 个不重复的 semantic slot，可选
@@ -859,11 +867,10 @@ JavaScript 不属于受管理 Process 的 bubblewrap 范围。
 
 ## Room 密钥配置
 
-`room.secret` 通过 Agent 本机的 Bitwarden CLI 访问独立 Vaultwarden 账号，默认关闭。它要求启用 `room` 工具集并设置 `room.secret.enabled=true`；当前生效配置关闭任一开关都会拒绝后续密钥调用，不能用已知工具名绕过。设置、调用示例、同步与敏感内容边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
+`room.secret` 通过 Agent 本机的 Bitwarden CLI 访问独立 Vaultwarden 账号，默认关闭。它仅由 `room.secret` 工具集启停；关闭后拒绝后续密钥调用、释放运行资源，其他 Room 子能力不受影响，不能用已知工具名绕过。设置、调用示例、同步与敏感内容边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
 
 | 配置键 | 默认值 | 约束 |
 | --- | --- | --- |
-| `room.secret.enabled` | `false` | 启用时须填写完整连接配置。 |
 | `room.secret.serverUrl` | 空 | HTTP(S) Vaultwarden 地址，不含 userinfo、query 或 fragment；最多 4096 字节。 |
 | `room.secret.account` | 空 | 专用 Vaultwarden 账号；不含空白或控制字符，最多 1024 字节。 |
 | `room.secret.clientId`、`clientSecret`、`masterPassword` | 空 | 仅接受 `env:NAME` 或 `file:PATH` 引用；非空引用最多 4096 字节，不接受明文或控制字符。 |
@@ -871,17 +878,17 @@ JavaScript 不属于受管理 Process 的 bubblewrap 范围。
 | `room.secret.upsertPolicy`、`deletePolicy` | `confirm` | 仅允许 `allow` 或 `confirm`。 |
 | `room.secret.syncWaitTimeoutMs` | `3000` 毫秒 | 0–30000；仅限制 list/get 等待同步的预算，0 表示不等待，不取消同步。 |
 
-CLI 支持上述全部键，TUI 的 Room 页和 Review 提供对应编辑入口。`config show`、JSON 预览、Review 和 Debug 隐藏服务地址、账号及三个凭据引用；`agent.info` 的配置摘要不包含这些内容。引用在使用时按现有 secret reference 机制解析，文件引用支持 `~` 展开。
+CLI 支持上述全部键，TUI 的独立 Secret 页和 Review 提供对应编辑入口。`config show`、JSON 预览、Review 和 Debug 隐藏服务地址、账号及三个凭据引用；`agent.info` 的配置摘要不包含这些内容。引用在使用时按现有 secret reference 机制解析，文件引用支持 `~` 展开。
 
 `getPolicy=confirm`、`upsertPolicy=confirm` 或 `deletePolicy=confirm` 均要求明确批准；拒绝、超时或确认不可用时不披露或修改密钥，不受 `policy.enabled=false` 绕过。`list` 不请求确认。`room.secret.getPolicy`、`upsertPolicy`、`deletePolicy` 与 `syncWaitTimeoutMs` 支持热更新，配置重载后用于新请求；已接纳请求保留原策略和等待预算，正在运行的同步不受影响。后端、账户、凭据及启停变更通过局部 owner 协调：先排空操作，再释放旧 session/账户锁，之后由新配置激活。准备繁忙或失败会报告错误；已保存不等于后端已连接，重配置不重放 Secret 写入。
 
 ## Room 邮件配置
 
-邮件配置使用顶层 `email`，默认关闭；启用时需配置完整 `account`，并启用 `room` 工具集。全屏初始化提供邮件页与 Review；CLI 提供 `email.enabled`、`email.account`、`email.syncIntervalSeconds`、`email.retentionDays`、`email.maxStorageBytes`、`email.sendPolicy` 和 `email.trashPolicy`。账户通过完整 JSON 对象设置；密码仅接受 `env:` 或 `file:` 引用，配置显示与 Review 均脱敏。
+邮件配置使用顶层 `email`，仅由 `room.email` 工具集启停，默认关闭；启用时需配置完整 `account`。全屏初始化提供独立邮件页与 Review；CLI 提供 `email.account`、`email.syncIntervalSeconds`、`email.retentionDays`、`email.maxStorageBytes`、`email.sendPolicy` 和 `email.trashPolicy`。账户通过完整 JSON 对象设置；密码仅接受 `env:` 或 `file:` 引用，配置显示与 Review 均脱敏。
 
 同步间隔默认 60 秒，范围 10–86400 秒；本地内容默认保存 90 天，范围 1–36500 天；容量上限默认 2 GiB，最小 1 MiB。`sendPolicy` 和 `trashPolicy` 都默认 `confirm`，可设为 `allow` 或 `deny`；`confirm` 必须明确批准，确认不可用时不会执行，也不受全局 `policy.enabled=false` 放宽。
 
-`email.account` 修改通过邮件服务排空在途操作、释放旧账户 owner 后局部切换，保留本地数据库与发送账本；繁忙时保留旧账户并报告应用失败，不自动重发邮件。其余邮件配置应用于后续同步和请求。启停邮件及关闭 Room 工具集会影响后台同步。邮件读取有 `text`（默认）、`image`（离线）和 `imageWithRemote`（仅额外下载远程图片）三种模式；图片渲染使用随包构建的 `litehtml-rs`，无需 Chrome、Python 或项目 Browser，运行时需要合适字体。完整账户示例、六个 API、私有存储与清理边界见[Room 邮件使用指南](email.zh-CN.md)。
+`email.account` 修改通过邮件服务排空在途操作、释放旧账户 owner 后局部切换，保留本地数据库与发送账本；繁忙时保留旧账户并报告应用失败，不自动重发邮件。其余邮件配置应用于后续同步和请求。关闭 `room.email` 会排空在途请求与同步、释放 owner；重新开启后使用保留的账户设置恢复，其他 Room 子工具集不受影响。邮件读取有 `text`（默认）、`image`（离线）和 `imageWithRemote`（仅额外下载远程图片）三种模式；图片渲染使用随包构建的 `litehtml-rs`，无需 Chrome、Python 或项目 Browser，运行时需要合适字体。完整账户示例、六个 API、私有存储与清理边界见[Room 邮件使用指南](email.zh-CN.md)。
 
 ## CLI 与 TUI 配置管理
 

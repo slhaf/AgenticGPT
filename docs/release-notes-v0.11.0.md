@@ -15,11 +15,17 @@
 
 配置、六项工具、服务器邮件身份恢复及资源限制见[Room 邮件使用指南](email.zh-CN.md)。
 
+## Room 子工具集与配置目录
+
+Room 子 API 分别由 `room.bootstrap`、`room.diary`、`room.notebook`、`room.state`、`room.maintenance`、`room.email`、`room.secret` 控制。
+工具集统一控制发现、准入和资源启停，Email/Secret 配置不再包含单独的 enabled 字段。
+API 名称与活动 Room 路由不变，关闭能力仍可在 TUI 独立页面预配置。详细规则见[Room 子工具集配置](configuration.zh-CN.md#room-子工具集配置)。
+
 ## Room 密钥管理
 
 新增 `room.secret.list/get/upsert/delete`，通过 Agent 主机上的 Bitwarden Password Manager CLI（`bw`）连接独立 Vaultwarden 账号，管理以 `site/account` 标识的账号组。
 
-- **按需启用：** Secret 默认关闭，需要 `room` 工具集、`room.secret.enabled=true`、可执行的 `bw`、Vaultwarden Personal API 凭据和主密码。凭据使用 `env:`／`file:` 引用；项目不自动下载 CLI，也不按固定 CLI／服务端版本号设置启动门槛。
+- **按需启用：** Secret 默认关闭，需要 `room.secret` 子工具集、可执行的 `bw`、Vaultwarden Personal API 凭据和主密码。凭据使用 `env:`／`file:` 引用；项目不自动下载 CLI，也不按固定 CLI／服务端版本号设置启动门槛。
 - **读取与修改：** 列表只返回站点和账号；`get` 返回密码或当前 TOTP 验证码；`upsert` 创建或合并更新密码／TOTP，省略字段保留原值；`delete` 将整个 Login item 移入回收站。默认读取允许，创建／更新和删除要求明确确认；拒绝、超时或通道不可用时不披露或修改密钥。
 - **同步与结果不确定：** 每次操作先触发或复用同步。查询默认最多等待 3000 毫秒，明确网络故障或等待预算耗尽时可读取可解锁的旧缓存，并标记 `stale/lastSyncedAt`；认证、TLS 或解析等错误不降级读取。旧缓存未命中返回 `secret_presence_unknown`。写入必须先同步成功，结果不确定时返回 `secret_write_outcome_unknown`，不自动重试。
 - **敏感内容边界：** CLI 使用独立的私有状态目录；密码、seed、验证码和 session 不进入 Agentic 的普通日志、工具上报、Hub 持久回执或 Agent 重放账本。`get` 向调用方返回明文，调用方的会话和模型上下文由调用方管理。

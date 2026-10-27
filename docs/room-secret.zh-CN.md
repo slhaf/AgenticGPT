@@ -9,23 +9,22 @@ Room Secret 通过 Agent 本机的 Bitwarden Password Manager CLI（`bw`）访�
 1. 在运行 Agent 的机器准备 `bw`，并使 Agent 的 `PATH` 能找到它。已联调版本为 [`bw` **2026.10.0**](https://github.com/bitwarden/clients/releases/tag/cli-v2026.10.0)；适配器不按版本号拒绝调用，也不自动下载 CLI。仅在命令不可用、执行失败或bw 命令输出缺少当前操作必需的数据时返回对应错误；额外字段不影响使用。Agentic 不直接检查 Vaultwarden 的 HTTP 响应字段。
 2. 准备 Vaultwarden 服务端，已联调版本为 **1.37.4**。与上述 CLI 配合时，**1.35.1** 的 Personal API 登录响应缺少 CLI 要求的 `userDecryptionOptions`，无法完成初始化。服务端也不按版本号设门禁；其他组合未验证，不据此声明最低兼容版本。准备专用账号的 Personal API client ID、client secret 和主密码。API Key 用于登录，主密码用于解锁；不要填组织 API Key 或 Secrets Manager access token。
 3. 用运行 Agent 的环境或私有文件提供三个凭据。`env:NAME` 指向 Agent 进程可读的环境变量；`file:PATH` 指向只保存对应凭据的文件，支持绝对路径或 `~` 展开。文件应由运行账号私有保护，不放进 workspace、日志或 Git。普通配置不接受凭据明文。
-4. 在已有配置中启用 Room 工具集，再填写连接设置，最后启用 Secret：
+4. 在已有配置中先填写连接设置，再启用 Secret 子工具集；关闭时也可预配置：
 
 ```bash
-agentic-gpt config toolset enable room
 agentic-gpt config set room.secret.serverUrl https://vault.example.invalid
 agentic-gpt config set room.secret.account agent@example.invalid
 agentic-gpt config set room.secret.clientId env:AGENTIC_BW_CLIENT_ID
 agentic-gpt config set room.secret.clientSecret env:AGENTIC_BW_CLIENT_SECRET
 agentic-gpt config set room.secret.masterPassword env:AGENTIC_BW_MASTER_PASSWORD
-agentic-gpt config set room.secret.enabled true
+agentic-gpt config toolset enable room.secret
 ```
 
 服务地址和账号是不可用的示意值，须替换。三个环境变量须由服务管理器或当前运行环境注入，命令只填写引用。若使用文件，将引用改为 `file:/absolute/path`，例如 `file:~/.agentic_gpt/secrets/bitwarden-client-id`。当前服务地址接受 HTTP(S)，不接受 URL 中的用户名、密码、查询参数或片段。
 
-也可在 `agentic-gpt config init` 的 Room 页填写上述字段，再在 Review 编辑和提交。配置显示、Review、JSON 预览和 Debug 隐藏服务地址、账号与凭据引用。完整默认值和长度要求见[Room 密钥配置](configuration.zh-CN.md#room-密钥配置)。
+也可在 `agentic-gpt config init` 的独立 Secret 页填写上述字段，再在 Review 编辑和提交。配置显示、Review、JSON 预览和 Debug 隐藏服务地址、账号与凭据引用。完整默认值和长度要求见[Room 密钥配置](configuration.zh-CN.md#room-密钥配置)。
 
-`room.secret.getPolicy`、`upsertPolicy`、`deletePolicy` 与 `syncWaitTimeoutMs` 支持热更新，配置重载后用于新请求。已接纳的请求保留原策略和等待预算；调整预算不会取消正在运行的同步。启停、服务地址、后端账号和凭据引用变更通过局部服务协调：先排空请求，再停止旧 CLI／同步、释放 session 与账户锁，之后允许新配置激活 owner。排空繁忙会保留旧实例并报告应用失败；保存成功不保证远程鉴权可用，也不会自动重放密钥写入。实际生效状态见[配置生效边界](configuration.zh-CN.md#热加载与重启边界)。`room` 工具集使用既有实时准入：关闭它会拒绝后续全部 Room 操作。Secret 子开关只控制四项密钥操作；关闭时不会影响其他 Room 工具，也不能通过直接调用已知工具名绕过。
+`room.secret.getPolicy`、`upsertPolicy`、`deletePolicy` 与 `syncWaitTimeoutMs` 支持热更新，配置重载后用于新请求。已接纳的请求保留原策略和等待预算；调整预算不会取消正在运行的同步。启停、服务地址、后端账号和凭据引用变更通过局部服务协调：先排空请求，再停止旧 CLI／同步、释放 session 与账户锁，之后允许新配置激活 owner。排空繁忙会保留旧实例并报告应用失败；保存成功不保证远程鉴权可用，也不会自动重放密钥写入。实际生效状态见[配置生效边界](configuration.zh-CN.md#热加载与重启边界)。`room.secret` 是唯一启停开关，只控制四项密钥操作和对应运行资源；关闭时不影响其他 Room 子工具集，也不能通过直接调用已知工具名绕过。
 
 Agent 本地 MCP 在 Secret 关闭时隐藏四个工具。Hub Full MCP 沿用固定工具列表，未启用时实际调用返回错误。Standalone／Local 从本地 MCP 入口调用；Hub Full 路由到活动 Room Agent，HTTP 使用 `POST /v1/room/secret/list`、`get`、`upsert`、`delete`，请求均不含 `agentId`。Coordinator 不提供这些操作。
 

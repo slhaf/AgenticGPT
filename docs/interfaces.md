@@ -22,7 +22,7 @@ Agent 通过一个范围狭窄的内部准入边界处理请求，不引入新�
 其余普通操作先检查工具集，再检查既有能力条件。Skills 仍要求运行时 Skills 能力，Hub 的
 Room 语义读取、维护、邮件与密钥操作仍要求 Room Profile，Bootstrap 不追加该 Profile 条件。如果开关与能力
 同时不满足，普通操作先返回工具集拒绝。共享操作层普通工具集的错误码为
-`toolset_required`，Room 为 `room_toolset_required`；本地 MCP 的调用时可用性过滤仍保留
+`toolset_required`（包括 Room 子工具集）；本地 MCP 的调用时可用性过滤仍保留
 自己的协议错误封套。
 
 各接入路径的身份验证、封装和错误封套仍互相独立：
@@ -36,7 +36,7 @@ Room 语义读取、维护、邮件与密钥操作仍要求 Room Profile，Boots
 HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上有所不同，而共享 Agent
 操作使用同一套值/错误和精简 Process/Skill 结果层。
 
-Normal 并不等于 Room：只有显式启用 `room` 命名空间时，Normal 运行时才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
+Normal 并不等于 Room：Normal 运行时需显式启用相应 `room.*` 子工具集才可使用对应 Room 能力。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
 
 配置保存与运行态应用分别报告：只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据与 client 启动参数保留显式重启边界，待重启字段不阻止其他设置应用。Hub、HTTP、Browser、邮件账户、Secret 后端、Room 根目录和 Skills 安装并发由具体所有者局部协调，保留进程注册表与持久任务。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已准入操作保留各自快照，不自动重放副作用。完整边界见[配置生效说明](configuration.zh-CN.md#热加载与重启边界)。
 
@@ -137,7 +137,7 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 - `POST /v1/room/diary/active` 和 `POST /v1/room/diary/read`：通过捕获的活动 Room 租约读取当前或一个经过验证的 Diary 层。请求分别使用 `RoomDiaryActiveRequest` 或 `RoomDiaryReadRequest`；响应分别为 `RoomDiaryActiveResponse` 或 `RoomDiaryReadResponse`。
 - `POST /v1/room/notebook/recent`、`POST /v1/room/notebook/search` 和 `POST /v1/room/notebook/read`：读取有界的当前 Markdown 预览、搜索当前 Markdown，或读取一份经过验证的 Notebook 文档。`recent` 和 `search` 使用 `RoomNotebookResultsResponse`；`read` 使用 `RoomNotebookReadResponse`。
 - `POST /v1/room/state/list` 和 `POST /v1/room/state/read`：列出或读取有界的 `State/entities` Markdown 文档，分别使用 `RoomStateListResponse` 或 `RoomStateReadResponse`。
-- `POST /v1/room/secret/list`、`get`、`upsert` 和 `delete`：通过活动 Room Agent 查询账号组、读取密码／当前 TOTP、创建或更新、移入回收站。请求不接收 `agentId`，并要求 Agent 的 `room.secret.enabled=true`；敏感内容不走持久回执／重放路径，见下方[Room 密钥](#room-密钥)。
+- `POST /v1/room/secret/list`、`get`、`upsert` 和 `delete`：通过活动 Room Agent 查询账号组、读取密码／当前 TOTP、创建或更新、移入回收站。请求不接收 `agentId`，并要求 Agent 的 `room.secret` 工具集开启；敏感内容不走持久回执／重放路径，见下方[Room 密钥](#room-密钥)。
 - `POST /v1/room/maintenance/status` 和 `POST /v1/room/maintenance/submit`：检查由仓库所有者负责的就绪状态，或提交明确的语义维护请求。响应分别为 `RoomMaintenanceStatusResponse` 和 `RoomMaintenanceSubmitResponse`；submit 使用现有 local/workflow 模式及有界等待契约。
 
 Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirmation` 对象：
@@ -234,7 +234,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 ## Room 密钥
 
-`room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete` 由同一 Agent 本地服务执行。Standalone／Local 要求 `room` 工具集与 `room.secret.enabled=true`；Hub Full 使用活动 Room 租约，对应 `POST /v1/room/secret/<action>`，请求不含 `agentId`。Coordinator 隐藏并拒绝这些工具。Secret 子开关与后端变更通过局部服务排空并释放旧 owner 后应用，运行中工具集关闭按实时准入生效。本地 MCP 随开关隐藏工具，Hub Full MCP 保持固定工具列表并在调用时检查。账号组定位沿用 bw 可读列表；解密失败的条目可能被 bw 省略，具体影响见使用指南。
+`room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete` 由同一 Agent 本地服务执行。Standalone／Local 要求 `room.secret` 工具集；Hub Full 使用活动 Room 租约，对应 `POST /v1/room/secret/<action>`，请求不含 `agentId`。Coordinator 隐藏并拒绝这些工具。Secret 工具集与后端变更通过局部服务排空并释放旧 owner 后应用，运行中工具集关闭按实时准入生效。本地 MCP 随开关隐藏工具，Hub Full MCP 保持固定工具列表并在调用时检查。账号组定位沿用 bw 可读列表；解密失败的条目可能被 bw 省略，具体影响见使用指南。
 
 `list` 只返回 `site/account`，可按 `site` 或 `account` 过滤；`get` 必须指定 `site/account/type`，`type` 为 `password` 或 `totp`，后者返回当前验证码；`upsert` 至少提供非空 `password/totp` 之一，省略字段保留原值；`delete` 将整个账号组移入回收站。相同身份重复时返回 `ambiguous_secret`，不猜测或批量修改。
 
@@ -246,7 +246,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 ## Room 邮件
 
-`room.email.list`、`room.email.read`、`room.email.search`、`room.email.attachment`、`room.email.send` 和 `room.email.operate` 由 Agent 执行；Hub Full 通过活动 Room 路由，HTTP 为同名的 `/v1/room/email/<action>` POST 路由，请求不带 `agentId`。Coordinator 不提供这些操作。六项操作均要求 Room 工具集；后台同步还要求 `email.enabled` 与有效账户。
+`room.email.list`、`room.email.read`、`room.email.search`、`room.email.attachment`、`room.email.send` 和 `room.email.operate` 由 Agent 执行；Hub Full 通过活动 Room 路由，HTTP 为同名的 `/v1/room/email/<action>` POST 路由，请求不带 `agentId`。Coordinator 不提供这些操作。六项操作与后台同步统一受 `room.email` 工具集控制，启用时要求有效账户。
 
 `list` 只列本地记录的当前 INBOX；`read` 提供默认 `text`、离线 `image` 和仅额外下载远程图片的 `imageWithRemote`；三种模式都不执行脚本或加载远程 CSS，续读保持原模式；`search` 可查本地收件及发送记录；`attachment` 可内联读取或受文件权限检查导出至 workspace；`send` 发送纯文本；`operate` 修改已读、标星或移入垃圾箱。发送和移入垃圾箱由各自 `allow/confirm/deny` 配置控制，`confirm` 失败时不执行。六项响应复用现有公共 `events` 面板。HTTP 保留 JSON 图片数据，MCP 将图片投影为原生图片内容块并保留文本及结构化结果中的 `events`。
 
