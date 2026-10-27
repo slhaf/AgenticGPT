@@ -1461,7 +1461,6 @@ fn render_optional_form(
                 .filter(|(index, _)| crate::config_setup::catalog_section_at(*index) == section)
             {
                 let field = SetupField::Catalog(index);
-                lines.push(subsection_heading_line(&entry.title, theme));
                 let value = optional_field_value(draft, field);
                 if entry.kind.contains("array") {
                     push_list_field(
@@ -1479,6 +1478,10 @@ fn render_optional_form(
                 } else if matches!(entry.kind.as_str(), "boolean" | "object")
                     || !entry.choices.is_empty()
                 {
+                    lines.push(subsection_heading_line(
+                        optional_field_label(field, language),
+                        theme,
+                    ));
                     let focus = optional_field_index(section, draft, field).unwrap_or(usize::MAX);
                     if state.focus == focus {
                         focused_line = lines.len();
@@ -1982,7 +1985,7 @@ fn render_optional_form(
                     path.as_str(),
                     example.as_str(),
                 ];
-                render_inspector(frame, inspector, &entry.title, &body, theme);
+                render_inspector(frame, inspector, title, &body, theme);
             }
         } else {
             let inspector_body = optional_form_inspector_body(section, field, language);
@@ -4303,6 +4306,10 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
 
 fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str {
     match field {
+        SetupField::Catalog(index) => crate::config_setup::catalog_entries()
+            .get(index)
+            .and_then(|entry| crate::config_catalog::field_label(&entry.path, language))
+            .unwrap_or_else(|| t(language, "Setting", "配置项")),
         SetupField::RoomSecretServerUrl => {
             t(language, "Vaultwarden server URL", "Vaultwarden 服务地址")
         }
@@ -5453,10 +5460,8 @@ pub(super) fn review_search_text(
 }
 
 fn review_field_label(item: &ReviewItem, language: UiLanguage) -> String {
-    if let Some(SetupField::Catalog(index)) = item.field {
-        if let Some(entry) = crate::config_setup::catalog_entries().get(index) {
-            return entry.path.join(".");
-        }
+    if let Some(field @ SetupField::Catalog(_)) = item.field {
+        return optional_field_label(field, language).to_owned();
     }
     review_item_label(item.label_key, language).to_owned()
 }

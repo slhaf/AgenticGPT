@@ -3,6 +3,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::{
+    cli_i18n::UiLanguage,
     config::{self, Config},
     config_cli::config_keys::CONFIG_KEYS,
 };
@@ -134,21 +135,98 @@ fn collection(path: &[String]) -> bool {
     )
 }
 
-fn title(path: &[String]) -> String {
+pub(crate) fn field_label(path: &[String], language: UiLanguage) -> Option<&'static str> {
     let key = path.iter().map(String::as_str).collect::<Vec<_>>();
-    match key.as_slice() {
-        ["config", "updatePolicy"] => "配置修改确认策略",
-        ["browser", "managed", "enabled"] => "启用托管浏览器运行环境",
-        ["browser", "managed", "autoProvision"] => "自动准备浏览器运行环境",
-        ["browser", "runtime"] => "显式浏览器运行环境",
-        ["browser", "runtime", "nodeModuleDirs"] => "Node 模块查找目录",
-        ["mcpServers", "{serverId}", "enabled"] => "启用此 MCP 服务",
-        ["mcpServers", "{serverId}", "transport"] => "MCP 服务传输方式",
-        ["mcpServers", "{serverId}", "url"] => "MCP 服务地址或 stdio 启动命令",
-        ["email", "account", "password"] => "邮箱密码引用",
-        _ => return path.join("."),
-    }
-    .to_owned()
+    let (en, zh_cn) = match key.as_slice() {
+        ["config", "updatePolicy"] => {
+            ("Configuration API update approval", "配置 API 修改确认策略")
+        }
+        ["backupLimit"] => ("Configuration backups to keep", "配置备份保留上限"),
+        ["browser", "managed", "enabled"] => {
+            ("Use managed browser runtime", "使用托管浏览器运行环境")
+        }
+        ["browser", "managed", "autoProvision"] => (
+            "Automatically prepare browser runtime",
+            "自动准备浏览器运行环境",
+        ),
+        ["browser", "runtime"] => ("Explicit browser runtime", "显式浏览器运行环境"),
+        ["browser", "runtime", "appVersion"] => ("Application version", "应用版本"),
+        ["browser", "runtime", "channel"] => ("Release channel", "发布通道"),
+        ["browser", "runtime", "nodeReplPath"] => ("Node REPL entry path", "Node REPL 入口路径"),
+        ["browser", "runtime", "nodePath"] => ("Node.js executable path", "Node.js 可执行文件路径"),
+        ["browser", "runtime", "browserClientPath"] => {
+            ("Browser client module path", "浏览器客户端模块路径")
+        }
+        ["browser", "runtime", "browserServicePath"] => {
+            ("Browser service entry path", "浏览器服务入口路径")
+        }
+        ["browser", "runtime", "codexHome"] => ("Codex data directory", "Codex 数据目录"),
+        ["browser", "runtime", "codexCliPath"] => {
+            ("Codex CLI executable path", "Codex CLI 可执行文件路径")
+        }
+        ["browser", "runtime", "nodeModuleDirs"] => {
+            ("Node module search directories", "Node 模块查找目录")
+        }
+        ["skills", "maxFiles"] => ("Maximum files per skill package", "技能包文件数上限"),
+        ["skills", "maxFileBytes"] => (
+            "Maximum skill file size (bytes)",
+            "单个技能文件大小上限（字节）",
+        ),
+        ["skills", "maxPackageBytes"] => (
+            "Maximum unpacked package size (bytes)",
+            "解压后技能包大小上限（字节）",
+        ),
+        ["skills", "maxSkillMdBytes"] => {
+            ("Maximum SKILL.md size (bytes)", "SKILL.md 大小上限（字节）")
+        }
+        ["skills", "maxInlineBytes"] => (
+            "Maximum inline skill content (bytes)",
+            "内联技能内容上限（字节）",
+        ),
+        ["skills", "connectTimeoutSecs"] => ("Connection timeout (seconds)", "连接超时（秒）"),
+        ["skills", "requestTimeoutSecs"] => ("Request timeout (seconds)", "请求超时（秒）"),
+        ["skills", "idleTimeoutSecs"] => {
+            ("Idle connection timeout (seconds)", "连接空闲超时（秒）")
+        }
+        ["skills", "maxRedirects"] => ("Maximum download redirects", "下载重定向次数上限"),
+        ["skills", "maxConcurrentInstalls"] => {
+            ("Maximum concurrent installations", "并发安装数上限")
+        }
+        ["skills", "maxParallelDownloads"] => ("Maximum parallel downloads", "并行下载数上限"),
+        ["skills", "maxAttempts"] => ("Maximum operation attempts", "操作尝试次数上限"),
+        ["skills", "totalDeadlineSecs"] => {
+            ("Total operation timeout (seconds)", "操作总时限（秒）")
+        }
+        ["skills", "allowedHosts"] => ("Allowed download hosts", "允许下载的主机"),
+        ["policy", "enabled"] => ("Enforce command and path policies", "启用命令与路径策略"),
+        ["policy", "command", "defaultAction"] => (
+            "Default action for unmatched commands",
+            "未匹配命令的默认动作",
+        ),
+        ["policy", "command", "allow"] => ("Allowed command patterns", "允许的命令规则"),
+        ["policy", "command", "confirm"] => {
+            ("Command patterns requiring approval", "需要确认的命令规则")
+        }
+        ["policy", "command", "deny"] => ("Denied command patterns", "拒绝的命令规则"),
+        ["mcpServers", "{serverId}", "enabled"] => ("Enable this MCP server", "启用此 MCP 服务"),
+        ["mcpServers", "{serverId}", "transport"] => ("MCP server transport", "MCP 服务传输方式"),
+        ["mcpServers", "{serverId}", "url"] => (
+            "MCP server URL or stdio command",
+            "MCP 服务地址或 stdio 启动命令",
+        ),
+        ["email", "account", "password"] => ("Email password reference", "邮箱密码引用"),
+        _ => return None,
+    };
+    Some(match language {
+        UiLanguage::En => en,
+        UiLanguage::ZhCn => zh_cn,
+    })
+}
+
+fn title(path: &[String]) -> String {
+    field_label(path, UiLanguage::ZhCn)
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.join("."))
 }
 
 fn description(path: &[String]) -> String {
