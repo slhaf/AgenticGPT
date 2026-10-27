@@ -481,28 +481,50 @@ impl AgentMcpServer {
         }
         if tool_namespace(name).is_some() || operation::is_event_api_operation(name) {
             if let Some(invocation) = validate_stdio_arguments(name, &arguments)? {
-                return match invocation.requests {
-                    FileReadRequests::Batch(requests) => {
-                        let outputs = crate::file_ops::read_batch_with_images(
-                            &self.state,
-                            &requests,
-                            invocation.acquire_confirmation,
-                        )
-                        .await;
-                        Ok(ordered_file_read_batch_result(outputs))
-                    }
-                    FileReadRequests::Single(request) => {
-                        match crate::file_ops::read_request_with_images(
-                            &self.state,
-                            &request,
-                            invocation.acquire_confirmation,
-                        )
-                        .await
-                        {
-                            Ok(output) => Ok(ordered_file_read_result(output)),
-                            Err(error) => Ok((error.value(), None)),
+                return match invocation {
+                    ValidatedFileInvocation::Read(invocation) => match invocation.requests {
+                        FileReadRequests::Batch(requests) => {
+                            let outputs = crate::file_ops::read_batch_with_images(
+                                &self.state,
+                                &requests,
+                                invocation.acquire_confirmation,
+                            )
+                            .await;
+                            Ok(ordered_file_read_batch_result(outputs))
                         }
-                    }
+                        FileReadRequests::Single(request) => {
+                            match crate::file_ops::read_request_with_images(
+                                &self.state,
+                                &request,
+                                invocation.acquire_confirmation,
+                            )
+                            .await
+                            {
+                                Ok(output) => Ok(ordered_file_read_result(output)),
+                                Err(error) => Ok((error.value(), None)),
+                            }
+                        }
+                    },
+                    ValidatedFileInvocation::Search(invocation) => match invocation.requests {
+                        FileSearchRequests::Batch(requests) => Ok((
+                            crate::file_ops::search_batch(
+                                &self.state,
+                                &requests,
+                                invocation.acquire_confirmation,
+                            )
+                            .await,
+                            None,
+                        )),
+                        FileSearchRequests::Single(request) => Ok((
+                            crate::file_ops::search_request(
+                                &self.state,
+                                &request,
+                                invocation.acquire_confirmation,
+                            )
+                            .await,
+                            None,
+                        )),
+                    },
                 };
             }
         }
@@ -586,39 +608,6 @@ impl AgentMcpServer {
             "browser.reset" => self.dispatch_browser_reset(arguments).await,
             "browser.release" => self.dispatch_browser_release(arguments).await,
             "browser.list" => self.dispatch_browser_list(arguments).await,
-            "file.search" => {
-                let args: FileSearchArgs = from_value(arguments)?;
-                validate_file_search_args(&args)?;
-                if let Some(requests) = args.requests {
-                    return Ok((
-                        crate::file_ops::search_batch(
-                            &self.state,
-                            &requests.into_iter().map(Into::into).collect::<Vec<_>>(),
-                            args.acquire_confirmation,
-                        )
-                        .await,
-                        None,
-                    ));
-                }
-                let request = crate::file_ops::SearchRequest {
-                    path: args.path.expect("validated single file.search path"),
-                    query: args.query.expect("validated search query"),
-                    mode: args.mode,
-                    case_sensitive: args.case_sensitive.unwrap_or(true),
-                    include: args.include.unwrap_or_default(),
-                    exclude: args.exclude.unwrap_or_default(),
-                    context_lines: args.context_lines.unwrap_or(0),
-                    max_results: args.max_results.unwrap_or(50),
-                    hidden: args.hidden.unwrap_or(false),
-                    respect_gitignore: args.respect_gitignore.unwrap_or(true),
-                };
-                Ok(crate::file_ops::search_request(
-                    &self.state,
-                    &request,
-                    args.acquire_confirmation,
-                )
-                .await)
-            }
             "file.edit" => {
                 let args: FileEditArgs = from_value(arguments)?;
                 Ok(crate::file_ops::edit(
@@ -2515,7 +2504,10 @@ fn from_value<T: DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(Into::into)
 }
 
-fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<Option<FileReadInvocation>> {
+fn validate_stdio_arguments(
+    name: &str,
+    arguments: &Value,
+) -> Result<Option<ValidatedFileInvocation>> {
     let object = arguments
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("tool arguments must be an object"))?;
@@ -2535,11 +2527,15 @@ fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<Option<File
         }
         "file.read" => {
             let args: FileReadArgs = from_value(arguments.clone())?;
-            return parse_file_read_args(args).map(Some);
+            return parse_file_read_args(args)
+                .map(ValidatedFileInvocation::Read)
+                .map(Some);
         }
         "file.search" => {
             let args: FileSearchArgs = from_value(arguments.clone())?;
-            validate_file_search_args(&args)?;
+            return parse_file_search_args(args)
+                .map(ValidatedFileInvocation::Search)
+                .map(Some);
         }
         "browser.manual" => {
             let args: BrowserManualArgs = from_value(arguments.clone())?;
@@ -2806,6 +2802,21 @@ enum FileReadRequests {
     Batch(Vec<crate::file_ops::ReadRequest>),
 }
 
+enum ValidatedFileInvocation {
+    Read(FileReadInvocation),
+    Search(FileSearchInvocation),
+}
+
+enum FileSearchRequests {
+    Single(crate::file_ops::SearchRequest),
+    Batch(Vec<crate::file_ops::SearchRequest>),
+}
+
+struct FileSearchInvocation {
+    requests: FileSearchRequests,
+    acquire_confirmation: Option<AcquireConfirmation>,
+}
+
 struct FileReadInvocation {
     requests: FileReadRequests,
     acquire_confirmation: Option<AcquireConfirmation>,
@@ -2846,8 +2857,7 @@ fn parse_file_read_args(args: FileReadArgs) -> Result<FileReadInvocation> {
     })
 }
 
-fn validate_file_search_args(args: &FileSearchArgs) -> Result<()> {
-    let batch = args.requests.is_some();
+fn parse_file_search_args(args: FileSearchArgs) -> Result<FileSearchInvocation> {
     let has_flat = args.path.is_some()
         || args.query.is_some()
         || args.mode.is_some()
@@ -2858,33 +2868,51 @@ fn validate_file_search_args(args: &FileSearchArgs) -> Result<()> {
         || args.max_results.is_some()
         || args.hidden.is_some()
         || args.respect_gitignore.is_some();
-    if batch {
-        let requests = args.requests.as_ref().expect("batch request present");
-        if requests.is_empty() || requests.len() > crate::file_ops::MAX_BATCH_OPERATIONS {
-            return Err(anyhow::anyhow!(
-                "file.search requests must contain 1..32 items"
-            ));
+    let requests = match args.requests {
+        Some(requests) => {
+            if requests.is_empty() || requests.len() > crate::file_ops::MAX_BATCH_OPERATIONS {
+                return Err(anyhow::anyhow!(
+                    "file.search requests must contain 1..32 items"
+                ));
+            }
+            if has_flat {
+                return Err(anyhow::anyhow!(
+                    "file.search single fields and requests are mutually exclusive"
+                ));
+            }
+            FileSearchRequests::Batch(requests.into_iter().map(Into::into).collect())
         }
-        if has_flat {
-            return Err(anyhow::anyhow!(
-                "file.search single fields and requests are mutually exclusive"
-            ));
+        None => {
+            let (Some(path), Some(query)) = (args.path, args.query) else {
+                return Err(anyhow::anyhow!(
+                    "file.search requires path and query or requests"
+                ));
+            };
+            if args
+                .mode
+                .as_deref()
+                .is_some_and(|mode| !matches!(mode, "literal" | "regex"))
+            {
+                return Err(anyhow::anyhow!("file search mode must be literal or regex"));
+            }
+            FileSearchRequests::Single(crate::file_ops::SearchRequest {
+                path,
+                query,
+                mode: args.mode,
+                case_sensitive: args.case_sensitive.unwrap_or(true),
+                include: args.include.unwrap_or_default(),
+                exclude: args.exclude.unwrap_or_default(),
+                context_lines: args.context_lines.unwrap_or(0),
+                max_results: args.max_results.unwrap_or(50),
+                hidden: args.hidden.unwrap_or(false),
+                respect_gitignore: args.respect_gitignore.unwrap_or(true),
+            })
         }
-        return Ok(());
-    }
-    if args.path.is_none() || args.query.is_none() {
-        return Err(anyhow::anyhow!(
-            "file.search requires path and query or requests"
-        ));
-    }
-    if args
-        .mode
-        .as_deref()
-        .is_some_and(|mode| !matches!(mode, "literal" | "regex"))
-    {
-        return Err(anyhow::anyhow!("file search mode must be literal or regex"));
-    }
-    Ok(())
+    };
+    Ok(FileSearchInvocation {
+        requests,
+        acquire_confirmation: args.acquire_confirmation,
+    })
 }
 
 fn validate_tmux_sessions_args(args: &TmuxSessionsArgs) -> Result<()> {

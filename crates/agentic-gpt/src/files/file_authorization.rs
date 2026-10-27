@@ -120,20 +120,20 @@ fn identity(metadata: &fs::Metadata) -> (u64, bool) {
 pub(super) async fn authorize_read_requests(
     state: &AppState,
     config: &Config,
-    requests: &[ReadRequest],
+    paths: &[&str],
     acquisition: Option<&AcquireConfirmation>,
-    searches: Option<&[SearchRequest]>,
+    operation: &str,
 ) -> std::result::Result<Config, FileError> {
     let unrestricted = exec::permissive_paths(config);
     let proactive = acquisition.is_some();
     let mut targets = Vec::new();
     let mut roots = Vec::new();
-    for request in requests {
-        let resolved = match resolve_path(&unrestricted, &request.path, Access::Read) {
+    for input in paths {
+        let resolved = match resolve_path(&unrestricted, input, Access::Read) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        roots.push((request.path.clone(), resolved.path.clone()));
+        roots.push((*input, resolved.path.clone()));
         let action = crate::policy::path_policy_decision(config, &resolved.path, false)
             .map_err(|r| FileError::new("path_policy_error", &r))?;
         if !proactive && action == PolicyDecision::Deny {
@@ -144,22 +144,12 @@ pub(super) async fn authorize_read_requests(
     let effective = if targets.is_empty() {
         config.clone()
     } else {
-        authorize_file_targets(
-            state,
-            config,
-            acquisition,
-            if searches.is_some() {
-                "file.search (recursive search scope)"
-            } else {
-                "file.read"
-            },
-            &targets,
-        )
-        .await?
-        .0
+        authorize_file_targets(state, config, acquisition, operation, &targets)
+            .await?
+            .0
     };
     for (input, path) in roots {
-        if resolve_path(&unrestricted, &input, Access::Read)?.path != path {
+        if resolve_path(&unrestricted, input, Access::Read)?.path != path {
             return Err(FileError::new(
                 "file_path_changed",
                 "request target changed while awaiting approval",
@@ -175,14 +165,9 @@ pub(crate) async fn read_request_with_images(
     acquisition: Option<AcquireConfirmation>,
 ) -> std::result::Result<ReadOutput, FileError> {
     let base = state.config.read().await.clone();
-    let config = authorize_read_requests(
-        state,
-        &base,
-        std::slice::from_ref(request),
-        acquisition.as_ref(),
-        None,
-    )
-    .await?;
+    let paths = [request.path.as_str()];
+    let config =
+        authorize_read_requests(state, &base, &paths, acquisition.as_ref(), "file.read").await?;
     let resolved = resolve_path(&config, &request.path, Access::Read)?;
     read_with_images(
         &resolved,
@@ -198,19 +183,12 @@ pub(crate) async fn search_request(
     request: &SearchRequest,
     acquisition: Option<AcquireConfirmation>,
 ) -> Value {
-    let batch = search_batch(state, std::slice::from_ref(request), acquisition).await;
-    match batch
-        .get("results")
-        .and_then(Value::as_array)
-        .and_then(|r| r.first())
+    match super::search_results(state, std::slice::from_ref(request), acquisition)
+        .await
+        .pop()
+        .expect("single file.search request produces one result")
     {
-        Some(item) => {
-            if let Some(error) = item.get("error") {
-                json!({"error":error})
-            } else {
-                item.get("result").cloned().unwrap_or(batch.clone())
-            }
-        }
-        None => batch,
+        Ok(output) => output.into_slim_value(),
+        Err(error) => error.value(),
     }
 }

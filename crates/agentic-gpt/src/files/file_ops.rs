@@ -1017,10 +1017,62 @@ pub(crate) struct SearchOptions<'a> {
     pub(crate) scan_byte_limit: u64,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchMatch {
+    path: String,
+    line: usize,
+    column: usize,
+    line_text: String,
+    before: Vec<String>,
+    after: Vec<String>,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkippedFiles {
+    too_large: usize,
+    non_utf8: usize,
+    symlink: usize,
+    unreadable: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct SearchOutput {
+    matches: Vec<SearchMatch>,
+    clipped_context_lines: Option<usize>,
+    scanned_files: usize,
+    scanned_bytes: u64,
+    skipped_files: SkippedFiles,
+    truncation_reason: Option<&'static str>,
+}
+
+impl SearchOutput {
+    pub(super) fn into_slim_value(self) -> Value {
+        let mut result = json!({"matches": self.matches});
+        if let Some(context_lines) = self.clipped_context_lines {
+            result["contextLines"] = json!(context_lines);
+            result["warnings"] = json!(["context_lines_clipped_to_configured_limit"]);
+        }
+        if self.skipped_files.too_large != 0
+            || self.skipped_files.non_utf8 != 0
+            || self.skipped_files.symlink != 0
+            || self.skipped_files.unreadable != 0
+        {
+            result["skippedFiles"] = json!(self.skipped_files);
+        }
+        if let Some(reason) = self.truncation_reason {
+            result["truncated"] = json!(true);
+            result["reason"] = json!(reason);
+        }
+        result
+    }
+}
+
 pub(crate) fn search_with_context_limit(
     options: SearchOptions<'_>,
     configured_max_context_lines: usize,
-) -> std::result::Result<Value, FileError> {
+) -> std::result::Result<SearchOutput, FileError> {
     if options.query.trim().is_empty() {
         return Err(FileError::new(
             "file_search_query_empty",
@@ -1032,11 +1084,6 @@ pub(crate) fn search_with_context_limit(
         .min(configured_max_context_lines)
         .min(crate::config::MAX_FILE_SEARCH_CONTEXT_LINES);
     let context_lines_clipped = options.context_lines != effective_context_lines;
-    let warnings = if context_lines_clipped {
-        json!(["context_lines_clipped_to_configured_limit"])
-    } else {
-        json!([])
-    };
     if options.max_results == 0 || options.max_results > MAX_SEARCH_RESULTS {
         return Err(FileError::new(
             "file_result_limit_exceeded",
@@ -1056,12 +1103,11 @@ pub(crate) fn search_with_context_limit(
     };
     let matcher = Regex::new(&pattern)
         .map_err(|_| FileError::new("file_invalid_regex", "query is not a valid regex"))?;
-    let mut matches = Vec::new();
+    let mut matches: Vec<SearchMatch> = Vec::new();
     let mut matches_bytes = 2usize;
     let mut scanned_files = 0usize;
     let mut scanned_bytes = 0u64;
-    let mut skipped = json!({"tooLarge": 0, "nonUtf8": 0, "symlink": 0, "unreadable": 0});
-    let mut truncated = false;
+    let mut skipped = SkippedFiles::default();
     let mut truncation_reason = None::<&str>;
     let root_is_file = options.root.path.is_file();
     let entries = WalkBuilder::new(&options.root.path)
@@ -1075,7 +1121,7 @@ pub(crate) fn search_with_context_limit(
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
-                increment_skip(&mut skipped, "unreadable");
+                skipped.unreadable += 1;
                 continue;
             }
         };
@@ -1084,7 +1130,7 @@ pub(crate) fn search_with_context_limit(
             continue;
         }
         if entry.file_type().is_some_and(|kind| kind.is_symlink()) {
-            increment_skip(&mut skipped, "symlink");
+            skipped.symlink += 1;
             continue;
         }
         if !path.is_file() {
@@ -1102,13 +1148,12 @@ pub(crate) fn search_with_context_limit(
                 target
             }
             _ => {
-                increment_skip(&mut skipped, "unreadable");
+                skipped.unreadable += 1;
                 continue;
             }
         };
         let path = checked.path.as_path();
         if scanned_files >= options.scan_file_limit {
-            truncated = true;
             truncation_reason = Some("scan_files");
             break;
         }
@@ -1135,47 +1180,49 @@ pub(crate) fn search_with_context_limit(
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(_) => {
-                increment_skip(&mut skipped, "unreadable");
+                skipped.unreadable += 1;
                 continue;
             }
         };
         if metadata.len() > MAX_FILE_BYTES {
-            increment_skip(&mut skipped, "tooLarge");
+            skipped.too_large += 1;
             continue;
         }
         let remaining_bytes = options.scan_byte_limit.saturating_sub(scanned_bytes);
         if metadata.len() > remaining_bytes {
-            truncated = true;
             truncation_reason = Some("scan_bytes");
             break;
         }
         let bytes = match read_bounded(path, remaining_bytes.min(MAX_FILE_BYTES)) {
             Ok(BoundedRead::Complete(bytes)) => bytes,
             Ok(BoundedRead::Exceeded) => {
-                truncated = true;
                 truncation_reason = Some("scan_bytes");
                 break;
             }
             Err(_) => {
-                increment_skip(&mut skipped, "unreadable");
+                skipped.unreadable += 1;
                 continue;
             }
         };
         scanned_bytes += bytes.len() as u64;
         if bytes.contains(&0) {
-            increment_skip(&mut skipped, "nonUtf8");
+            skipped.non_utf8 += 1;
             continue;
         }
         let text = match String::from_utf8(bytes) {
             Ok(text) => text,
             Err(_) => {
-                increment_skip(&mut skipped, "nonUtf8");
+                skipped.non_utf8 += 1;
                 continue;
             }
         };
         let lines = text.lines().collect::<Vec<_>>();
         for (index, line) in lines.iter().enumerate() {
             for found in matcher.find_iter(line) {
+                if matches.len() >= options.max_results {
+                    truncation_reason = Some("max_results");
+                    break;
+                }
                 let before = (index.saturating_sub(effective_context_lines)..index)
                     .map(|line_index| line_display(lines[line_index]))
                     .collect::<Vec<_>>();
@@ -1183,25 +1230,19 @@ pub(crate) fn search_with_context_limit(
                     ..=(index + effective_context_lines).min(lines.len().saturating_sub(1)))
                     .map(|line_index| line_display(lines[line_index]))
                     .collect::<Vec<_>>();
-                let value = json!({
-                    "path": &relative,
-                    "line": index + 1,
-                    "column": line[..found.start()].chars().count() + 1,
-                    "lineText": line_display(line),
-                    "before": before,
-                    "after": after,
-                });
-                if matches.len() >= options.max_results {
-                    truncated = true;
-                    truncation_reason = Some("max_results");
-                    break;
-                }
+                let value = SearchMatch {
+                    path: relative.clone(),
+                    line: index + 1,
+                    column: line[..found.start()].chars().count() + 1,
+                    line_text: line_display(line),
+                    before,
+                    after,
+                };
                 let candidate_bytes = serde_json::to_vec(&value).unwrap_or_default().len();
                 let next_matches_bytes = matches_bytes
                     .saturating_add(candidate_bytes)
                     .saturating_add(usize::from(!matches.is_empty()));
                 if next_matches_bytes > MAX_SEARCH_OUTPUT_BYTES {
-                    truncated = true;
                     truncation_reason = Some("output_bytes");
                     break;
                 }
@@ -1216,43 +1257,14 @@ pub(crate) fn search_with_context_limit(
             break;
         }
     }
-    Ok(json!({
-        "query": options.query,
-        "mode": match options.mode { SearchMode::Literal => "literal", SearchMode::Regex => "regex" },
-        "requestedContextLines": options.context_lines,
-        "effectiveContextLines": effective_context_lines,
-        "contextLinesClipped": context_lines_clipped,
-        "warnings": warnings,
-        "matches": matches,
-        "matchCount": matches.len(),
-        "scannedFiles": scanned_files,
-        "scannedBytes": scanned_bytes,
-        "skippedFiles": skipped,
-        "truncated": truncated,
-        "truncationReason": truncation_reason,
-    }))
-}
-
-pub(crate) fn slim_search_response(value: Value) -> Value {
-    let mut result = json!({"matches": value["matches"].clone()});
-    if value["contextLinesClipped"].as_bool() == Some(true) {
-        result["contextLines"] = value["effectiveContextLines"].clone();
-        result["warnings"] = value["warnings"].clone();
-    }
-    if value["skippedFiles"].as_object().is_some_and(|skipped| {
-        skipped
-            .values()
-            .any(|count| count.as_u64().unwrap_or(0) > 0)
-    }) {
-        result["skippedFiles"] = value["skippedFiles"].clone();
-    }
-    if value["truncated"].as_bool() == Some(true) {
-        result["truncated"] = json!(true);
-        if !value["truncationReason"].is_null() {
-            result["reason"] = value["truncationReason"].clone();
-        }
-    }
-    result
+    Ok(SearchOutput {
+        matches,
+        clipped_context_lines: context_lines_clipped.then_some(effective_context_lines),
+        scanned_files,
+        scanned_bytes,
+        skipped_files: skipped,
+        truncation_reason,
+    })
 }
 
 fn compile_globs(patterns: &[String]) -> std::result::Result<Option<GlobSet>, FileError> {
@@ -1276,12 +1288,6 @@ fn compile_globs(patterns: &[String]) -> std::result::Result<Option<GlobSet>, Fi
         .build()
         .map(Some)
         .map_err(|_| FileError::new("file_invalid_glob", "invalid glob pattern"))
-}
-
-fn increment_skip(skipped: &mut Value, key: &str) {
-    if let Some(value) = skipped.get(key).and_then(Value::as_u64) {
-        skipped[key] = json!(value.saturating_add(1));
-    }
 }
 
 fn line_display(line: &str) -> String {
@@ -1387,16 +1393,27 @@ pub(crate) async fn read_batch_with_images(
     acquisition: Option<AcquireConfirmation>,
 ) -> Vec<std::result::Result<ReadOutput, FileError>> {
     let base = state.config.read().await.clone();
-    let config =
-        match authorize_read_requests(state, &base, requests, acquisition.as_ref(), None).await {
-            Ok(config) => config,
-            Err(error) => {
-                return requests
-                    .iter()
-                    .map(|_| Err(FileError::new(&error.code, &error.message)))
-                    .collect();
-            }
-        };
+    let paths = requests
+        .iter()
+        .map(|request| request.path.as_str())
+        .collect::<Vec<_>>();
+    let config = match authorize_read_requests(
+        state,
+        &base,
+        &paths,
+        acquisition.as_ref(),
+        "file.read",
+    )
+    .await
+    {
+        Ok(config) => config,
+        Err(error) => {
+            return requests
+                .iter()
+                .map(|_| Err(FileError::new(&error.code, &error.message)))
+                .collect();
+        }
+    };
     let mut image_budget_used = 0usize;
     let mut results: Vec<std::result::Result<ReadOutput, FileError>> =
         Vec::with_capacity(requests.len());
@@ -1457,40 +1474,47 @@ pub(crate) async fn search_batch(
     requests: &[SearchRequest],
     acquisition: Option<AcquireConfirmation>,
 ) -> Value {
+    let results = search_results(state, requests, acquisition).await;
+    finalize_read_search_batch(
+        results
+            .into_iter()
+            .enumerate()
+            .map(|(index, result)| envelope(index, result.map(SearchOutput::into_slim_value)))
+            .collect(),
+    )
+}
+
+pub(super) async fn search_results(
+    state: &AppState,
+    requests: &[SearchRequest],
+    acquisition: Option<AcquireConfirmation>,
+) -> Vec<std::result::Result<SearchOutput, FileError>> {
     let base = state.config.read().await.clone();
-    let read_requests = requests
+    let paths = requests
         .iter()
-        .map(|r| ReadRequest {
-            path: r.path.clone(),
-            metadata: false,
-            start_line: None,
-            end_line: None,
-        })
+        .map(|request| request.path.as_str())
         .collect::<Vec<_>>();
     let config = match authorize_read_requests(
         state,
         &base,
-        &read_requests,
+        &paths,
         acquisition.as_ref(),
-        Some(requests),
+        "file.search (recursive search scope)",
     )
     .await
     {
         Ok(config) => config,
         Err(error) => {
-            return finalize_read_search_batch(
-                requests
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| envelope(i, Err(FileError::new(&error.code, &error.message))))
-                    .collect(),
-            )
+            return requests
+                .iter()
+                .map(|_| Err(FileError::new(&error.code, &error.message)))
+                .collect();
         }
     };
     let mut scanned_files = 0usize;
     let mut scanned_bytes = 0u64;
     let mut results = Vec::with_capacity(requests.len());
-    for (index, request) in requests.iter().enumerate() {
+    for request in requests {
         let remaining_batch_files = MAX_BATCH_SCAN_FILES.saturating_sub(scanned_files);
         let remaining_batch_bytes = MAX_BATCH_SCAN_BYTES.saturating_sub(scanned_bytes);
         let result = match request.mode.as_deref() {
@@ -1530,32 +1554,30 @@ pub(crate) async fn search_batch(
                 config.limits.max_file_search_context_lines,
             )
         });
-        let value = match result {
-            Ok(value) => {
-                scanned_files = scanned_files
-                    .saturating_add(value["scannedFiles"].as_u64().unwrap_or(0) as usize);
-                scanned_bytes =
-                    scanned_bytes.saturating_add(value["scannedBytes"].as_u64().unwrap_or(0));
-                let aggregate_limit_hit = (value["truncationReason"] == "scan_files"
+        let result = match result {
+            Ok(output) => {
+                scanned_files = scanned_files.saturating_add(output.scanned_files);
+                scanned_bytes = scanned_bytes.saturating_add(output.scanned_bytes);
+                let aggregate_limit_hit = (output.truncation_reason == Some("scan_files")
                     && remaining_batch_files <= MAX_SEARCH_FILES
-                    && value["scannedFiles"].as_u64().unwrap_or(0) >= remaining_batch_files as u64)
-                    || (value["truncationReason"] == "scan_bytes"
+                    && output.scanned_files >= remaining_batch_files)
+                    || (output.truncation_reason == Some("scan_bytes")
                         && remaining_batch_bytes <= MAX_SEARCH_BYTES
-                        && value["scannedBytes"].as_u64().unwrap_or(0) >= remaining_batch_bytes);
+                        && output.scanned_bytes >= remaining_batch_bytes);
                 if aggregate_limit_hit {
                     Err(FileError::new(
                         "file_batch_scan_limit_exceeded",
                         "aggregate search scan exceeds the batch bound",
                     ))
                 } else {
-                    Ok(slim_search_response(value))
+                    Ok(output)
                 }
             }
             Err(error) => Err(error),
         };
-        results.push(envelope(index, value));
+        results.push(result);
     }
-    finalize_read_search_batch(results)
+    results
 }
 
 pub(crate) fn envelope(index: usize, result: std::result::Result<Value, FileError>) -> Value {
@@ -1595,7 +1617,6 @@ fn truncate_batch_output(response: &mut Value) {
         {
             payload.remove("content");
             payload.remove("matches");
-            payload.remove("diff");
             payload.insert("resultTruncated".to_string(), json!(true));
         }
         bytes = serde_json::to_vec(response).unwrap_or_default();
@@ -1625,7 +1646,6 @@ pub(crate) struct EditRequest {
     pub(crate) acquire_confirmation: Option<AcquireConfirmation>,
 }
 
-#[derive(Clone, Debug)]
 struct PlannedChange {
     action: &'static str,
     source: Option<ResolvedPath>,
@@ -1637,25 +1657,65 @@ struct PlannedChange {
     before_mode: Option<fs::Permissions>,
     candidate: Option<Vec<u8>>,
     after_revision: Option<String>,
-    diff: String,
-    diff_truncated: bool,
-    changed_lines: Value,
+    changed_lines: ChangedLines,
+    status: ChangeStatus,
     temp: Option<PathBuf>,
+}
+
+enum ChangeStatus {
+    Pending,
+    Unchanged,
+    Created,
+    Updated,
+    Deleted,
+    Moved,
+    Failed(FileError),
+    SkippedNotAttempted,
+}
+
+impl ChangeStatus {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Pending => "pending",
+            Self::Unchanged => "unchanged",
+            Self::Created => "created",
+            Self::Updated => "updated",
+            Self::Deleted => "deleted",
+            Self::Moved => "moved",
+            Self::Failed(_) => "failed",
+            Self::SkippedNotAttempted => "skipped-not-attempted",
+        }
+    }
+
+    fn is_committed(&self) -> bool {
+        matches!(
+            self,
+            Self::Created | Self::Updated | Self::Deleted | Self::Moved
+        )
+    }
+}
+
+struct PatchOutcome {
+    status: &'static str,
+    changes: Vec<PlannedChange>,
+    committed: usize,
+    failed: usize,
+    skipped: usize,
+    confirmation: bool,
 }
 
 pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
     let started = std::time::Instant::now();
     let config = state.config.read().await.clone();
-    let result = apply_patch_inner(state, &config, &request).await;
-    match result {
-        Ok(response) => {
+    match apply_patch_inner(state, &config, &request).await {
+        Ok(outcome) => {
             let audit_status = write_patch_audits(
                 &config,
-                &response,
+                &outcome,
                 request.acquire_confirmation.is_some(),
                 started.elapsed().as_millis(),
             );
-            let mut value = slim_edit_response(&response);
+            let mut value = slim_edit_response(&outcome);
             add_audit_warning(&mut value, audit_status);
             value
         }
@@ -1677,7 +1737,7 @@ async fn apply_patch_inner(
     state: &AppState,
     config: &Config,
     request: &EditRequest,
-) -> std::result::Result<Value, FileError> {
+) -> std::result::Result<PatchOutcome, FileError> {
     let parsed = parse_patch(&request.patch)
         .map_err(|error| FileError::new("file_patch_invalid", &error.to_string()))?;
     if parsed.hunks.is_empty() {
@@ -1756,7 +1816,6 @@ async fn apply_patch_inner(
     let config = &effective_config;
     let mut changes = Vec::new();
     let mut lock_paths = Vec::new();
-    let mut normalized_paths = Vec::new();
     for hunk in parsed.hunks {
         let path = hunk.path().to_string_lossy().to_string();
         match hunk {
@@ -1769,10 +1828,8 @@ async fn apply_patch_inner(
                     ));
                 }
                 let candidate = contents.into_bytes();
-                let (diff, diff_truncated, changed_lines) =
-                    bounded_diff("", &String::from_utf8_lossy(&candidate));
+                let changed_lines = changed_line_counts("", &String::from_utf8_lossy(&candidate));
                 lock_paths.push(target.path.clone());
-                normalized_paths.push(target.path.clone());
                 changes.push(PlannedChange {
                     action: "add",
                     source: None,
@@ -1784,18 +1841,16 @@ async fn apply_patch_inner(
                     before_mode: None,
                     after_revision: Some(revision(&candidate)),
                     candidate: Some(candidate),
-                    diff,
-                    diff_truncated,
                     changed_lines,
+                    status: ChangeStatus::Pending,
                     temp: None,
                 });
             }
             Hunk::DeleteFile { .. } => {
                 let source = resolve_path(config, &path, Access::Write)?;
                 let (bytes, text, mode) = load_edit_source(&source)?;
-                let (diff, diff_truncated, changed_lines) = bounded_diff(&text, "");
+                let changed_lines = changed_line_counts(&text, "");
                 lock_paths.push(source.path.clone());
-                normalized_paths.push(source.path.clone());
                 changes.push(PlannedChange {
                     action: "delete",
                     source: Some(source.clone()),
@@ -1807,9 +1862,8 @@ async fn apply_patch_inner(
                     before_mode: mode,
                     candidate: None,
                     after_revision: None,
-                    diff,
-                    diff_truncated,
                     changed_lines,
+                    status: ChangeStatus::Pending,
                     temp: None,
                 });
             }
@@ -1828,7 +1882,7 @@ async fn apply_patch_inner(
                     ApplyPatchFileUpdateMode::PreserveLineEndings,
                 )
                 .map_err(|error| FileError::new("file_patch_conflict", &error.to_string()))?;
-                let (diff, diff_truncated, changed_lines) = bounded_diff(&text, &candidate_text);
+                let changed_lines = changed_line_counts(&text, &candidate_text);
                 let candidate = candidate_text.into_bytes();
                 if candidate.len() > MAX_FILE_BYTES as usize {
                     return Err(FileError::new(
@@ -1841,10 +1895,8 @@ async fn apply_patch_inner(
                     .transpose()?;
                 let target = destination.clone().unwrap_or_else(|| source.clone());
                 lock_paths.push(source.path.clone());
-                normalized_paths.push(source.path.clone());
                 if let Some(destination) = &destination {
                     lock_paths.push(destination.path.clone());
-                    normalized_paths.push(destination.path.clone());
                 }
                 changes.push(PlannedChange {
                     action: if destination.is_some() {
@@ -1861,17 +1913,15 @@ async fn apply_patch_inner(
                     before_mode: mode,
                     after_revision: Some(revision(&candidate)),
                     candidate: Some(candidate),
-                    diff,
-                    diff_truncated,
                     changed_lines,
+                    status: ChangeStatus::Pending,
                     temp: None,
                 });
             }
         }
     }
-    reject_overlapping_paths(&normalized_paths)?;
+    reject_overlapping_paths(&lock_paths)?;
     lock_paths.sort();
-    lock_paths.dedup();
     let mut locks = Vec::new();
     for path in &lock_paths {
         locks.push(lock_target(state, path).await);
@@ -1905,7 +1955,6 @@ async fn apply_patch_inner(
         }
     }
 
-    let mut response_changes = changes.iter().map(change_value).collect::<Vec<_>>();
     let effective = changes.iter().filter(|change| is_effective(change)).count();
 
     if effective > 0 {
@@ -1961,13 +2010,14 @@ async fn apply_patch_inner(
     }
 
     let mut committed_count = 0usize;
-    for (change_index, change) in changes.iter_mut().enumerate() {
-        if !is_effective(change) {
-            response_changes[change_index]["status"] = json!("unchanged");
+    for change_index in 0..changes.len() {
+        if !is_effective(&changes[change_index]) {
+            changes[change_index].status = ChangeStatus::Unchanged;
             continue;
         }
+        let action = changes[change_index].action;
         #[cfg(test)]
-        let injected_failure = should_inject_commit_failure(change);
+        let injected_failure = should_inject_commit_failure(&changes[change_index]);
         #[cfg(not(test))]
         let injected_failure = false;
         let result = if injected_failure {
@@ -1976,81 +2026,62 @@ async fn apply_patch_inner(
                 "injected commit failure",
             ))
         } else {
-            match change.action {
-                "add" => commit_create(change),
-                "update" => commit_replace(change),
-                "delete" => commit_delete(change),
-                "move" => commit_move(change),
+            match action {
+                "add" => commit_create(&mut changes[change_index]),
+                "update" => commit_replace(&mut changes[change_index]),
+                "delete" => commit_delete(&mut changes[change_index]),
+                "move" => commit_move(&mut changes[change_index]),
                 _ => unreachable!(),
             }
         };
         if let Err(error) = result {
-            cleanup_temps(&mut changes);
-            cleanup_owned_parent_directories(&mut owned_parent_dirs);
             if committed_count == 0 {
+                cleanup_temps(&mut changes);
+                cleanup_owned_parent_directories(&mut owned_parent_dirs);
                 return Err(error);
             }
-            response_changes[change_index]["status"] = json!("failed");
-            response_changes[change_index]["error"] = error.value()["error"].clone();
-            for (value, later_change) in response_changes
-                .iter_mut()
-                .zip(&changes)
-                .skip(change_index + 1)
-            {
+            changes[change_index].status = ChangeStatus::Failed(error);
+            for later_change in changes.iter_mut().skip(change_index + 1) {
                 if is_effective(later_change) {
-                    value["status"] = json!("skipped-not-attempted");
+                    later_change.status = ChangeStatus::SkippedNotAttempted;
                 } else {
-                    value["status"] = json!("unchanged");
+                    later_change.status = ChangeStatus::Unchanged;
                 }
             }
-            let mut response = patch_response("completed_with_errors", response_changes, effective);
-            response["summary"]["planned"] = json!(effective);
-            response["summary"]["changed"] = json!(committed_count);
-            response["summary"]["committed"] = json!(committed_count);
-            response["summary"]["failed"] = json!(1);
-            response["summary"]["skipped"] = json!(changes
-                .iter()
-                .skip(change_index + 1)
-                .filter(|later| is_effective(later))
-                .count());
-            if effective > 0 && authorization.approved {
-                response["confirmation"] = json!({"requested": true, "result": "allow_once"});
-            }
-            return Ok(response);
+            cleanup_temps(&mut changes);
+            cleanup_owned_parent_directories(&mut owned_parent_dirs);
+            return Ok(PatchOutcome {
+                status: "completed_with_errors",
+                changes,
+                committed: committed_count,
+                failed: 1,
+                skipped: effective - committed_count - 1,
+                confirmation: effective > 0 && authorization.approved,
+            });
         }
-        let status = match change.action {
-            "add" => "created",
-            "delete" => "deleted",
-            "move" => "moved",
-            _ => "updated",
+        changes[change_index].status = match action {
+            "add" => ChangeStatus::Created,
+            "delete" => ChangeStatus::Deleted,
+            "move" => ChangeStatus::Moved,
+            _ => ChangeStatus::Updated,
         };
-        response_changes[change_index]["status"] = json!(status);
         committed_count += 1;
-        if let Some(parent) = change.target.path.parent() {
+        if let Some(parent) = changes[change_index].target.path.parent() {
             sync_parent(parent);
         }
-        if let Some(source) = &change.source {
+        if let Some(source) = &changes[change_index].source {
             sync_parent(source.path.parent().unwrap_or(Path::new("")));
         }
     }
     cleanup_temps(&mut changes);
-    for (value, change) in response_changes.iter_mut().zip(&changes) {
-        value["status"] = json!(if is_effective(change) {
-            match change.action {
-                "add" => "created",
-                "delete" => "deleted",
-                "move" => "moved",
-                _ => "updated",
-            }
-        } else {
-            "unchanged"
-        });
-    }
-    let mut response = patch_response("completed", response_changes, effective);
-    if effective > 0 && authorization.approved {
-        response["confirmation"] = json!({"requested": true, "result": "allow_once"});
-    }
-    Ok(response)
+    Ok(PatchOutcome {
+        status: "completed",
+        changes,
+        committed: committed_count,
+        failed: 0,
+        skipped: 0,
+        confirmation: effective > 0 && authorization.approved,
+    })
 }
 
 fn load_edit_source(
@@ -2108,37 +2139,30 @@ fn is_effective(change: &PlannedChange) -> bool {
     }
 }
 
-fn change_value(change: &PlannedChange) -> Value {
-    let requested = change
+fn requested_path(change: &PlannedChange) -> &str {
+    change
         .source
         .as_ref()
         .map(|source| source.input.as_str())
-        .unwrap_or(&change.target.input);
-    let mut value = json!({
-        "requestedPath": requested,
-        "resolvedPath": change.target.path.to_string_lossy(),
-        "action": change.action,
-        "status": "pending",
-        "diff": change.diff,
-        "diffTruncated": change.diff_truncated,
-        "changedLines": change.changed_lines,
-        "beforeRevision": change.before_revision,
-        "afterRevision": change.after_revision,
-    });
-    if let Some(destination) = &change.destination {
-        value["destinationRequestedPath"] = json!(destination.input);
-        value["destinationResolvedPath"] = json!(destination.path.to_string_lossy());
-    }
-    value
+        .unwrap_or(&change.target.input)
 }
 
-fn slim_edit_response(response: &Value) -> Value {
-    let status = response["status"].as_str().unwrap_or("completed");
-    let changes = response["changes"].as_array().cloned().unwrap_or_default();
-    if status == "completed" {
-        let changes = changes
+fn slim_edit_response(outcome: &PatchOutcome) -> Value {
+    if outcome.status == "completed" {
+        let changes = outcome
+            .changes
             .iter()
-            .filter_map(slim_committed_change)
+            .filter(|change| change.status.is_committed())
+            .map(|change| {
+                let mut value = json!({
+                    "path": requested_path(change),
+                    "action": change.status.as_str(),
+                });
+                if let Some(destination) = &change.destination {
+                    value["destination"] = json!(destination.input);
+                }
+                value
+            })
             .collect::<Vec<_>>();
         return json!({
             "status": "completed",
@@ -2147,49 +2171,32 @@ fn slim_edit_response(response: &Value) -> Value {
         });
     }
 
-    let changes = changes.iter().map(slim_evidence_change).collect::<Vec<_>>();
-    let mut value = json!({
-        "status": status,
+    let changes = outcome
+        .changes
+        .iter()
+        .map(|change| {
+            let mut value = json!({
+                "path": requested_path(change),
+                "status": change.status.as_str(),
+            });
+            if let Some(destination) = &change.destination {
+                value["destination"] = json!(destination.input);
+            }
+            if let ChangeStatus::Failed(error) = &change.status {
+                value["error"] = json!({"code": error.code, "message": error.message});
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "status": outcome.status,
         "changes": changes,
-    });
-    if status == "completed_with_errors" {
-        value["summary"] = json!({
-            "committed": response["summary"]["committed"],
-            "failed": response["summary"]["failed"],
-            "skipped": response["summary"]["skipped"],
-        });
-    }
-    value
-}
-
-fn slim_committed_change(change: &Value) -> Option<Value> {
-    let action = change["status"].as_str()?;
-    if !matches!(action, "created" | "updated" | "deleted" | "moved") {
-        return None;
-    }
-    let mut value = json!({
-        "path": change["requestedPath"],
-        "action": action,
-    });
-    if action == "moved" {
-        value["destination"] = change["destinationRequestedPath"].clone();
-    }
-    Some(value)
-}
-
-fn slim_evidence_change(change: &Value) -> Value {
-    let status = change["status"].as_str().unwrap_or("failed");
-    let mut value = json!({
-        "path": change["requestedPath"],
-        "status": status,
-    });
-    if !change["destinationRequestedPath"].is_null() {
-        value["destination"] = change["destinationRequestedPath"].clone();
-    }
-    if status == "failed" {
-        value["error"] = change["error"].clone();
-    }
-    value
+        "summary": {
+            "committed": outcome.committed,
+            "failed": outcome.failed,
+            "skipped": outcome.skipped,
+        },
+    })
 }
 
 fn add_audit_warning(value: &mut Value, audit_status: &str) {
@@ -2199,14 +2206,6 @@ fn add_audit_warning(value: &mut Value, audit_status: &str) {
             "message": "file edit audit record could not be written"
         }]);
     }
-}
-
-fn patch_response(status: &str, changes: Vec<Value>, effective: usize) -> Value {
-    json!({
-        "status": status,
-        "summary": {"total": changes.len(), "changed": effective, "unchanged": changes.len().saturating_sub(effective)},
-        "changes": changes,
-    })
 }
 
 fn cleanup_temps(changes: &mut [PlannedChange]) {
@@ -2577,10 +2576,7 @@ fn sync_parent(parent: &Path) {
     }
 }
 
-const MAX_DIFF_BYTES: usize = 64 * 1024;
-const DIFF_CONTEXT_LINES: usize = 3;
-
-fn bounded_diff(before: &str, after: &str) -> (String, bool, Value) {
+fn changed_line_counts(before: &str, after: &str) -> ChangedLines {
     let text_diff = TextDiff::from_lines(before, after);
     let mut added = 0usize;
     let mut removed = 0usize;
@@ -2591,71 +2587,47 @@ fn bounded_diff(before: &str, after: &str) -> (String, bool, Value) {
             ChangeTag::Equal => {}
         }
     }
-    let mut diff = text_diff
-        .unified_diff()
-        .context_radius(DIFF_CONTEXT_LINES)
-        .header("before", "after")
-        .to_string();
-    let truncated = diff.len() > MAX_DIFF_BYTES;
-    if truncated {
-        diff = utf8_prefix(&diff, MAX_DIFF_BYTES).to_string();
-    }
-    (diff, truncated, json!({"added": added, "removed": removed}))
+    ChangedLines { added, removed }
 }
 
 fn write_patch_audits(
     config: &Config,
-    response: &Value,
+    outcome: &PatchOutcome,
     need_confirm: bool,
     duration_ms: u128,
 ) -> &'static str {
     let mut ok = true;
-    if let Some(changes) = response["changes"].as_array() {
-        for change in changes {
-            let outcome = change["status"].as_str().unwrap_or("failed");
-            let error_code = change["error"]["code"].as_str().map(str::to_string);
-            let before_revision = change["beforeRevision"].as_str().map(str::to_string);
-            let after_revision = change["afterRevision"].as_str().map(str::to_string);
-            let confirmation_result = response["confirmation"]["result"]
-                .as_str()
-                .map(str::to_string);
-            let changed_lines = change["changedLines"].as_object().and_then(|lines| {
-                Some(ChangedLines {
-                    added: lines.get("added")?.as_u64()? as usize,
-                    removed: lines.get("removed")?.as_u64()? as usize,
-                })
-            });
-            if write_file_audit(
-                config,
-                FileAuditRecord {
-                    time: Utc::now(),
-                    tool: "file.edit".to_string(),
-                    action: "apply-patch".to_string(),
-                    batch_id: None,
-                    group_id: None,
-                    operation_index: None,
-                    operation_id: None,
-                    path: change["resolvedPath"].as_str().unwrap_or("").to_string(),
-                    mode: change["action"].as_str().map(str::to_string),
-                    requested_confirmation: need_confirm,
-                    confirmation_result,
-                    before_revision,
-                    after_revision,
-                    outcome: outcome.to_string(),
-                    error_code,
-                    duration_ms,
-                    replacement_count: None,
-                    changed_lines,
-                    committed: Some(matches!(
-                        outcome,
-                        "created" | "updated" | "deleted" | "moved"
-                    )),
-                },
-            )
-            .is_err()
-            {
-                ok = false;
-            }
+    for change in &outcome.changes {
+        let error_code = match &change.status {
+            ChangeStatus::Failed(error) => Some(error.code.clone()),
+            _ => None,
+        };
+        let record = FileAuditRecord {
+            time: Utc::now(),
+            tool: "file.edit".to_string(),
+            action: "apply-patch".to_string(),
+            batch_id: None,
+            group_id: None,
+            operation_index: None,
+            operation_id: None,
+            path: change.target.path.to_string_lossy().to_string(),
+            mode: Some(change.action.to_string()),
+            requested_confirmation: need_confirm,
+            confirmation_result: outcome.confirmation.then(|| "allow_once".to_string()),
+            before_revision: change.before_revision.clone(),
+            after_revision: change.after_revision.clone(),
+            outcome: change.status.as_str().to_string(),
+            error_code,
+            duration_ms,
+            replacement_count: None,
+            changed_lines: Some(ChangedLines {
+                added: change.changed_lines.added,
+                removed: change.changed_lines.removed,
+            }),
+            committed: Some(change.status.is_committed()),
+        };
+        if write_file_audit(config, record).is_err() {
+            ok = false;
         }
     }
     if ok {
@@ -2950,12 +2922,12 @@ mod tests {
             20,
         )
         .unwrap();
-        assert_eq!(value["matchCount"], 2);
-        assert_eq!(value["matches"][0]["line"], 2);
-        assert_eq!(value["matches"][0]["column"], 1);
-        assert_eq!(value["matches"][0]["before"][0], "before");
-        assert_eq!(value["matches"][0]["after"][0], "after");
-        assert_eq!(value["skippedFiles"]["nonUtf8"], 1);
+        assert_eq!(value.matches.len(), 2);
+        assert_eq!(value.matches[0].line, 2);
+        assert_eq!(value.matches[0].column, 1);
+        assert_eq!(value.matches[0].before[0], "before");
+        assert_eq!(value.matches[0].after[0], "after");
+        assert_eq!(value.skipped_files.non_utf8, 1);
 
         let regex = search_with_context_limit(
             SearchOptions {
@@ -2975,8 +2947,8 @@ mod tests {
             20,
         )
         .unwrap();
-        assert_eq!(regex["matchCount"], 1);
-        assert_eq!(regex["truncationReason"], "max_results");
+        assert_eq!(regex.matches.len(), 1);
+        assert_eq!(regex.truncation_reason, Some("max_results"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3009,8 +2981,8 @@ mod tests {
             20,
         )
         .unwrap();
-        assert_eq!(files["scannedFiles"], 1);
-        assert_eq!(files["truncationReason"], "scan_files");
+        assert_eq!(files.scanned_files, 1);
+        assert_eq!(files.truncation_reason, Some("scan_files"));
 
         let file = resolve_path(&config(&root), "a.txt", Access::Read).unwrap();
         let bytes = search_with_context_limit(
@@ -3031,8 +3003,8 @@ mod tests {
             20,
         )
         .unwrap();
-        assert_eq!(bytes["scannedBytes"], 0);
-        assert_eq!(bytes["truncationReason"], "scan_bytes");
+        assert_eq!(bytes.scanned_bytes, 0);
+        assert_eq!(bytes.truncation_reason, Some("scan_bytes"));
 
         let long_line = format!("needle{}\n", "x".repeat(MAX_LINE_DISPLAY_BYTES));
         fs::write(root.join("large-output.txt"), long_line.repeat(80)).unwrap();
@@ -3055,8 +3027,8 @@ mod tests {
             20,
         )
         .unwrap();
-        assert_eq!(output["truncationReason"], "output_bytes");
-        assert!(serde_json::to_vec(&output["matches"]).unwrap().len() <= MAX_SEARCH_OUTPUT_BYTES);
+        assert_eq!(output.truncation_reason, Some("output_bytes"));
+        assert!(serde_json::to_vec(&output.matches).unwrap().len() <= MAX_SEARCH_OUTPUT_BYTES);
 
         let invalid_regex = search_with_context_limit(
             SearchOptions {
@@ -3155,9 +3127,11 @@ mod tests {
             before_mode: None,
             candidate: Some(candidate),
             after_revision: None,
-            diff: String::new(),
-            diff_truncated: false,
-            changed_lines: json!({"added": 0, "removed": 0}),
+            changed_lines: ChangedLines {
+                added: 0,
+                removed: 0,
+            },
+            status: ChangeStatus::Pending,
             temp: Some(temp),
         };
         inject_move_source_remove_failure(&source.path);
