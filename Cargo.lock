@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-gpt"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "agentic-apply-patch",
  "agentic-gpt-protocol",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-gpt-hub"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "agentic-gpt-protocol",
  "anyhow",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-gpt-protocol"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "schemars",
