@@ -505,11 +505,8 @@ pub(crate) async fn dispatch(state: &AppState, operation: &str, args: Value) -> 
         return Error::Unavailable.value();
     }
     let config = state.config.read().await.clone();
-    if !config.toolsets.is_enabled(ToolNamespace::Room) {
-        return json!({"error":{"code":"tool_disabled","message":"Room toolset is disabled"}});
-    }
-    if !config.room.secret.enabled {
-        return Error::NotConfigured.value();
+    if !config.toolsets.is_enabled(ToolNamespace::RoomSecret) {
+        return json!({"error":{"code":"toolset_required","message":"operation requires toolset room.secret to be enabled"}});
     }
     let secret = &config.room.secret;
     if secret.server_url.is_empty() || secret.account.is_empty() {

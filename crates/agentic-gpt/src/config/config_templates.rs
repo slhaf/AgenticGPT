@@ -10,8 +10,7 @@ use crate::config::{
     normalize_http_mcp_public_url, parse_http_mcp_allow_hosts, seed_command_policy,
     seed_path_policy, validate_hub_transport, validate_hub_url_shape, Config,
     ConfirmationProviderConfig, EventsConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig,
-    RoomConfig, ShellConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig, TunnelConfig,
-    WorkerProfile,
+    RoomConfig, ShellConfig, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
 use crate::utils::agentic_home;
 
@@ -31,12 +30,16 @@ pub(crate) enum OptionalSection {
     Shell,
     McpServers,
     Toolsets,
+    Browser,
+    Skills,
+    SecurityPolicy,
+    ConfigManagement,
     Room,
+    RoomSecret,
     Email,
     TunnelClient,
     HubReporting,
     Events,
-    Additional,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,9 +259,6 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     } else if !has_imported_base {
         config.toolsets = ToolsetConfig::for_profile(profile);
     }
-    if room.is_some() && !optional_section_is_legal(OptionalSection::Room, mode, &config.toolsets) {
-        return Err(anyhow!("room_config_requires_room_toolset"));
-    }
     if let Some(confirmation_language) = confirmation_language {
         config.confirmation_language = confirmation_language;
     } else if !has_imported_base {
@@ -409,7 +409,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
 pub(crate) fn optional_section_is_legal(
     section: OptionalSection,
     mode: RuntimeMode,
-    toolsets: &ToolsetConfig,
+    _toolsets: &ToolsetConfig,
 ) -> bool {
     match section {
         OptionalSection::Identity
@@ -420,10 +420,14 @@ pub(crate) fn optional_section_is_legal(
         | OptionalSection::Shell
         | OptionalSection::McpServers
         | OptionalSection::Toolsets
+        | OptionalSection::Browser
+        | OptionalSection::Skills
+        | OptionalSection::SecurityPolicy
+        | OptionalSection::ConfigManagement
         | OptionalSection::Events
         | OptionalSection::Email
-        | OptionalSection::Additional => true,
-        OptionalSection::Room => toolsets.is_enabled(ToolNamespace::Room),
+        | OptionalSection::RoomSecret => true,
+        OptionalSection::Room => true,
         OptionalSection::TunnelClient | OptionalSection::HubReporting => {
             mode == RuntimeMode::Standalone
         }

@@ -524,10 +524,20 @@ fn toolset_description(namespace: ToolNamespace, language: UiLanguage) -> &'stat
             "Browser runtime manual and persistent JavaScript sessions."
         }
         (ToolNamespace::Browser, UiLanguage::ZhCn) => "浏览器运行时手册与持久化 JavaScript 会话。",
-        (ToolNamespace::Room, UiLanguage::En) => {
-            "Room bootstrap, diary, notebook, state, and maintenance tools."
-        }
-        (ToolNamespace::Room, UiLanguage::ZhCn) => "Room 引导、日记、笔记本、状态与维护工具。",
+        (ToolNamespace::RoomBootstrap, UiLanguage::En) => "Room bootstrap tools.",
+        (ToolNamespace::RoomBootstrap, UiLanguage::ZhCn) => "Room 引导工具。",
+        (ToolNamespace::RoomDiary, UiLanguage::En) => "Room diary tools.",
+        (ToolNamespace::RoomDiary, UiLanguage::ZhCn) => "Room 日记工具。",
+        (ToolNamespace::RoomNotebook, UiLanguage::En) => "Room notebook tools.",
+        (ToolNamespace::RoomNotebook, UiLanguage::ZhCn) => "Room 笔记本工具。",
+        (ToolNamespace::RoomState, UiLanguage::En) => "Room shared state tools.",
+        (ToolNamespace::RoomState, UiLanguage::ZhCn) => "Room 共享状态工具。",
+        (ToolNamespace::RoomMaintenance, UiLanguage::En) => "Room maintenance tools.",
+        (ToolNamespace::RoomMaintenance, UiLanguage::ZhCn) => "Room 维护工具。",
+        (ToolNamespace::RoomEmail, UiLanguage::En) => "Room email tools.",
+        (ToolNamespace::RoomEmail, UiLanguage::ZhCn) => "Room 邮件工具。",
+        (ToolNamespace::RoomSecret, UiLanguage::En) => "Room Secret API tools.",
+        (ToolNamespace::RoomSecret, UiLanguage::ZhCn) => "Room 密钥 API 工具。",
     }
 }
 

@@ -41,11 +41,11 @@ fn local_email_api_preserves_native_images_cursors_and_attachment_writes() {
     config["agentId"] = json!("email-api");
     config["workspaceRoot"] = json!(workspace);
     // Browser, Tmux, Skills and Process are disabled; rendering must stand alone.
-    config["toolsets"]["enabled"] = json!(["agent", "room", "file"]);
+    config["toolsets"]["enabled"] = json!(["agent", "room.email", "file"]);
     config["confirmationProvider"] = json!({"channels": []});
     config["policy"]["path"] =
         json!({"defaultAction":"deny","readOnly":[],"write":[workspace],"deny":[]});
-    config["email"] = json!({"enabled":true,"syncIntervalSeconds":86400,"sendPolicy":"deny","trashPolicy":"deny","account":{
+    config["email"] = json!({"syncIntervalSeconds":86400,"sendPolicy":"deny","trashPolicy":"deny","account":{
         "imapHost":"127.0.0.1","imapPort":9,"smtpHost":"127.0.0.1","smtpPort":9,
         "username":"fixture","password":format!("file:{}",password.display()),"from":"sender@example.invalid"}});
     fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
@@ -62,6 +62,9 @@ fn local_email_api_preserves_native_images_cursors_and_attachment_writes() {
         data(&fixture.call("agent.info", json!({})))["connections"]["localMcp"]["status"],
         "ready"
     );
+
+    // Enabling only mail must not create a Room document repository.
+    assert!(!workspace.join("room").exists());
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

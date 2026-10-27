@@ -121,7 +121,6 @@ pub(crate) enum SetupField {
 impl SetupField {
     pub(crate) fn room_secret_key(self) -> Option<&'static str> {
         match self {
-            Self::RoomSecretEnabled => Some("enabled"),
             Self::RoomSecretServerUrl => Some("serverUrl"),
             Self::RoomSecretAccount => Some("account"),
             Self::RoomSecretClientId => Some("clientId"),
@@ -185,6 +184,10 @@ impl SetupField {
 pub(crate) enum SectionStatus {
     Default,
     Configured,
+    Disabled,
+    DisabledIncomplete,
+    Incomplete,
+    Enabled,
     NotApplicable,
 }
 
@@ -342,6 +345,39 @@ impl ToolsetsDraft {
         }
         Ok(config)
     }
+
+    fn set_namespace_enabled(&mut self, namespace: ToolNamespace, enabled: bool) {
+        let name = namespace.as_str().to_string();
+        let mut selected = self.selection.selected().to_vec();
+        selected.retain(|value| value != &name);
+        if enabled {
+            selected.push(name);
+        }
+        self.selection = OrderedMultiSelectState::new(tool_namespace_options(), selected);
+    }
+
+    pub(crate) fn toggle_room_group(&mut self) {
+        let room_names: Vec<String> = ToolNamespace::all()
+            .iter()
+            .copied()
+            .filter(|namespace| namespace.is_room())
+            .map(|namespace| namespace.as_str().to_string())
+            .collect();
+        let select = !room_names
+            .iter()
+            .all(|name| self.selection.selected().contains(name));
+        let mut selected: Vec<String> = self
+            .selection
+            .selected()
+            .iter()
+            .filter(|name| !room_names.contains(name))
+            .cloned()
+            .collect();
+        if select {
+            selected.extend(room_names);
+        }
+        self.selection = OrderedMultiSelectState::new(tool_namespace_options(), selected);
+    }
 }
 
 fn tool_namespace_options() -> Vec<String> {
@@ -359,6 +395,7 @@ pub(crate) struct McpServersDraft {
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct EmailDraft {
     pub(crate) values: BTreeMap<SetupField, String>,
+    pub(crate) enabled: bool,
 }
 impl fmt::Debug for EmailDraft {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -372,7 +409,6 @@ impl fmt::Debug for EmailDraft {
 }
 impl EmailDraft {
     const FIELDS: &'static [(SetupField, &'static str, &'static str)] = &[
-        (SetupField::EmailEnabled, "/enabled", ""),
         (SetupField::EmailImapHost, "/account/imapHost", ""),
         (SetupField::EmailImapPort, "/account/imapPort", "993"),
         (SetupField::EmailImapTls, "/account/imapTls", "implicit"),
@@ -405,7 +441,10 @@ impl EmailDraft {
                 (*field, text)
             })
             .collect();
-        Self { values }
+        Self {
+            values,
+            enabled: false,
+        }
     }
     pub(crate) fn value(&self, field: SetupField) -> String {
         self.values.get(&field).cloned().unwrap_or_default()
@@ -419,9 +458,6 @@ impl EmailDraft {
         for (field, pointer, _) in Self::FIELDS {
             let text = self.value(*field);
             let parsed = match field {
-                SetupField::EmailEnabled => serde_json::Value::Bool(
-                    text.parse().map_err(|_| (*field, "email_config_invalid"))?,
-                ),
                 SetupField::EmailImapPort | SetupField::EmailSmtpPort => serde_json::Value::from(
                     text.parse::<u16>()
                         .map_err(|_| (*field, "email_account_port_invalid"))?,
@@ -467,7 +503,7 @@ impl EmailDraft {
             value["account"] = serde_json::Value::Object(account);
         }
         let config: crate::config::EmailConfig = serde_json::from_value(value)
-            .map_err(|_| (SetupField::EmailEnabled, "email_config_invalid"))?;
+            .map_err(|_| (SetupField::EmailImapHost, "email_config_invalid"))?;
         config.validate().map_err(|error| {
             let (field, code) = match error.to_string().as_str() {
                 "email_sync_interval_seconds_invalid" => (
@@ -498,7 +534,7 @@ impl EmailDraft {
                 "email_account_port_invalid" => {
                     (SetupField::EmailImapPort, "email_account_port_invalid")
                 }
-                _ => (SetupField::EmailEnabled, "email_account_required"),
+                _ => (SetupField::EmailImapHost, "email_account_required"),
             };
             (field, code)
         })?;
@@ -509,6 +545,7 @@ impl EmailDraft {
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RoomSecretDraft {
     pub(crate) values: BTreeMap<SetupField, String>,
+    pub(crate) enabled: bool,
 }
 
 impl Default for RoomSecretDraft {
@@ -542,7 +579,6 @@ impl fmt::Debug for RoomSecretDraft {
 
 impl RoomSecretDraft {
     pub(crate) const FIELDS: &'static [SetupField] = &[
-        SetupField::RoomSecretEnabled,
         SetupField::RoomSecretServerUrl,
         SetupField::RoomSecretAccount,
         SetupField::RoomSecretClientId,
@@ -567,7 +603,10 @@ impl RoomSecretDraft {
                 (*field, text)
             })
             .collect();
-        Self { values }
+        Self {
+            values,
+            enabled: false,
+        }
     }
 
     pub(crate) fn value(&self, field: SetupField) -> String {
@@ -581,10 +620,6 @@ impl RoomSecretDraft {
         for field in Self::FIELDS {
             let text = self.value(*field);
             let parsed = match field {
-                SetupField::RoomSecretEnabled => serde_json::Value::Bool(
-                    text.parse()
-                        .map_err(|_| (*field, "room_secret_enabled_invalid"))?,
-                ),
                 SetupField::RoomSecretSyncWaitTimeoutMs => serde_json::Value::from(
                     text.parse::<u64>()
                         .map_err(|_| (*field, "room_secret_sync_wait_timeout_ms_invalid"))?,
@@ -608,8 +643,12 @@ impl RoomSecretDraft {
             );
         }
         let config: crate::config::RoomSecretConfig =
-            serde_json::from_value(serde_json::Value::Object(value))
-                .map_err(|_| (SetupField::RoomSecretEnabled, "room_secret_config_invalid"))?;
+            serde_json::from_value(serde_json::Value::Object(value)).map_err(|_| {
+                (
+                    SetupField::RoomSecretServerUrl,
+                    "room_secret_config_invalid",
+                )
+            })?;
         config
             .validate()
             .map_err(|error| match error.to_string().as_str() {
@@ -643,7 +682,6 @@ impl RoomSecretDraft {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RoomDraft {
-    pub(crate) secret: RoomSecretDraft,
     pub(crate) timezone: String,
     pub(crate) diary_boundary_hour: String,
     pub(crate) repository_root: String,
@@ -709,11 +747,12 @@ pub(crate) struct OptionalDrafts {
     pub(crate) shell: Option<ShellDraft>,
     pub(crate) mcp_servers: Option<McpServersDraft>,
     pub(crate) room: Option<RoomDraft>,
+    pub(crate) room_secret: Option<RoomSecretDraft>,
     pub(crate) email: Option<EmailDraft>,
     pub(crate) tunnel_client: Option<TunnelClientDraft>,
     pub(crate) hub_reporting: Option<HubReportingDraft>,
     pub(crate) events: Option<EventsDraft>,
-    pub(crate) additional: Option<AdditionalDraft>,
+    pub(crate) catalog: BTreeMap<OptionalSection, CatalogDraft>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -726,12 +765,13 @@ pub(crate) enum OptionalSectionDraft {
     Toolsets(ToolsetsDraft),
     McpServers(McpServersDraft),
     Room(RoomDraft),
+    RoomSecret(RoomSecretDraft),
     Email(EmailDraft),
     TunnelClient(TunnelClientDraft),
     HubReporting(HubReportingDraft),
     Shell(ShellDraft),
     Events(EventsDraft),
-    Additional(AdditionalDraft),
+    Catalog(CatalogDraft),
 }
 
 struct StandaloneSeed<'a> {
@@ -757,11 +797,12 @@ impl OptionalSectionDraft {
             Self::Toolsets(_) => OptionalSection::Toolsets,
             Self::McpServers(_) => OptionalSection::McpServers,
             Self::Room(_) => OptionalSection::Room,
+            Self::RoomSecret(_) => OptionalSection::RoomSecret,
             Self::Email(_) => OptionalSection::Email,
             Self::TunnelClient(_) => OptionalSection::TunnelClient,
             Self::HubReporting(_) => OptionalSection::HubReporting,
             Self::Events(_) => OptionalSection::Events,
-            Self::Additional(_) => OptionalSection::Additional,
+            Self::Catalog(value) => value.section,
             Self::Shell(_) => OptionalSection::Shell,
         }
     }
@@ -920,6 +961,16 @@ impl SetupSession {
                 value.channels = r#"["freedesktop"]"#.to_string();
             }
         }
+        let toolsets = self.effective_toolsets();
+        match &mut draft {
+            OptionalSectionDraft::Email(value) => {
+                value.enabled = toolsets.is_enabled(ToolNamespace::RoomEmail);
+            }
+            OptionalSectionDraft::RoomSecret(value) => {
+                value.enabled = toolsets.is_enabled(ToolNamespace::RoomSecret);
+            }
+            _ => {}
+        }
         draft
     }
 
@@ -961,6 +1012,40 @@ impl SetupSession {
         if !validation::section_is_legal(section, self.selected_mode, &toolsets) {
             return SectionStatus::NotApplicable;
         }
+        let enabled_namespace = match section {
+            OptionalSection::Email => Some(ToolNamespace::RoomEmail),
+            OptionalSection::RoomSecret => Some(ToolNamespace::RoomSecret),
+            _ => None,
+        };
+        if let Some(namespace) = enabled_namespace {
+            let configured = match section {
+                OptionalSection::Email => self
+                    .optional
+                    .email
+                    .as_ref()
+                    .and_then(|draft| draft.to_config().ok())
+                    .is_some_and(|config| config.validate_enabled().is_ok()),
+                OptionalSection::RoomSecret => self
+                    .optional
+                    .room_secret
+                    .as_ref()
+                    .and_then(|draft| draft.to_config().ok())
+                    .is_some_and(|config| config.validate_enabled().is_ok()),
+                _ => false,
+            };
+            if !toolsets.is_enabled(namespace) {
+                return if configured {
+                    SectionStatus::Disabled
+                } else {
+                    SectionStatus::DisabledIncomplete
+                };
+            }
+            return if configured {
+                SectionStatus::Enabled
+            } else {
+                SectionStatus::Incomplete
+            };
+        }
         if self.optional.has(section) {
             SectionStatus::Configured
         } else {
@@ -987,7 +1072,7 @@ impl SetupSession {
         &mut self,
         draft: OptionalSectionDraft,
     ) -> Result<(), validation::ValidationErrors> {
-        validation::save_optional_section(self, draft)
+        self.save_service_section(draft, true)
     }
 
     pub(crate) fn validate_optional_draft(
@@ -1001,8 +1086,35 @@ impl SetupSession {
         &mut self,
         draft: OptionalSectionDraft,
     ) -> Result<(), validation::ValidationErrors> {
-        validation::validate_optional_draft(self, &draft)?;
-        self.optional.set(draft);
+        self.save_service_section(draft, false)?;
+        Ok(())
+    }
+
+    fn save_service_section(
+        &mut self,
+        draft: OptionalSectionDraft,
+        validate: bool,
+    ) -> Result<(), validation::ValidationErrors> {
+        let service = match &draft {
+            OptionalSectionDraft::Email(value) => Some((ToolNamespace::RoomEmail, value.enabled)),
+            OptionalSectionDraft::RoomSecret(value) => {
+                Some((ToolNamespace::RoomSecret, value.enabled))
+            }
+            _ => None,
+        };
+        if validate {
+            validation::save_optional_section(self, draft)?;
+        } else {
+            validation::validate_optional_draft(self, &draft)?;
+            self.optional.set(draft);
+        }
+        if let Some((namespace, enabled)) = service {
+            let mut toolsets = self.optional.toolsets.clone().unwrap_or_else(|| {
+                ToolsetsDraft::from_config(&ToolsetConfig::for_profile(self.selected_profile))
+            });
+            toolsets.set_namespace_enabled(namespace, enabled);
+            self.optional.toolsets = Some(toolsets);
+        }
         Ok(())
     }
 
@@ -1144,11 +1256,15 @@ impl OptionalDrafts {
             OptionalSection::Toolsets => self.toolsets.is_some(),
             OptionalSection::McpServers => self.mcp_servers.is_some(),
             OptionalSection::Room => self.room.is_some(),
+            OptionalSection::RoomSecret => self.room_secret.is_some(),
             OptionalSection::Email => self.email.is_some(),
             OptionalSection::TunnelClient => self.tunnel_client.is_some(),
             OptionalSection::HubReporting => self.hub_reporting.is_some(),
             OptionalSection::Events => self.events.is_some(),
-            OptionalSection::Additional => self.additional.is_some(),
+            OptionalSection::Browser
+            | OptionalSection::Skills
+            | OptionalSection::SecurityPolicy
+            | OptionalSection::ConfigManagement => self.catalog.contains_key(&section),
         }
     }
 
@@ -1171,6 +1287,10 @@ impl OptionalDrafts {
                 .clone()
                 .map(OptionalSectionDraft::McpServers),
             OptionalSection::Room => self.room.clone().map(OptionalSectionDraft::Room),
+            OptionalSection::RoomSecret => self
+                .room_secret
+                .clone()
+                .map(OptionalSectionDraft::RoomSecret),
             OptionalSection::Email => self.email.clone().map(OptionalSectionDraft::Email),
             OptionalSection::TunnelClient => self
                 .tunnel_client
@@ -1181,10 +1301,14 @@ impl OptionalDrafts {
                 .clone()
                 .map(OptionalSectionDraft::HubReporting),
             OptionalSection::Events => self.events.clone().map(OptionalSectionDraft::Events),
-            OptionalSection::Additional => self
-                .additional
-                .clone()
-                .map(OptionalSectionDraft::Additional),
+            OptionalSection::Browser
+            | OptionalSection::Skills
+            | OptionalSection::SecurityPolicy
+            | OptionalSection::ConfigManagement => self
+                .catalog
+                .get(&section)
+                .cloned()
+                .map(OptionalSectionDraft::Catalog),
         }
     }
 
@@ -1199,11 +1323,14 @@ impl OptionalDrafts {
             OptionalSectionDraft::Toolsets(value) => self.toolsets = Some(value),
             OptionalSectionDraft::McpServers(value) => self.mcp_servers = Some(value),
             OptionalSectionDraft::Room(value) => self.room = Some(value),
+            OptionalSectionDraft::RoomSecret(value) => self.room_secret = Some(value),
             OptionalSectionDraft::Email(value) => self.email = Some(value),
             OptionalSectionDraft::TunnelClient(value) => self.tunnel_client = Some(value),
             OptionalSectionDraft::HubReporting(value) => self.hub_reporting = Some(value),
             OptionalSectionDraft::Events(value) => self.events = Some(value),
-            OptionalSectionDraft::Additional(value) => self.additional = Some(value),
+            OptionalSectionDraft::Catalog(value) => {
+                self.catalog.insert(value.section, value);
+            }
         }
     }
 }
@@ -1221,8 +1348,11 @@ pub(crate) fn default_optional_draft_for_profile(
     profile: WorkerProfile,
 ) -> OptionalSectionDraft {
     match section {
-        OptionalSection::Additional => OptionalSectionDraft::Additional(
-            AdditionalDraft::from_config(&Config::default_config().expect("default config")),
+        OptionalSection::Browser
+        | OptionalSection::Skills
+        | OptionalSection::SecurityPolicy
+        | OptionalSection::ConfigManagement => OptionalSectionDraft::Catalog(
+            CatalogDraft::from_config(section, &Config::default_config().expect("default config")),
         ),
         OptionalSection::Identity => OptionalSectionDraft::Identity(IdentityDraft {
             display_name: "AgenticGPT agent".to_string(),
@@ -1264,13 +1394,13 @@ pub(crate) fn default_optional_draft_for_profile(
             &crate::config::EmailConfig::default(),
         )),
         OptionalSection::Room => OptionalSectionDraft::Room(RoomDraft {
-            secret: RoomSecretDraft::default(),
             timezone: "Asia/Shanghai".to_string(),
             diary_boundary_hour: "5".to_string(),
             repository_root: String::new(),
             maintenance_mode: "local".to_string(),
             maintenance_auto_push: false,
         }),
+        OptionalSection::RoomSecret => OptionalSectionDraft::RoomSecret(RoomSecretDraft::default()),
         OptionalSection::TunnelClient => OptionalSectionDraft::TunnelClient(TunnelClientDraft {
             version: String::new(),
             cache_dir: DEFAULT_TUNNEL_CACHE_DIR.to_string(),
@@ -1296,7 +1426,6 @@ fn serialize_paths(paths: &[PathBuf]) -> String {
 fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
     let tunnel = config.tunnel.as_ref();
     OptionalDrafts {
-        additional: Some(AdditionalDraft::from_config(config)),
         identity: Some(IdentityDraft {
             display_name: config.display_name.clone(),
         }),
@@ -1359,7 +1488,6 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
         }),
         email: Some(EmailDraft::from_config(&config.email)),
         room: Some(RoomDraft {
-            secret: RoomSecretDraft::from_config(&config.room.secret),
             timezone: config.room.timezone.clone(),
             diary_boundary_hour: config.room.diary_day_boundary_hour.to_string(),
             repository_root: config
@@ -1371,6 +1499,7 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
             maintenance_mode: format!("{:?}", config.room.maintenance.mode).to_lowercase(),
             maintenance_auto_push: config.room.maintenance.auto_push,
         }),
+        room_secret: Some(RoomSecretDraft::from_config(&config.room.secret)),
         tunnel_client: tunnel.map(|tunnel| TunnelClientDraft {
             version: tunnel.client.version.clone().unwrap_or_default(),
             cache_dir: tunnel.client.cache_dir.to_string_lossy().into_owned(),
@@ -1389,6 +1518,15 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
             detail: tunnel.hub_reporting.detail.to_string(),
         }),
         events: Some(EventsDraft::from_config(&config.events)),
+        catalog: [
+            OptionalSection::Browser,
+            OptionalSection::Skills,
+            OptionalSection::SecurityPolicy,
+            OptionalSection::ConfigManagement,
+        ]
+        .into_iter()
+        .map(|section| (section, CatalogDraft::from_config(section, config)))
+        .collect(),
     }
 }
 
@@ -1524,7 +1662,7 @@ mod tests {
     }
 }
 
-pub(crate) fn additional_entries() -> Vec<crate::config_catalog::ConfigEntry> {
+pub(crate) fn catalog_entries() -> Vec<crate::config_catalog::ConfigEntry> {
     static ENTRIES: std::sync::OnceLock<Vec<crate::config_catalog::ConfigEntry>> =
         std::sync::OnceLock::new();
     ENTRIES
@@ -1549,18 +1687,40 @@ pub(crate) fn additional_entries() -> Vec<crate::config_catalog::ConfigEntry> {
         .clone()
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct AdditionalDraft {
+fn catalog_section(entry: &crate::config_catalog::ConfigEntry) -> OptionalSection {
+    let path = entry.path.join(".");
+    if path.starts_with("browser.") {
+        OptionalSection::Browser
+    } else if path.starts_with("skills.") {
+        OptionalSection::Skills
+    } else if path.starts_with("policy.command.") || path == "policy.enabled" {
+        OptionalSection::SecurityPolicy
+    } else {
+        OptionalSection::ConfigManagement
+    }
+}
+
+pub(crate) fn catalog_section_at(index: usize) -> OptionalSection {
+    catalog_entries()
+        .get(index)
+        .map(catalog_section)
+        .unwrap_or(OptionalSection::ConfigManagement)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CatalogDraft {
+    pub(crate) section: OptionalSection,
     pub(crate) values: BTreeMap<usize, String>,
     initial: BTreeMap<usize, String>,
 }
 
-impl AdditionalDraft {
-    fn from_config(config: &Config) -> Self {
+impl CatalogDraft {
+    fn from_config(section: OptionalSection, config: &Config) -> Self {
         let value = serde_json::to_value(config).expect("config serializes");
-        let values: BTreeMap<usize, String> = additional_entries()
+        let values: BTreeMap<usize, String> = catalog_entries()
             .iter()
             .enumerate()
+            .filter(|(_, entry)| catalog_section(entry) == section)
             .map(|(index, entry)| {
                 let mut current = &value;
                 for part in &entry.path {
@@ -1588,16 +1748,20 @@ impl AdditionalDraft {
             })
             .collect();
         Self {
+            section,
             initial: values.clone(),
             values,
         }
     }
 
     pub(crate) fn changes(&self) -> Result<Vec<agentic_gpt_protocol::ConfigChange>, usize> {
-        additional_entries()
+        catalog_entries()
             .iter()
             .enumerate()
-            .filter(|(index, _)| self.values.get(index) != self.initial.get(index))
+            .filter(|(index, entry)| {
+                catalog_section(entry) == self.section
+                    && self.values.get(index) != self.initial.get(index)
+            })
             .map(|(index, entry)| {
                 if entry.kind == "object" {
                     return Ok(

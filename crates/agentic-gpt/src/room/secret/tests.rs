@@ -20,11 +20,10 @@ impl Fixture {
         let mut config = Config::default_config().unwrap();
         config.workspace_root = root.join("workspace");
         std::fs::create_dir_all(&config.workspace_root).unwrap();
-        config.toolsets.enable(ToolNamespace::Room);
+        config.toolsets.enable(ToolNamespace::RoomSecret);
         config.policy.enabled = false;
         config.confirmation_provider.channels.clear();
         config.room.secret = RoomSecretConfig {
-            enabled: true,
             server_url: "https://vault.example.invalid".into(),
             account: "test@example.invalid".into(),
             client_id: "env:UNUSED_TEST_CLIENT_ID".into(),

@@ -5,8 +5,8 @@ mod review;
 mod validation;
 
 pub(crate) use model::{
-    additional_entries, default_optional_draft, McpServerDraft, OptionalSectionDraft,
-    SectionStatus, SetupField, SetupSeed, SetupSession,
+    catalog_entries, catalog_section_at, default_optional_draft, McpServerDraft,
+    OptionalSectionDraft, SectionStatus, SetupField, SetupSeed, SetupSession,
 };
 pub(crate) use outcome::{commit_wizard_outcome, recover_pending_setup_locked, WizardOutcome};
 pub(crate) use review::{

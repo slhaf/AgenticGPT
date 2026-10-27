@@ -404,7 +404,7 @@ fn chapter(section: &str) -> &'static str {
     match section {
         "runtime" | "identity" | "workspace" => "mode、profile、agentId 和 workspaceRoot 固定于本次实例启动；保存后须手动重启才能应用。displayName 和 backupLimit 使用新快照。",
         "config" => "配置 API 只管理目标 Agent。整个 update 批次统一按当前有效 updatePolicy 授权；修改策略自身也须先通过旧策略。CLI/TUI 是本地管理入口。",
-        "toolsets" => "工具集在实际调用时再次检查；关闭 config 后三个配置工具均不可调用，可从本地 CLI/TUI 重新启用。已准入的任务保留原快照。",
+        "toolsets" => "工具集在实际调用时再次检查；Room 七个子工具集独立控制发现、准入和资源，不接受聚合 room。关闭 Email/Secret 时排空并释放 owner，保留账户与数据；关闭 config 后可从本地 CLI/TUI 重新启用。",
         "hub" => "Hub 连接由当前实例的连接 owner 重连。配置此连接的请求先向原 Hub 返回结果；旧结果不会转发给另一 Hub。连接失败不撤销配置保存。",
         "http-mcp" => "HTTP MCP 入口属于 standalone。监听和认证由 HTTP owner 更新；旧已接纳请求完成后关闭旧会话。新地址绑定失败尽可能保留旧监听；外部凭据引用仍须可解析。",
         "mcp" => "这是以稳定 server ID 为 key 的映射。ID 中的点是一个路径段；用同一批操作补齐 enabled、transport、url 及可选 auth。下游客户端按调用创建，进行中调用保留原快照。",

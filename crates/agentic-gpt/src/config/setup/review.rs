@@ -3,7 +3,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config_templates::{OptionalSection, PendingAction, RuntimeMode, SecretValue};
+    use crate::config_templates::{PendingAction, RuntimeMode, SecretValue};
     use crate::WorkerProfile;
 
     use super::super::model::{SetupSeed, SetupSession};
@@ -45,16 +45,6 @@ mod tests {
             .items
             .iter()
             .all(|item| !item.value.contains("inactive-hub.example.com")));
-        assert_eq!(
-            review
-                .optional_sections
-                .iter()
-                .find(|group| group.target
-                    == super::super::review::ReviewTarget::OptionalSection(OptionalSection::Room))
-                .unwrap()
-                .status,
-            super::super::model::SectionStatus::NotApplicable
-        );
         assert!(!review
             .pending_actions
             .contains(&PendingAction::ProvisionTunnelSecret));
@@ -114,9 +104,9 @@ use crate::config_templates::{
 use crate::WorkerProfile;
 
 use super::model::{
-    default_optional_draft_for_profile, ConfirmationDraft, HubReportingDraft, IdentityDraft,
-    LimitsDraft, McpServersDraft, OptionalSectionDraft, RoomDraft, SandboxDraft, SectionStatus,
-    SetupField, SetupSession, ToolsetsDraft, TunnelClientDraft, WorkspaceDraft,
+    ConfirmationDraft, HubReportingDraft, IdentityDraft, LimitsDraft, McpServersDraft,
+    OptionalSectionDraft, RoomDraft, SandboxDraft, SectionStatus, SetupField, SetupSession,
+    ToolsetsDraft, TunnelClientDraft, WorkspaceDraft,
 };
 use super::validation::ValidationErrors;
 
@@ -293,12 +283,16 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         OptionalSection::Shell,
         OptionalSection::Toolsets,
         OptionalSection::McpServers,
+        OptionalSection::Browser,
+        OptionalSection::Skills,
+        OptionalSection::SecurityPolicy,
+        OptionalSection::ConfigManagement,
         OptionalSection::Room,
+        OptionalSection::RoomSecret,
         OptionalSection::Email,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
         OptionalSection::Events,
-        OptionalSection::Additional,
     ]
     .into_iter()
     .map(|section| optional_group(session, section))
@@ -542,22 +536,7 @@ fn tunnel_secret_reference(draft: &super::model::StandaloneDraft) -> String {
 }
 
 fn optional_group(session: &SetupSession, section: OptionalSection) -> ReviewGroup {
-    let status = if session.section_status(section) == SectionStatus::NotApplicable {
-        SectionStatus::NotApplicable
-    } else {
-        let draft = session.optional_draft(section);
-        if draft
-            == default_optional_draft_for_profile(
-                session.language(),
-                section,
-                session.selected_profile(),
-            )
-        {
-            SectionStatus::Default
-        } else {
-            SectionStatus::Configured
-        }
-    };
+    let status = session.section_status(section);
     let items = if status == SectionStatus::NotApplicable {
         Vec::new()
     } else {
@@ -731,7 +710,7 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
             ReviewItem::field(
                 SetupField::EmailEnabled,
                 "email_enabled",
-                value.value(SetupField::EmailEnabled),
+                value.enabled.to_string(),
                 ReviewEditorKind::Choice,
             ),
             ReviewItem::field(
@@ -820,53 +799,57 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
             ),
         ],
         OptionalSectionDraft::Room(RoomDraft {
-            secret,
             timezone,
             diary_boundary_hour,
             repository_root,
             maintenance_mode,
             maintenance_auto_push,
-        }) => {
-            let mut items = vec![
-                ReviewItem::field(
-                    SetupField::RoomTimezone,
-                    "room_timezone",
-                    timezone,
-                    ReviewEditorKind::Text,
-                ),
-                ReviewItem::field(
-                    SetupField::DiaryBoundaryHour,
-                    "diary_boundary_hour",
-                    diary_boundary_hour,
-                    ReviewEditorKind::Text,
-                ),
-                ReviewItem::field(
-                    SetupField::RepositoryRoot,
-                    "repository_root",
-                    repository_root,
-                    ReviewEditorKind::Text,
-                ),
-                ReviewItem::field(
-                    SetupField::RoomMaintenanceMode,
-                    "room_maintenance_mode",
-                    maintenance_mode,
-                    ReviewEditorKind::Choice,
-                ),
-                ReviewItem::field(
-                    SetupField::RoomMaintenanceAutoPush,
-                    "room_maintenance_auto_push",
-                    maintenance_auto_push.to_string(),
-                    ReviewEditorKind::Choice,
-                ),
-            ];
+        }) => vec![
+            ReviewItem::field(
+                SetupField::RoomTimezone,
+                "room_timezone",
+                timezone,
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::DiaryBoundaryHour,
+                "diary_boundary_hour",
+                diary_boundary_hour,
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::RepositoryRoot,
+                "repository_root",
+                repository_root,
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::RoomMaintenanceMode,
+                "room_maintenance_mode",
+                maintenance_mode,
+                ReviewEditorKind::Choice,
+            ),
+            ReviewItem::field(
+                SetupField::RoomMaintenanceAutoPush,
+                "room_maintenance_auto_push",
+                maintenance_auto_push.to_string(),
+                ReviewEditorKind::Choice,
+            ),
+        ],
+        OptionalSectionDraft::RoomSecret(value) => {
+            let mut items = vec![ReviewItem::field(
+                SetupField::RoomSecretEnabled,
+                "room_secret_enabled",
+                value.enabled.to_string(),
+                ReviewEditorKind::Choice,
+            )];
             for field in super::model::RoomSecretDraft::FIELDS {
                 let sensitive = field.room_secret_is_sensitive();
                 let editor = if sensitive {
                     ReviewEditorKind::Secret
                 } else if matches!(
                     field,
-                    SetupField::RoomSecretEnabled
-                        | SetupField::RoomSecretGetPolicy
+                    SetupField::RoomSecretGetPolicy
                         | SetupField::RoomSecretUpsertPolicy
                         | SetupField::RoomSecretDeletePolicy
                 ) {
@@ -880,7 +863,7 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                     if sensitive {
                         "[REDACTED]".to_string()
                     } else {
-                        secret.value(*field)
+                        value.value(*field)
                     },
                     editor,
                 ));
@@ -946,11 +929,11 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::Choice,
             ),
         ],
-        OptionalSectionDraft::Additional(value) => value
+        OptionalSectionDraft::Catalog(value) => value
             .values
             .into_iter()
             .map(|(index, value)| {
-                let entry = super::model::additional_entries().into_iter().nth(index);
+                let entry = super::model::catalog_entries().into_iter().nth(index);
                 let value = if entry.as_ref().is_some_and(|entry| entry.sensitive) {
                     "[REDACTED]".to_owned()
                 } else {
@@ -968,7 +951,7 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 } else {
                     ReviewEditorKind::Text
                 };
-                ReviewItem::field(SetupField::Catalog(index), "additional", value, editor)
+                ReviewItem::field(SetupField::Catalog(index), "catalog", value, editor)
             })
             .collect(),
         OptionalSectionDraft::Events(value) => {

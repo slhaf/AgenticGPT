@@ -70,16 +70,34 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
 
     // Prepare service owners before publishing the new snapshot. Their guards exclude
     // old in-flight writes and new requests until the corresponding configuration is visible.
-    let email_guard = if old.email.account != next.email.account {
+    let old_email_enabled = old
+        .toolsets
+        .is_enabled(crate::config::ToolNamespace::RoomEmail);
+    let next_email_enabled = next
+        .toolsets
+        .is_enabled(crate::config::ToolNamespace::RoomEmail);
+    let email_toolset_changed = old_email_enabled != next_email_enabled;
+    let email_account_changed = old.email.account != next.email.account;
+    let email_guard = if email_account_changed || email_toolset_changed {
         errors.remove("email.account");
         match state.email.prepare_reconfigure().await {
             Ok(guard) => Some(guard),
             Err(error) => {
-                next.email.account = old.email.account.clone();
-                errors.insert(
-                    "email.account".into(),
-                    crate::startup::error_code(&error.to_string()),
-                );
+                let error = crate::startup::error_code(&error.to_string());
+                if email_account_changed {
+                    next.email.account = old.email.account.clone();
+                    errors.insert("email.account".into(), error.clone());
+                }
+                if email_toolset_changed {
+                    if old_email_enabled {
+                        next.toolsets
+                            .enable(crate::config::ToolNamespace::RoomEmail);
+                    } else {
+                        next.toolsets
+                            .disable(crate::config::ToolNamespace::RoomEmail);
+                    }
+                    errors.insert("toolsets.enabled".into(), error);
+                }
                 None
             }
         }
@@ -88,18 +106,36 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     };
     let mut old_secret_connection = old.room.secret.clone();
     old_secret_connection.apply_live_settings(&next.room.secret);
-    let secret_guard = if differs(&old_secret_connection, &next.room.secret) {
+    let old_secret_enabled = old
+        .toolsets
+        .is_enabled(crate::config::ToolNamespace::RoomSecret);
+    let next_secret_enabled = next
+        .toolsets
+        .is_enabled(crate::config::ToolNamespace::RoomSecret);
+    let secret_toolset_changed = old_secret_enabled != next_secret_enabled;
+    let secret_config_changed = differs(&old_secret_connection, &next.room.secret);
+    let secret_guard = if secret_config_changed || secret_toolset_changed {
         errors.remove("room.secret");
         match state.secret.prepare_reconfigure().await {
             Ok(guard) => Some(guard),
             Err(error) => {
-                let live_settings = next.room.secret.clone();
-                next.room.secret = old.room.secret.clone();
-                next.room.secret.apply_live_settings(&live_settings);
-                errors.insert(
-                    "room.secret".into(),
-                    crate::startup::error_code(&error.to_string()),
-                );
+                let error = crate::startup::error_code(&error.to_string());
+                if secret_config_changed {
+                    let live_settings = next.room.secret.clone();
+                    next.room.secret = old.room.secret.clone();
+                    next.room.secret.apply_live_settings(&live_settings);
+                    errors.insert("room.secret".into(), error.clone());
+                }
+                if secret_toolset_changed {
+                    if old_secret_enabled {
+                        next.toolsets
+                            .enable(crate::config::ToolNamespace::RoomSecret);
+                    } else {
+                        next.toolsets
+                            .disable(crate::config::ToolNamespace::RoomSecret);
+                    }
+                    errors.insert("toolsets.enabled".into(), error);
+                }
                 None
             }
         }
@@ -107,20 +143,36 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
         None
     };
 
-    let room_changed = old.room.repository_root != next.room.repository_root
-        || (!old.toolsets.is_enabled(crate::config::ToolNamespace::Room)
-            && next.toolsets.is_enabled(crate::config::ToolNamespace::Room));
+    let room_changed = next.toolsets.uses_room_repository()
+        && (old.room.repository_root != next.room.repository_root
+            || !old.toolsets.uses_room_repository());
     let _room = if room_changed {
         Some(state.room_repository_writes.lock().await)
     } else {
         None
     };
-    if room_changed && next.toolsets.is_enabled(crate::config::ToolNamespace::Room) {
+    if room_changed {
         errors.remove("room.repositoryRoot");
         if let Err(error) = crate::room_repository::ensure_repository(&next) {
             next.room.repository_root = old.room.repository_root.clone();
-            if !old.toolsets.is_enabled(crate::config::ToolNamespace::Room) {
-                next.toolsets.disable(crate::config::ToolNamespace::Room);
+            let mut toolset_changed = false;
+            for namespace in crate::config::ToolNamespace::all()
+                .iter()
+                .copied()
+                .filter(|namespace| namespace.uses_room_repository())
+            {
+                let was_enabled = old.toolsets.is_enabled(namespace);
+                let is_enabled = next.toolsets.is_enabled(namespace);
+                if was_enabled != is_enabled {
+                    toolset_changed = true;
+                    if was_enabled {
+                        next.toolsets.enable(namespace);
+                    } else {
+                        next.toolsets.disable(namespace);
+                    }
+                }
+            }
+            if toolset_changed {
                 errors.insert(
                     "toolsets.enabled".into(),
                     "room_repository_unavailable".into(),

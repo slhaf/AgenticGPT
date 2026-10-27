@@ -164,9 +164,13 @@ pub(super) fn localized_error(code: &str, language: UiLanguage) -> String {
             "Secret policies allow only allow or confirm.",
             "密钥策略仅允许 allow 或 confirm。",
         ),
-        "room_secret_enabled_invalid" | "room_secret_config_invalid" => (
+        "room_secret_config_invalid" => (
             "Check the Room Secret settings before enabling the service.",
             "启用服务前请检查 Room Secret 配置。",
+        ),
+        "room_secret_config_required_when_enabled" => (
+            "Complete the Room Secret server, account, and credential references before enabling it.",
+            "启用 Room Secret 前请填写服务地址、账号和凭据引用。",
         ),
         "email_sync_interval_seconds_invalid" => (
             "Sync interval must be from 10 through 86400 seconds.",
@@ -213,9 +217,9 @@ pub(super) fn localized_error(code: &str, language: UiLanguage) -> String {
             "Configure the email account before enabling email.",
             "启用邮件前请先填写完整账户信息。",
         ),
-        "room_config_requires_room_toolset" => (
-            "Room settings require the Room toolset namespace to be enabled.",
-            "Room 配置需要启用 Room 工具集命名空间。",
+        "email_config_required_when_enabled" => (
+            "Complete the email account settings before enabling email.",
+            "启用邮件前请先填写完整账户信息。",
         ),
         "config_init_room_maintenance_mode_invalid" => (
             "Maintenance mode must be local or workflow.",
@@ -1325,13 +1329,12 @@ fn render_optional_center(
     render_horizontal_rule(frame, top_rule, theme);
     let [left, _, right] = surface_columns(body);
 
-    let sections = all_optional_sections();
-    let status_label_width = sections
+    let focusable = session.available_optional_sections();
+    let status_label_width = focusable
         .iter()
         .map(|section| UnicodeWidthStr::width(section_label(*section, language)))
         .max()
         .unwrap_or(0);
-    let focusable = session.available_optional_sections();
     let mut cursor = left.y;
     render_surface_heading(
         frame,
@@ -1341,10 +1344,24 @@ fn render_optional_center(
         theme,
     );
     render_surface_blank(left, &mut cursor, frame);
-    for section in sections {
+    let visible_rows = left.height.saturating_sub(4).max(1) as usize;
+    let focused_row = state.focus.min(focusable.len().saturating_sub(1));
+    let scroll = if state.focus >= focusable.len() {
+        focusable.len().saturating_sub(visible_rows)
+    } else {
+        focused_row
+            .saturating_sub(visible_rows / 2)
+            .min(focusable.len().saturating_sub(visible_rows))
+    };
+    for (section_index, section) in focusable
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(scroll)
+        .take(visible_rows)
+    {
         let status = session.section_status(section);
-        let applicable_index = focusable.iter().position(|candidate| *candidate == section);
-        let focused = applicable_index == Some(state.focus);
+        let focused = section_index == state.focus;
         let label = section_label(section, language);
         let padded_label = format!(
             "{label}{}",
@@ -1434,10 +1451,14 @@ fn render_optional_form(
     let mut focused_line = 0usize;
 
     match section {
-        OptionalSection::Additional => {
-            for (index, entry) in crate::config_setup::additional_entries()
+        OptionalSection::Browser
+        | OptionalSection::Skills
+        | OptionalSection::SecurityPolicy
+        | OptionalSection::ConfigManagement => {
+            for (index, entry) in crate::config_setup::catalog_entries()
                 .into_iter()
                 .enumerate()
+                .filter(|(index, _)| crate::config_setup::catalog_section_at(*index) == section)
             {
                 let field = SetupField::Catalog(index);
                 lines.push(subsection_heading_line(&entry.title, theme));
@@ -1722,11 +1743,8 @@ fn render_optional_form(
                 theme,
                 errors,
             );
-            lines.push(Line::raw(t(
-                language,
-                "Room changes require restart, except secret policies and sync wait budget.",
-                "Room 配置修改后需重启，密钥策略和同步等待预算支持热更新。",
-            )));
+        }
+        OptionalSection::RoomSecret => {
             push_boolean_field(
                 &mut lines,
                 &mut focused_line,
@@ -1979,7 +1997,7 @@ fn render_optional_form(
             .map(|field| optional_field_label(field, language))
             .unwrap_or_else(|| section_label(section, language));
         if let Some(SetupField::Catalog(index)) = field {
-            if let Some(entry) = crate::config_setup::additional_entries().get(index) {
+            if let Some(entry) = crate::config_setup::catalog_entries().get(index) {
                 let example = format!("Example: {}", entry.example);
                 let path = entry.path.join(".");
                 let body = [
@@ -2056,7 +2074,7 @@ fn push_long_form_field(
         current.to_string()
     };
     let catalog_entry = if let SetupField::Catalog(index) = field {
-        crate::config_setup::additional_entries()
+        crate::config_setup::catalog_entries()
             .into_iter()
             .nth(index)
     } else {
@@ -2940,7 +2958,7 @@ pub(super) fn optional_list_state(
         }
         (OptionalSectionDraft::Workspace(value), SetupField::PathWritePaths) => &value.write_paths,
         (OptionalSectionDraft::Workspace(value), SetupField::PathDenyPaths) => &value.deny_paths,
-        (OptionalSectionDraft::Additional(value), SetupField::Catalog(index)) => {
+        (OptionalSectionDraft::Catalog(value), SetupField::Catalog(index)) => {
             value.values.get(&index).ok_or(())?
         }
         _ => return Err(()),
@@ -2959,7 +2977,7 @@ pub(super) fn set_optional_list_state(
         return false;
     };
     match (draft, field) {
-        (OptionalSectionDraft::Additional(value), SetupField::Catalog(index)) => {
+        (OptionalSectionDraft::Catalog(value), SetupField::Catalog(index)) => {
             value.values.insert(index, serialized);
         }
         (OptionalSectionDraft::Workspace(value), SetupField::PathReadOnlyPaths) => {
@@ -2993,9 +3011,13 @@ pub(super) fn optional_focus_items(
     draft: &OptionalSectionDraft,
 ) -> Vec<OptionalFocusItem> {
     match section {
-        OptionalSection::Additional => crate::config_setup::additional_entries()
+        OptionalSection::Browser
+        | OptionalSection::Skills
+        | OptionalSection::SecurityPolicy
+        | OptionalSection::ConfigManagement => crate::config_setup::catalog_entries()
             .iter()
             .enumerate()
+            .filter(|(index, _)| crate::config_setup::catalog_section_at(*index) == section)
             .flat_map(|(index, entry)| {
                 let field = SetupField::Catalog(index);
                 if entry.kind.contains("array") {
@@ -3172,6 +3194,8 @@ pub(super) fn optional_focus_items(
                 value: "workflow",
             },
             OptionalFocusItem::Field(SetupField::RoomMaintenanceAutoPush),
+        ],
+        OptionalSection::RoomSecret => vec![
             OptionalFocusItem::Field(SetupField::RoomSecretEnabled),
             OptionalFocusItem::Field(SetupField::RoomSecretServerUrl),
             OptionalFocusItem::Field(SetupField::RoomSecretAccount),
@@ -3531,9 +3555,21 @@ fn optional_center_inspector_body(
     match section {
         Some(section) => match language {
             UiLanguage::En => match section {
-                OptionalSection::Additional => &[
-                    "Edit Browser, Skills, command policy and configuration update settings.",
-                    "Each field uses its catalog type; arrays support item editing, addition and removal.",
+                OptionalSection::Browser => &[
+                    "Configure managed browser preparation and explicit runtime paths.",
+                    "Fields follow their catalog types; lists support item editing.",
+                ],
+                OptionalSection::Skills => &[
+                    "Configure skill discovery, installation, and execution settings.",
+                    "Fields follow their catalog types; lists support item editing.",
+                ],
+                OptionalSection::SecurityPolicy => &[
+                    "Control global command/path policy enforcement and command rules. Path roots are configured under Workspace; execution isolation under Sandbox.",
+                    "Fields follow their catalog types; lists support item editing.",
+                ],
+                OptionalSection::ConfigManagement => &[
+                    "Configure the configuration update API and backup retention.",
+                    "Fields follow their catalog types; lists support item editing.",
                 ],
                 OptionalSection::Identity => &[
                     "Set the human-readable name shown for this agent.",
@@ -3577,7 +3613,8 @@ fn optional_center_inspector_body(
                     "Choose which built-in tool namespaces are available at runtime.",
                     "The selection applies to every tool with the corresponding namespace prefix.",
                     "",
-                    "Normal enables every namespace except Room; Room enables all namespaces.",
+                    "The Room preset enables core Room namespaces; Email and Secret are opt-in.",
+                    "Press R to select or clear all Room services; individual services remain independently selectable.",
                 ],
                 OptionalSection::McpServers => &[
                     "Configure downstream MCP servers used by mcp.listTools, mcp.callTool, and mcp.batch.",
@@ -3592,10 +3629,13 @@ fn optional_center_inspector_body(
                     "Password: env:NAME or file:/absolute/path. TLS: implicit or starttls. Policies: allow, confirm, deny.",
                 ],
                 OptionalSection::Room => &[
-                    "Set Room timezone, diary boundary, repository, maintenance and Secret settings.",
-                    "Secret policies and sync wait budget support hot reload; other Room settings require restart. Credentials use env:NAME or file:PATH references.",
+                    "Set shared Room timezone, diary boundary, repository, and maintenance settings.",
                     "The repository defaults to <workspace>/room; maintenance is local with auto-push off.",
-                    "Only available when the Room toolset namespace is enabled.",
+                ],
+                OptionalSection::RoomSecret => &[
+                    "Preconfigure the Room Secret API independently of whether its toolset is enabled.",
+                    "Enabling the Room Secret toolset requires a complete server URL, account, and credential references.",
+                    "Credentials use env:NAME or file:/absolute/path references.",
                 ],
                 OptionalSection::TunnelClient => &[
                     "Configure how Standalone locates or downloads the Tunnel client.",
@@ -3612,9 +3652,21 @@ fn optional_center_inspector_body(
                 ],
             },
             UiLanguage::ZhCn => match section {
-                OptionalSection::Additional => &[
-                    "编辑 Browser、Skills、命令策略及配置更新设置。",
-                    "各字段按目录类型编辑；数组支持逐项编辑、增加和删除。",
+                OptionalSection::Browser => &[
+                    "配置托管浏览器准备与显式运行环境路径。",
+                    "字段按目录类型编辑；列表支持逐项修改。",
+                ],
+                OptionalSection::Skills => &[
+                    "配置技能发现、安装和执行设置。",
+                    "字段按目录类型编辑；列表支持逐项修改。",
+                ],
+                OptionalSection::SecurityPolicy => &[
+                    "配置命令与路径策略总开关及命令规则；路径根目录在工作区设置，执行隔离在沙箱设置。",
+                    "字段按目录类型编辑；列表支持逐项修改。",
+                ],
+                OptionalSection::ConfigManagement => &[
+                    "配置配置更新 API 与备份保留策略。",
+                    "字段按目录类型编辑；列表支持逐项修改。",
                 ],
                 OptionalSection::Identity => &[
                     "设置此 Agent 的可读显示名称。",
@@ -3665,7 +3717,8 @@ fn optional_center_inspector_body(
                     "选择运行时可用的内置工具命名空间。",
                     "选择会应用到具有对应命名空间前缀的所有工具。",
                     "",
-                    "Normal 启用除 Room 外的所有命名空间；Room 启用全部命名空间。",
+                    "Room 预设默认启用核心命名空间；Email 和 Secret 默认关闭，需要单独启用。",
+                    "按 R 可全选或取消全选 Room 服务；每项 Room 服务仍可单独开关。",
                 ],
                 OptionalSection::Email => &[
                     "配置 IMAP/SMTP、同步、本地保存及发送和移入垃圾箱权限。",
@@ -3673,10 +3726,13 @@ fn optional_center_inspector_body(
                     "密码使用 env:NAME 或 file:/绝对路径。加密方式：implicit 或 starttls；策略：allow、confirm、deny。",
                 ],
                 OptionalSection::Room => &[
-                    "设置 Room 的时区、日记日界线、仓库、维护行为和密钥服务。",
-                    "密钥策略和同步等待预算支持热更新；其余 Room 设置需重启。凭据使用 env:NAME 或 file:PATH 引用。",
+                    "设置 Room 共享时区、日记日界线、仓库和维护行为。",
                     "仓库默认使用 <workspace>/room；维护默认为 local 且关闭自动推送。",
-                    "仅在启用 Room 工具集命名空间时可用。",
+                ],
+                OptionalSection::RoomSecret => &[
+                    "可在独立启用 Secret 工具集前预先配置 Room Secret API。",
+                    "启用 Room Secret 工具集前，必须配置完整服务地址、账号和凭据引用。",
+                    "凭据使用 env:NAME 或 file:/绝对路径引用。",
                 ],
                 OptionalSection::TunnelClient => &[
                     "设置 Standalone 如何查找或下载 Tunnel client。",
@@ -4262,25 +4318,6 @@ fn editing_cursor(state: &TuiState, field: SetupField) -> Option<usize> {
         .map(|editing| editing.cursor)
 }
 
-fn all_optional_sections() -> [OptionalSection; 14] {
-    [
-        OptionalSection::Identity,
-        OptionalSection::Workspace,
-        OptionalSection::Confirmation,
-        OptionalSection::Limits,
-        OptionalSection::Sandbox,
-        OptionalSection::Shell,
-        OptionalSection::Toolsets,
-        OptionalSection::McpServers,
-        OptionalSection::Room,
-        OptionalSection::Email,
-        OptionalSection::TunnelClient,
-        OptionalSection::HubReporting,
-        OptionalSection::Events,
-        OptionalSection::Additional,
-    ]
-}
-
 fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str {
     match section {
         OptionalSection::Identity => t(language, "Identity", "身份"),
@@ -4291,18 +4328,26 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
         OptionalSection::Shell => t(language, "Shell", "Shell"),
         OptionalSection::Toolsets => t(language, "Toolsets", "工具集"),
         OptionalSection::McpServers => t(language, "MCP servers", "MCP 服务"),
+        OptionalSection::Browser => t(language, "Browser", "浏览器"),
+        OptionalSection::Skills => t(language, "Skills", "技能"),
+        OptionalSection::SecurityPolicy => t(language, "Security policy", "安全策略"),
+        OptionalSection::ConfigManagement => t(language, "Config management", "配置管理"),
         OptionalSection::Room => t(language, "Room", "Room"),
+        OptionalSection::RoomSecret => t(language, "Room Secret API", "Room 密钥 API"),
         OptionalSection::Email => t(language, "Email", "邮件"),
         OptionalSection::TunnelClient => t(language, "Tunnel client", "隧道客户端"),
         OptionalSection::HubReporting => t(language, "Hub reporting", "Hub 报告"),
         OptionalSection::Events => t(language, "Events", "事件"),
-        OptionalSection::Additional => t(language, "Other configuration", "其他配置"),
     }
 }
 
 fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str {
     match field {
-        SetupField::RoomSecretEnabled => t(language, "Secret enabled", "启用密钥服务"),
+        SetupField::RoomSecretEnabled => t(
+            language,
+            "Room Secret tools enabled",
+            "启用 Room Secret 工具",
+        ),
         SetupField::RoomSecretServerUrl => {
             t(language, "Vaultwarden server URL", "Vaultwarden 服务地址")
         }
@@ -4321,7 +4366,7 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
             t(language, "Sync wait (milliseconds)", "同步等待（毫秒）")
         }
 
-        SetupField::EmailEnabled => t(language, "Enabled", "启用邮件"),
+        SetupField::EmailEnabled => t(language, "Email tools enabled", "启用邮件工具"),
         SetupField::EmailImapHost => t(language, "IMAP host", "IMAP 服务器"),
         SetupField::EmailImapPort => t(language, "IMAP port", "IMAP 端口"),
         SetupField::EmailImapTls => t(language, "IMAP TLS", "IMAP 加密方式"),
@@ -4412,7 +4457,7 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
 
 pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
     if let SetupField::Catalog(index) = field {
-        return crate::config_setup::additional_entries()
+        return crate::config_setup::catalog_entries()
             .get(index)
             .is_some_and(|entry| {
                 matches!(entry.kind.as_str(), "boolean" | "object") || !entry.choices.is_empty()
@@ -4430,11 +4475,11 @@ pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
 }
 
 pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupField) -> String {
-    if let (OptionalSectionDraft::Additional(value), SetupField::Catalog(index)) = (draft, field) {
+    if let (OptionalSectionDraft::Catalog(value), SetupField::Catalog(index)) = (draft, field) {
         return value.values.get(&index).cloned().unwrap_or_default();
     }
     match draft {
-        OptionalSectionDraft::Additional(_) => String::new(),
+        OptionalSectionDraft::Catalog(_) => String::new(),
         OptionalSectionDraft::Identity(value) => match field {
             SetupField::DisplayName => value.display_name.clone(),
             _ => String::new(),
@@ -4473,16 +4518,28 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             _ => String::new(),
         },
         OptionalSectionDraft::McpServers(_) => String::new(),
-        OptionalSectionDraft::Email(value) => value.value(field),
+        OptionalSectionDraft::Email(value) => {
+            if field == SetupField::EmailEnabled {
+                value.enabled.to_string()
+            } else {
+                value.value(field)
+            }
+        }
         OptionalSectionDraft::Room(value) => match field {
             SetupField::RoomTimezone => value.timezone.clone(),
             SetupField::DiaryBoundaryHour => value.diary_boundary_hour.clone(),
             SetupField::RepositoryRoot => value.repository_root.clone(),
             SetupField::RoomMaintenanceMode => value.maintenance_mode.clone(),
             SetupField::RoomMaintenanceAutoPush => value.maintenance_auto_push.to_string(),
-            field if field.room_secret_key().is_some() => value.secret.value(field),
             _ => String::new(),
         },
+        OptionalSectionDraft::RoomSecret(value) => {
+            if field == SetupField::RoomSecretEnabled {
+                value.enabled.to_string()
+            } else {
+                value.value(field)
+            }
+        }
         OptionalSectionDraft::TunnelClient(value) => match field {
             SetupField::TunnelClientVersion => value.version.clone(),
             SetupField::TunnelCacheDir => value.cache_dir.clone(),
@@ -4515,8 +4572,7 @@ pub(super) fn set_optional_field(
     field: SetupField,
     value: String,
 ) {
-    if let (OptionalSectionDraft::Additional(draft), SetupField::Catalog(index)) =
-        (&mut *draft, field)
+    if let (OptionalSectionDraft::Catalog(draft), SetupField::Catalog(index)) = (&mut *draft, field)
     {
         draft.values.insert(index, value);
         return;
@@ -4564,11 +4620,15 @@ pub(super) fn set_optional_field(
             SetupField::RepositoryRoot => draft.repository_root = value,
             SetupField::RoomMaintenanceMode => draft.maintenance_mode = value,
             SetupField::RoomMaintenanceAutoPush => draft.maintenance_auto_push = value == "true",
-            field if field.room_secret_key().is_some() => {
-                draft.secret.values.insert(field, value);
-            }
             _ => {}
         },
+        OptionalSectionDraft::RoomSecret(draft) => {
+            if field == SetupField::RoomSecretEnabled {
+                draft.enabled = value == "true";
+            } else {
+                draft.values.insert(field, value);
+            }
+        }
         OptionalSectionDraft::TunnelClient(draft) => match field {
             SetupField::TunnelClientVersion => draft.version = value,
             SetupField::TunnelCacheDir => draft.cache_dir = value,
@@ -4597,10 +4657,9 @@ pub(super) fn set_optional_field(
 }
 
 pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: SetupField) {
-    if let (OptionalSectionDraft::Additional(draft), SetupField::Catalog(index)) =
-        (&mut *draft, field)
+    if let (OptionalSectionDraft::Catalog(draft), SetupField::Catalog(index)) = (&mut *draft, field)
     {
-        if let Some(entry) = crate::config_setup::additional_entries().get(index) {
+        if let Some(entry) = crate::config_setup::catalog_entries().get(index) {
             let choices = if entry.kind == "boolean" {
                 vec!["false".to_owned(), "true".to_owned()]
             } else if entry.kind == "object" {
@@ -4629,12 +4688,10 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
             draft.enabled = !draft.enabled
         }
         OptionalSectionDraft::Email(draft) if field == SetupField::EmailEnabled => {
-            let value = draft.value(field) != "true";
-            draft.values.insert(field, value.to_string());
+            draft.enabled = !draft.enabled;
         }
-        OptionalSectionDraft::Room(draft) if field == SetupField::RoomSecretEnabled => {
-            let enabled = draft.secret.value(field) != "true";
-            draft.secret.values.insert(field, enabled.to_string());
+        OptionalSectionDraft::RoomSecret(draft) if field == SetupField::RoomSecretEnabled => {
+            draft.enabled = !draft.enabled;
         }
         OptionalSectionDraft::Room(draft) if field == SetupField::RoomMaintenanceAutoPush => {
             draft.maintenance_auto_push = !draft.maintenance_auto_push
@@ -4647,7 +4704,7 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
 fn render_review(
     frame: &mut Frame,
     review: &ReviewModel,
-    _session: &SetupSession,
+    session: &SetupSession,
     state: &TuiState,
     language: UiLanguage,
     theme: &Theme,
@@ -4722,10 +4779,36 @@ fn render_review(
     for group in groups {
         let visible_status = match (group.target, section_draft) {
             (ReviewTarget::OptionalSection(section), Some(draft)) if draft.section() == section => {
-                if *draft == default_optional_draft(language, section) {
-                    SectionStatus::Default
-                } else {
-                    SectionStatus::Configured
+                match draft {
+                    OptionalSectionDraft::Email(value) => {
+                        let configured = value
+                            .to_config()
+                            .is_ok_and(|config| config.validate_enabled().is_ok());
+                        match (value.enabled, configured) {
+                            (true, true) => SectionStatus::Enabled,
+                            (true, false) => SectionStatus::Incomplete,
+                            (false, true) => SectionStatus::Disabled,
+                            (false, false) => SectionStatus::DisabledIncomplete,
+                        }
+                    }
+                    OptionalSectionDraft::RoomSecret(value) => {
+                        let configured = value
+                            .to_config()
+                            .is_ok_and(|config| config.validate_enabled().is_ok());
+                        match (value.enabled, configured) {
+                            (true, true) => SectionStatus::Enabled,
+                            (true, false) => SectionStatus::Incomplete,
+                            (false, true) => SectionStatus::Disabled,
+                            (false, false) => SectionStatus::DisabledIncomplete,
+                        }
+                    }
+                    _ if *draft == session.optional_draft(section) => {
+                        session.section_status(section)
+                    }
+                    _ if *draft == default_optional_draft(language, section) => {
+                        SectionStatus::Default
+                    }
+                    _ => SectionStatus::Configured,
                 }
             }
             _ => group.status,
@@ -4786,7 +4869,7 @@ fn render_review(
                     editing.buffer.clone()
                 }
             } else {
-                review_display_value(_session, group, item)
+                review_display_value(session, group, item)
             };
             let inline_editing = editing.is_some()
                 && matches!(
@@ -5398,6 +5481,14 @@ fn section_status_label(status: SectionStatus, language: UiLanguage) -> &'static
     match status {
         SectionStatus::Default => t(language, "Default", "默认"),
         SectionStatus::Configured => t(language, "Configured", "已配置"),
+        SectionStatus::Disabled => t(language, "Disabled", "已关闭"),
+        SectionStatus::DisabledIncomplete => t(
+            language,
+            "Disabled · needs configuration",
+            "已关闭 · 缺配置",
+        ),
+        SectionStatus::Incomplete => t(language, "Needs configuration", "缺配置"),
+        SectionStatus::Enabled => t(language, "Enabled", "已启用"),
         SectionStatus::NotApplicable => t(language, "Not applicable", "不适用"),
     }
 }
@@ -5423,7 +5514,7 @@ pub(super) fn review_search_text(
 
 fn review_field_label(item: &ReviewItem, language: UiLanguage) -> String {
     if let Some(SetupField::Catalog(index)) = item.field {
-        if let Some(entry) = crate::config_setup::additional_entries().get(index) {
+        if let Some(entry) = crate::config_setup::catalog_entries().get(index) {
             return entry.path.join(".");
         }
     }

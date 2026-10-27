@@ -596,6 +596,16 @@ impl ConfigTuiApp {
                 self.toggle_multi_select();
                 Ok(())
             }
+            KeyCode::Char('r')
+                if self.state.page
+                    == ConfigPage::Optional(crate::config_templates::OptionalSection::Toolsets) =>
+            {
+                if let Some(OptionalSectionDraft::Toolsets(draft)) = self.section_draft.as_mut() {
+                    draft.toggle_room_group();
+                    self.validate_section_draft();
+                }
+                Ok(())
+            }
             KeyCode::Char('J') if self.multi_select_active() => {
                 self.move_multi_select_priority(1);
                 Ok(())
@@ -2431,9 +2441,12 @@ impl ConfigTuiApp {
         let item_target = item.target;
         if let Some(field @ SetupField::Catalog(_)) = field {
             if editor == ReviewEditorKind::Choice {
-                let mut draft = self
-                    .session()
-                    .optional_draft(crate::config_templates::OptionalSection::Additional);
+                let mut draft =
+                    self.session()
+                        .optional_draft(crate::config_setup::catalog_section_at(match field {
+                            SetupField::Catalog(index) => index,
+                            _ => unreachable!(),
+                        }));
                 pages::toggle_optional_field(&mut draft, field);
                 match self.session_mut().save_optional_section_for_review(draft) {
                     Ok(()) => {
@@ -2765,7 +2778,7 @@ impl ConfigTuiApp {
 
 fn optional_section_for_field(field: SetupField) -> crate::config_templates::OptionalSection {
     match field {
-        SetupField::Catalog(_) => crate::config_templates::OptionalSection::Additional,
+        SetupField::Catalog(index) => crate::config_setup::catalog_section_at(index),
         SetupField::DisplayName => crate::config_templates::OptionalSection::Identity,
         SetupField::WorkspaceRoot
         | SetupField::PathDefaultAction
@@ -2807,8 +2820,10 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         | SetupField::RoomSecretGetPolicy
         | SetupField::RoomSecretUpsertPolicy
         | SetupField::RoomSecretDeletePolicy
-        | SetupField::RoomSecretSyncWaitTimeoutMs
-        | SetupField::RoomTimezone
+        | SetupField::RoomSecretSyncWaitTimeoutMs => {
+            crate::config_templates::OptionalSection::RoomSecret
+        }
+        SetupField::RoomTimezone
         | SetupField::DiaryBoundaryHour
         | SetupField::RepositoryRoot
         | SetupField::RoomMaintenanceMode

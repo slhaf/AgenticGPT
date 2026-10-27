@@ -653,6 +653,7 @@ pub(super) fn room_value_response(value: Value) -> Response {
         return Json(value).into_response();
     };
     let status = match code {
+        "toolset_required" | "room_agent_required" => StatusCode::FORBIDDEN,
         "secret_not_found" => StatusCode::NOT_FOUND,
         "secret_confirmation_rejected" | "secret_confirmation_unavailable" => StatusCode::FORBIDDEN,
         "ambiguous_secret"
@@ -665,7 +666,7 @@ pub(super) fn room_value_response(value: Value) -> Response {
         | "secret_vault_locked"
         | "secret_provider_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         "email_not_found" | "email_attachment_not_found" => StatusCode::NOT_FOUND,
-        "email_disabled" | "email_policy_denied" => StatusCode::FORBIDDEN,
+        "email_policy_denied" => StatusCode::FORBIDDEN,
         code if code.starts_with("email_confirmation_") => StatusCode::FORBIDDEN,
         "email_identity_recovery_required"
         | "email_remote_message_unavailable"

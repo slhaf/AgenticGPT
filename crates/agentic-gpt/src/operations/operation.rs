@@ -82,9 +82,6 @@ pub(crate) enum AdmissionError {
 impl AdmissionError {
     pub(crate) fn code(&self) -> &'static str {
         match self {
-            Self::ToolsetDisabled {
-                namespace: ToolNamespace::Room,
-            } => "room_toolset_required",
             Self::ToolsetDisabled { .. } => "toolset_required",
             Self::CapabilityRequired => "room_agent_required",
             Self::CapabilityUnavailable { .. } => "capability_unavailable",
@@ -94,11 +91,8 @@ impl AdmissionError {
 
     pub(crate) fn message(&self) -> String {
         match self {
-            Self::ToolsetDisabled {
-                namespace: ToolNamespace::Room,
-            } => "room commands require toolsets.room to be enabled".to_string(),
             Self::ToolsetDisabled { namespace } => {
-                format!("operation requires toolsets.{namespace} to be enabled")
+                format!("operation requires toolset {namespace} to be enabled")
             }
             Self::CapabilityRequired => "room commands require profile=room in config".to_string(),
             Self::CapabilityUnavailable { operation } => {
@@ -136,8 +130,8 @@ pub(crate) const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("browser.release", ToolNamespace::Browser),
     ("browser.repl", ToolNamespace::Browser),
     ("browser.reset", ToolNamespace::Browser),
-    ("bootstrap", ToolNamespace::Room),
-    ("bootstrap.read", ToolNamespace::Room),
+    ("bootstrap", ToolNamespace::RoomBootstrap),
+    ("bootstrap.read", ToolNamespace::RoomBootstrap),
     ("file.edit", ToolNamespace::File),
     ("file.read", ToolNamespace::File),
     ("file.search", ToolNamespace::File),
@@ -149,25 +143,25 @@ pub(crate) const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("mcp.list", ToolNamespace::Mcp),
     ("process.batch", ToolNamespace::Process),
     ("process.exec", ToolNamespace::Process),
-    ("room.secret.list", ToolNamespace::Room),
-    ("room.secret.get", ToolNamespace::Room),
-    ("room.secret.upsert", ToolNamespace::Room),
-    ("room.secret.delete", ToolNamespace::Room),
-    ("room.email.list", ToolNamespace::Room),
-    ("room.email.read", ToolNamespace::Room),
-    ("room.email.search", ToolNamespace::Room),
-    ("room.email.attachment", ToolNamespace::Room),
-    ("room.email.send", ToolNamespace::Room),
-    ("room.email.operate", ToolNamespace::Room),
-    ("room.diary.active", ToolNamespace::Room),
-    ("room.diary.read", ToolNamespace::Room),
-    ("room.maintenance.status", ToolNamespace::Room),
-    ("room.maintenance.submit", ToolNamespace::Room),
-    ("room.notebook.read", ToolNamespace::Room),
-    ("room.notebook.recent", ToolNamespace::Room),
-    ("room.notebook.search", ToolNamespace::Room),
-    ("room.state.list", ToolNamespace::Room),
-    ("room.state.read", ToolNamespace::Room),
+    ("room.secret.list", ToolNamespace::RoomSecret),
+    ("room.secret.get", ToolNamespace::RoomSecret),
+    ("room.secret.upsert", ToolNamespace::RoomSecret),
+    ("room.secret.delete", ToolNamespace::RoomSecret),
+    ("room.email.list", ToolNamespace::RoomEmail),
+    ("room.email.read", ToolNamespace::RoomEmail),
+    ("room.email.search", ToolNamespace::RoomEmail),
+    ("room.email.attachment", ToolNamespace::RoomEmail),
+    ("room.email.send", ToolNamespace::RoomEmail),
+    ("room.email.operate", ToolNamespace::RoomEmail),
+    ("room.diary.active", ToolNamespace::RoomDiary),
+    ("room.diary.read", ToolNamespace::RoomDiary),
+    ("room.maintenance.status", ToolNamespace::RoomMaintenance),
+    ("room.maintenance.submit", ToolNamespace::RoomMaintenance),
+    ("room.notebook.read", ToolNamespace::RoomNotebook),
+    ("room.notebook.recent", ToolNamespace::RoomNotebook),
+    ("room.notebook.search", ToolNamespace::RoomNotebook),
+    ("room.state.list", ToolNamespace::RoomState),
+    ("room.state.read", ToolNamespace::RoomState),
     ("skills.install", ToolNamespace::Skills),
     ("skills.install.cancel", ToolNamespace::Skills),
     ("skills.install.get", ToolNamespace::Skills),
@@ -285,7 +279,7 @@ fn operation_namespace(operation: &str) -> Option<ToolNamespace> {
     }
     match operation {
         "bootstrap" | "bootstrap.read" | "room.bootstrap" | "room.bootstrap.read" => {
-            Some(ToolNamespace::Room)
+            Some(ToolNamespace::RoomBootstrap)
         }
         "tmux.listSessions" | "tmux.listPanes" | "tmux.capturePane" | "tmux.createSession"
         | "tmux.closeSession" => Some(ToolNamespace::Tmux),

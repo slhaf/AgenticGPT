@@ -221,16 +221,6 @@ macro_rules! config_key {
 
 pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
     config_key!(
-        "room.secret.enabled",
-        Room,
-        Boolean,
-        false,
-        "Enable Room Secret; changes require restart.",
-        "启用 Room Secret；修改后需重启。",
-        "false",
-        set_room_secret_enabled
-    ),
-    config_key!(
         "room.secret.serverUrl",
         Room,
         String,
@@ -790,16 +780,6 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "允许技能下载的主机 JSON 数组。",
         r#"["skills.example.com"]"#,
         set_skills_allowed_hosts
-    ),
-    config_key!(
-        "email.enabled",
-        Email,
-        Boolean,
-        false,
-        "Enable email synchronization while Room is enabled.",
-        "启用邮件同步；同时需要启用 Room。",
-        "false",
-        set_email_enabled
     ),
     config_key!(
         "email.account",

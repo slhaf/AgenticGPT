@@ -58,7 +58,6 @@ impl fmt::Debug for EmailAccountConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub(crate) struct EmailConfig {
-    pub(crate) enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) account: Option<EmailAccountConfig>,
     pub(crate) sync_interval_seconds: u64,
@@ -78,7 +77,6 @@ fn default_smtp_port() -> u16 {
 impl Default for EmailConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             account: None,
             sync_interval_seconds: 60,
             retention_days: 90,
@@ -91,6 +89,14 @@ impl Default for EmailConfig {
 
 impl EmailConfig {
     pub(crate) fn validate(&self) -> Result<()> {
+        self.validate_with_completeness(false)
+    }
+
+    pub(crate) fn validate_enabled(&self) -> Result<()> {
+        self.validate_with_completeness(true)
+    }
+
+    fn validate_with_completeness(&self, require_account: bool) -> Result<()> {
         if !(10..=86400).contains(&self.sync_interval_seconds) {
             return Err(anyhow!("email_sync_interval_seconds_invalid"));
         }
@@ -100,14 +106,15 @@ impl EmailConfig {
         if self.max_storage_bytes < 1024 * 1024 {
             return Err(anyhow!("email_max_storage_bytes_invalid"));
         }
-        if self.enabled && self.account.is_none() {
+        if require_account && self.account.is_none() {
             return Err(anyhow!("email_account_required"));
         }
         if let Some(account) = &self.account {
             for host in [&account.imap_host, &account.smtp_host] {
-                if host.is_empty()
-                    || host.chars().any(|c| c.is_whitespace() || c.is_control())
-                    || host.contains(['/', '@', '?', '#'])
+                if (require_account || !host.is_empty())
+                    && (host.is_empty()
+                        || host.chars().any(|c| c.is_whitespace() || c.is_control())
+                        || host.contains(['/', '@', '?', '#']))
                 {
                     return Err(anyhow!("email_account_host_invalid"));
                 }
@@ -115,20 +122,25 @@ impl EmailConfig {
             if account.imap_port == 0 || account.smtp_port == 0 {
                 return Err(anyhow!("email_account_port_invalid"));
             }
-            if account.username.trim().is_empty() || account.username.chars().any(char::is_control)
+            if (require_account || !account.username.is_empty())
+                && (account.username.trim().is_empty()
+                    || account.username.chars().any(char::is_control))
             {
                 return Err(anyhow!("email_account_username_invalid"));
             }
             let from = &account.from;
-            if from.trim() != from
-                || !from.contains('@')
-                || from.chars().any(|c| c.is_whitespace() || c.is_control())
-                || from.contains(['<', '>', ',', ';'])
+            if (require_account || !from.is_empty())
+                && (from.trim() != from
+                    || !from.contains('@')
+                    || from.chars().any(|c| c.is_whitespace() || c.is_control())
+                    || from.contains(['<', '>', ',', ';']))
             {
                 return Err(anyhow!("email_account_from_invalid"));
             }
-            super::validate_secret_reference(&account.password)
-                .map_err(|_| anyhow!("email_account_password_reference_invalid"))?;
+            if require_account || !account.password.is_empty() {
+                super::validate_secret_reference(&account.password)
+                    .map_err(|_| anyhow!("email_account_password_reference_invalid"))?;
+            }
         }
         Ok(())
     }

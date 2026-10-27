@@ -47,7 +47,7 @@ impl SetupField {
     pub(crate) fn choices(self) -> Vec<String> {
         match self {
             Self::Catalog(index) => {
-                let entries = super::model::additional_entries();
+                let entries = super::model::catalog_entries();
                 let Some(entry) = entries.get(index) else {
                     return Vec::new();
                 };
@@ -87,7 +87,7 @@ impl SetupField {
             | Self::DiaryBoundaryHour
             | Self::EventsLowTtlSeconds => true,
             Self::Catalog(index) => {
-                super::model::additional_entries()
+                super::model::catalog_entries()
                     .get(index)
                     .is_some_and(|entry| {
                         matches!(

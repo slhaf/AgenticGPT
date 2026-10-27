@@ -221,7 +221,7 @@ pub(crate) fn build_app_state_with_private_state(
     browser_runtime: Option<Arc<BrowserRuntimeContext>>,
     private_state: private_state::PrivateStatePaths,
 ) -> Result<AppState> {
-    if config.toolsets.is_enabled(config::ToolNamespace::Room) {
+    if config.toolsets.uses_room_repository() {
         room_repository::ensure_repository(&config)?;
     }
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;

@@ -460,10 +460,10 @@ async fn normal_runtime_follows_live_room_toolset_for_bootstrap_dispatch() {
     )
     .await
     .unwrap();
-    assert_eq!(disabled["error"]["code"], "room_toolset_required");
+    assert_eq!(disabled["error"]["code"], "toolset_required");
 
     let mut config = state.config.read().await.clone();
-    config.toolsets.enable(config::ToolNamespace::Room);
+    config.toolsets.enable(config::ToolNamespace::RoomBootstrap);
     *state.config.write().await = config;
 
     let enabled = local_service::dispatch(
@@ -503,7 +503,7 @@ async fn hub_adapter_and_local_dispatcher_share_toolset_errors() {
     hub::handle_hub_command(state, command, None).await.unwrap();
     let adapted = recv_response(&mut rx).await;
     assert_eq!(direct["error"], adapted["error"]);
-    assert_eq!(direct["error"]["code"], "room_toolset_required");
+    assert_eq!(direct["error"]["code"], "toolset_required");
 }
 
 #[tokio::test]
@@ -795,7 +795,7 @@ async fn normal_hub_rejects_current_room_commands_without_room_profile() {
         .write()
         .await
         .toolsets
-        .enable(config::ToolNamespace::Room);
+        .enable(config::ToolNamespace::RoomDiary);
 
     hub::handle_hub_command(
         state,
@@ -1316,13 +1316,17 @@ async fn standalone_live_reload_bootstraps_room_repository_before_maintenance_su
     let live_room_root = workspace.join("room-live");
     let candidate_room_root = workspace.join("room-candidate");
     initial.room.repository_root = Some(live_room_root.clone());
-    assert!(!initial.toolsets.is_enabled(config::ToolNamespace::Room));
+    assert!(!initial
+        .toolsets
+        .is_enabled(config::ToolNamespace::RoomMaintenance));
     assert!(!room_repository::repository_root(&initial).exists());
     *state.config.write().await = initial.clone();
 
     let mut candidate = initial.clone();
     candidate.room.repository_root = Some(candidate_room_root.clone());
-    candidate.toolsets.enable(config::ToolNamespace::Room);
+    candidate
+        .toolsets
+        .enable(config::ToolNamespace::RoomMaintenance);
     fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
 
     reload_live_config_once(&state).await?;

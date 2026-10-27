@@ -243,3 +243,178 @@ fn reference_editor_switches_sources_clears_and_keeps_secrets_out_of_preview() {
         .as_str()
         .is_none_or(str::is_empty));
 }
+
+// This interaction crosses the directory, service form, Toolsets and Review.
+// It protects preconfiguration and a single capability state across all editors;
+// the earlier field-input tests do not exercise cross-page toolset changes.
+#[test]
+fn room_service_preconfiguration_and_review_share_toolset_state() {
+    fn open_section(app: &mut ConfigTuiApp, section: OptionalSection) {
+        assert_eq!(app.page(), ConfigPage::OptionalCenter);
+        app.state.focus = app
+            .session()
+            .available_optional_sections()
+            .iter()
+            .position(|candidate| *candidate == section)
+            .unwrap();
+        key(app, KeyCode::Enter);
+        assert_eq!(app.page(), ConfigPage::Optional(section));
+    }
+    fn fill_text(app: &mut ConfigTuiApp, field: SetupField, value: &str) {
+        app.focus_field(field);
+        key(app, KeyCode::Enter);
+        text(app, value);
+        key(app, KeyCode::Enter);
+    }
+    fn fill_reference(app: &mut ConfigTuiApp, field: SetupField, name: &str) {
+        app.focus_field(field);
+        key(app, KeyCode::Enter);
+        key(app, KeyCode::Right);
+        key(app, KeyCode::Right);
+        key(app, KeyCode::Tab);
+        key(app, KeyCode::Enter);
+        text(app, name);
+        key(app, KeyCode::Enter);
+        key(app, KeyCode::Char('a'));
+        assert!(app.structured_editor.is_none());
+    }
+
+    let mut app = app();
+    app.session_mut().set_profile(WorkerProfile::Normal);
+    app.handle_action(TuiAction::Next).unwrap();
+    app.handle_action(TuiAction::Next).unwrap();
+    open_section(&mut app, OptionalSection::RoomSecret);
+    fill_text(
+        &mut app,
+        SetupField::RoomSecretServerUrl,
+        "https://vault.example.invalid",
+    );
+    app.handle_action(TuiAction::Next).unwrap();
+    assert_eq!(app.page(), ConfigPage::OptionalCenter);
+    assert!(!app
+        .session()
+        .effective_toolsets()
+        .is_enabled(crate::config::ToolNamespace::RoomSecret));
+
+    open_section(&mut app, OptionalSection::RoomSecret);
+    fill_text(
+        &mut app,
+        SetupField::RoomSecretAccount,
+        "fixture@example.invalid",
+    );
+    fill_reference(
+        &mut app,
+        SetupField::RoomSecretClientId,
+        "INPUT_TEST_CLIENT_ID",
+    );
+    fill_reference(
+        &mut app,
+        SetupField::RoomSecretClientSecret,
+        "INPUT_TEST_CLIENT_SECRET",
+    );
+    fill_reference(
+        &mut app,
+        SetupField::RoomSecretMasterPassword,
+        "INPUT_TEST_MASTER_PASSWORD",
+    );
+    app.focus_field(SetupField::RoomSecretEnabled);
+    key(&mut app, KeyCode::Enter);
+    app.handle_action(TuiAction::Next).unwrap();
+    assert_eq!(app.page(), ConfigPage::OptionalCenter);
+    assert!(app
+        .session()
+        .effective_toolsets()
+        .is_enabled(crate::config::ToolNamespace::RoomSecret));
+    assert!(!app
+        .session()
+        .effective_toolsets()
+        .is_enabled(crate::config::ToolNamespace::RoomEmail));
+
+    open_section(&mut app, OptionalSection::Toolsets);
+    key(&mut app, KeyCode::Char('r'));
+    key(&mut app, KeyCode::Char('r'));
+    app.handle_action(TuiAction::Next).unwrap();
+    assert!(!app
+        .session()
+        .effective_toolsets()
+        .is_enabled(crate::config::ToolNamespace::RoomSecret));
+    app.handle_action(TuiAction::Next).unwrap();
+    assert_eq!(app.page(), ConfigPage::Review);
+    app.focus_field(SetupField::RoomSecretEnabled);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.page(), ConfigPage::Review);
+    assert!(app
+        .session()
+        .effective_toolsets()
+        .is_enabled(crate::config::ToolNamespace::RoomSecret));
+    assert!(!app
+        .session()
+        .effective_toolsets()
+        .is_enabled(crate::config::ToolNamespace::RoomDiary));
+    let saved: serde_json::Value =
+        serde_json::from_str(&app.session().redacted_config_json().unwrap()).unwrap();
+    assert!(saved["toolsets"]["enabled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "room.secret"));
+}
+
+// Review confirmation must focus the missing service setting even when its
+// settings page has never been opened or saved.
+#[test]
+fn enabling_unconfigured_services_focuses_review_on_missing_settings() {
+    use crate::config::ToolNamespace;
+
+    for (namespace, section, field) in [
+        (
+            ToolNamespace::RoomEmail,
+            OptionalSection::Email,
+            SetupField::EmailImapHost,
+        ),
+        (
+            ToolNamespace::RoomSecret,
+            OptionalSection::RoomSecret,
+            SetupField::RoomSecretServerUrl,
+        ),
+    ] {
+        let mut app = app();
+        app.session_mut().set_profile(WorkerProfile::Normal);
+        app.handle_action(TuiAction::Next).unwrap();
+        app.handle_action(TuiAction::Next).unwrap();
+        app.state.focus = app
+            .session()
+            .available_optional_sections()
+            .iter()
+            .position(|candidate| *candidate == OptionalSection::Toolsets)
+            .unwrap();
+        key(&mut app, KeyCode::Enter);
+        app.state.focus = ToolNamespace::all()
+            .iter()
+            .position(|candidate| *candidate == namespace)
+            .unwrap();
+        key(&mut app, KeyCode::Char(' '));
+        let Some(OptionalSectionDraft::Toolsets(draft)) = &app.section_draft else {
+            panic!("toolsets page did not open")
+        };
+        assert!(
+            draft.to_config().unwrap().is_enabled(namespace),
+            "selection did not toggle"
+        );
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(app.page(), ConfigPage::OptionalCenter);
+        assert!(
+            app.session().effective_toolsets().is_enabled(namespace),
+            "selection did not save"
+        );
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(app.page(), ConfigPage::Review);
+        app.state.focus = app.review_row_count();
+        key(&mut app, KeyCode::Enter);
+        assert!(!app.review_preview_active());
+        let (group, item) = app.review_model().unwrap().row(app.state.focus).unwrap();
+        assert_eq!(group.target, ReviewTarget::OptionalSection(section));
+        assert_eq!(item.field, Some(field));
+        assert!(app.field_errors.contains_key(&field));
+    }
+}

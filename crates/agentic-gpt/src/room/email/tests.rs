@@ -28,7 +28,7 @@ impl Fixture {
         std::fs::create_dir_all(&config.workspace_root).unwrap();
         config.policy.enabled = false;
         config.confirmation_provider.channels.clear();
-        config.email.enabled = true;
+        config.toolsets.enable(ToolNamespace::RoomEmail);
         config.email.send_policy = EmailPolicy::Confirm;
         config.email.trash_policy = EmailPolicy::Confirm;
         let secret = self.root.join("password");
@@ -70,6 +70,107 @@ fn received(uid: u32, raw: &str) -> network::RemoteMessage {
         raw: raw.as_bytes().to_vec(),
         unavailable: None,
     }
+}
+
+async fn set_email_toolset(state: &AppState, enabled: bool) -> Result<()> {
+    let _apply = state.config_runtime.apply_lock.lock().await;
+    let mut desired = state.config.read().await.clone();
+    if enabled {
+        desired.toolsets.enable(ToolNamespace::RoomEmail);
+    } else {
+        desired.toolsets.disable(ToolNamespace::RoomEmail);
+    }
+    crate::config_runtime::apply_locked(state, desired).await
+}
+
+// Tier ⑤ coverage protects the actual owner and sync lifecycle across disable
+// and re-enable. Existing tests cover persistence after process restart, but do
+// not catch a disabled worker sleeping through a 24-hour interval after re-enable.
+#[tokio::test]
+async fn email_disable_releases_owner_and_reenable_resumes_sync_promptly() {
+    let fixture = Fixture::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let state = fixture.state(port);
+    {
+        let mut config = state.config.write().await;
+        config.toolsets.disable(ToolNamespace::RoomEmail);
+        config.email.sync_interval_seconds = 86_400;
+        assert!(!config.toolsets.uses_room_repository());
+        assert!(!crate::room_repository::repository_root(&config).exists());
+    }
+
+    let listener_stopping = tokio_util::sync::CancellationToken::new();
+    let (attempted_tx, mut attempted_rx) = tokio::sync::mpsc::unbounded_channel();
+    let listener_task = tokio::spawn({
+        let listener_stopping = listener_stopping.clone();
+        async move {
+            loop {
+                tokio::select! {
+                    _ = listener_stopping.cancelled() => return Ok::<_, anyhow::Error>(()),
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted?;
+                        drop(stream);
+                        if attempted_tx.send(()).is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut worker = tokio::spawn(run(state.clone(), shutdown.clone()));
+
+    let outcome: Result<()> = async {
+        set_email_toolset(&state, true).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), attempted_rx.recv())
+            .await
+            .map_err(|_| anyhow!("first_email_sync_attempt_timeout"))?
+            .ok_or_else(|| anyhow!("email_listener_stopped_before_first_attempt"))?;
+
+        set_email_toolset(&state, false).await?;
+        let owner_lock = crate::instance_lock::InstanceLock::acquire(
+            &state.email.database,
+            ".owner.lock",
+            "email-test",
+        )
+        .map_err(|_| anyhow!("email_owner_not_released_after_disable"))?;
+        drop(owner_lock);
+
+        set_email_toolset(&state, true).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), attempted_rx.recv())
+            .await
+            .map_err(|_| anyhow!("email_sync_did_not_resume_promptly"))?
+            .ok_or_else(|| anyhow!("email_listener_stopped_before_second_attempt"))?;
+        Ok(())
+    }
+    .await;
+
+    shutdown.cancel();
+    let worker_result = tokio::time::timeout(std::time::Duration::from_secs(5), &mut worker).await;
+    if worker_result.is_err() {
+        worker.abort();
+        let _ = worker.await;
+    }
+    listener_stopping.cancel();
+    let mut listener_task = listener_task;
+    let listener_result =
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut listener_task).await;
+    if listener_result.is_err() {
+        listener_task.abort();
+        let _ = listener_task.await;
+    }
+
+    assert!(outcome.is_ok(), "lifecycle failed: {outcome:?}");
+    assert!(
+        matches!(worker_result, Ok(Ok(Ok(())))),
+        "worker did not stop cleanly: {worker_result:?}"
+    );
+    assert!(
+        matches!(listener_result, Ok(Ok(Ok(())))),
+        "listener did not stop cleanly: {listener_result:?}"
+    );
 }
 
 #[test]

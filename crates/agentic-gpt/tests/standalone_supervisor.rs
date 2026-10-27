@@ -130,7 +130,18 @@ fn run_smoke(
     config["mode"] = Value::String("standalone".to_string());
     config["profile"] = Value::String(profile.to_string());
     config["toolsets"]["enabled"] = if profile == "room" {
-        json!(["agent", "file", "mcp", "process", "skills", "room"])
+        json!([
+            "agent",
+            "file",
+            "mcp",
+            "process",
+            "skills",
+            "room.bootstrap",
+            "room.diary",
+            "room.notebook",
+            "room.state",
+            "room.maintenance"
+        ])
     } else {
         json!(["agent", "file", "mcp", "process", "skills"])
     };

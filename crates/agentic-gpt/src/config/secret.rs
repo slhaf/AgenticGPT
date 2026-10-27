@@ -14,7 +14,6 @@ pub(crate) enum SecretPolicy {
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub(crate) struct RoomSecretConfig {
-    pub(crate) enabled: bool,
     pub(crate) server_url: String,
     pub(crate) account: String,
     pub(crate) client_id: String,
@@ -29,7 +28,6 @@ pub(crate) struct RoomSecretConfig {
 impl Default for RoomSecretConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             server_url: String::new(),
             account: String::new(),
             client_id: String::new(),
@@ -47,7 +45,6 @@ impl fmt::Debug for RoomSecretConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RoomSecretConfig")
-            .field("enabled", &self.enabled)
             .field("server_url", &"[REDACTED]")
             .field("account", &"[REDACTED]")
             .field("client_id", &"[REDACTED]")
@@ -73,7 +70,7 @@ impl RoomSecretConfig {
         if self.sync_wait_timeout_ms > 30_000 {
             return Err(anyhow!("room_secret_sync_wait_timeout_ms_invalid"));
         }
-        if self.enabled || !self.server_url.is_empty() {
+        if !self.server_url.is_empty() {
             let url = url::Url::parse(&self.server_url)
                 .map_err(|_| anyhow!("room_secret_server_url_invalid"))?;
             if self.server_url.len() > 4096
@@ -91,8 +88,7 @@ impl RoomSecretConfig {
                 return Err(anyhow!("room_secret_server_url_invalid"));
             }
         }
-        if (self.enabled && self.account.is_empty())
-            || self.account.len() > 1024
+        if self.account.len() > 1024
             || self
                 .account
                 .chars()
@@ -111,11 +107,37 @@ impl RoomSecretConfig {
                 "room_secret_master_password_reference_invalid",
             ),
         ] {
-            if self.enabled || !reference.is_empty() {
+            if !reference.is_empty() {
                 if reference.len() > 4096 || reference.chars().any(char::is_control) {
                     return Err(anyhow!(code));
                 }
                 super::validate_secret_reference(reference).map_err(|_| anyhow!(code))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_enabled(&self) -> Result<()> {
+        self.validate()?;
+        if self.server_url.is_empty() {
+            return Err(anyhow!("room_secret_server_url_invalid"));
+        }
+        if self.account.is_empty() {
+            return Err(anyhow!("room_secret_account_invalid"));
+        }
+        for (reference, code) in [
+            (&self.client_id, "room_secret_client_id_reference_invalid"),
+            (
+                &self.client_secret,
+                "room_secret_client_secret_reference_invalid",
+            ),
+            (
+                &self.master_password,
+                "room_secret_master_password_reference_invalid",
+            ),
+        ] {
+            if reference.is_empty() {
+                return Err(anyhow!(code));
             }
         }
         Ok(())

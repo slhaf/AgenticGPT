@@ -194,8 +194,19 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         return Err("local mcp.batch aggregate audit mismatch".to_string());
     }
 
-    config["toolsets"]["enabled"] =
-        json!(["agent", "file", "mcp", "process", "skills", "tmux", "room"]);
+    config["toolsets"]["enabled"] = json!([
+        "agent",
+        "file",
+        "mcp",
+        "process",
+        "skills",
+        "tmux",
+        "room.bootstrap",
+        "room.diary",
+        "room.notebook",
+        "room.state",
+        "room.maintenance"
+    ]);
     fs::write(
         &config_path,
         serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,

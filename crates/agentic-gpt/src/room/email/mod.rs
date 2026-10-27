@@ -30,6 +30,7 @@ pub(crate) struct EmailService {
     network: tokio::sync::Mutex<()>,
     database: std::path::PathBuf,
     owner: parking_lot::Mutex<Option<Arc<EmailOwner>>>,
+    sync_stopping: parking_lot::Mutex<CancellationToken>,
     #[cfg(test)]
     test_root: parking_lot::RwLock<Option<Vec<u8>>>,
 }
@@ -47,6 +48,7 @@ impl EmailService {
             network: tokio::sync::Mutex::new(()),
             database: paths.root.join("email.sqlite3"),
             owner: parking_lot::Mutex::new(None),
+            sync_stopping: parking_lot::Mutex::new(CancellationToken::new()),
             #[cfg(test)]
             test_root: parking_lot::RwLock::new(None),
         }))
@@ -81,14 +83,26 @@ impl EmailService {
     pub(crate) async fn prepare_reconfigure(
         &self,
     ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>> {
-        let guard = tokio::time::timeout(
+        self.sync_stopping.lock().cancel();
+        let guard = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             self.admission.clone().write_owned(),
         )
         .await
-        .map_err(|_| anyhow!("email_reconfigure_busy"))?;
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                *self.sync_stopping.lock() = CancellationToken::new();
+                return Err(anyhow!("email_reconfigure_busy"));
+            }
+        };
         self.deactivate();
+        *self.sync_stopping.lock() = CancellationToken::new();
         Ok(guard)
+    }
+
+    fn sync_stopping(&self) -> CancellationToken {
+        self.sync_stopping.lock().clone()
     }
 }
 
@@ -158,7 +172,9 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) -> Result<
         };
         let config = state.config.read().await.clone();
         let cycle_account = config.email.account.clone();
-        if config.email.enabled && config.toolsets.is_enabled(ToolNamespace::Room) {
+        let cycle_enabled = config.toolsets.is_enabled(ToolNamespace::RoomEmail);
+        let cycle_reconfigure_stopping = state.email.sync_stopping();
+        if cycle_enabled {
             if let Some(account) = config.email.account.clone() {
                 let key = account_key(&account);
                 let active_service = state.email.clone();
@@ -190,12 +206,19 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) -> Result<
                 let lease = state.email.network.lock().await;
                 let service = state.email.clone();
                 let stopping = shutdown.clone();
+                let reconfigure_stopping = cycle_reconfigure_stopping.clone();
                 let network_owner = owner.clone();
                 let synchronizing = admission.clone();
                 let result = blocking(move || {
                     let _admission = synchronizing;
                     let _owner = network_owner;
-                    sync(&service, &account, &config, &stopping)
+                    sync(
+                        &service,
+                        &account,
+                        &config,
+                        &stopping,
+                        &reconfigure_stopping,
+                    )
                 })
                 .await;
                 drop(lease);
@@ -229,15 +252,14 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) -> Result<
         loop {
             tokio::select! {
                 _=shutdown.cancelled()=>return Ok(()),
+                _=cycle_reconfigure_stopping.cancelled()=>break,
                 _=tokio::time::sleep(std::time::Duration::from_secs(1))=>{},
             }
             let waiting_config = state.config.read().await;
             if waiting_config.email.account != cycle_account {
                 break;
             }
-            if !waiting_config.email.enabled
-                || !waiting_config.toolsets.is_enabled(ToolNamespace::Room)
-            {
+            if waiting_config.toolsets.is_enabled(ToolNamespace::RoomEmail) != cycle_enabled {
                 break;
             }
             let seconds = waiting_config.email.sync_interval_seconds;
@@ -253,9 +275,16 @@ fn sync(
     account: &EmailAccountConfig,
     config: &Config,
     shutdown: &CancellationToken,
+    reconfigure_stopping: &CancellationToken,
 ) -> Result<()> {
+    if shutdown.is_cancelled() || reconfigure_stopping.is_cancelled() {
+        return Ok(());
+    }
     let key = account_key(account);
     let mut inbox = network::inbox(account)?;
+    if shutdown.is_cancelled() || reconfigure_stopping.is_cancelled() {
+        return Ok(());
+    }
     let record = service
         .store
         .sync_record(&key, inbox.validity, inbox.baseline)?;
@@ -267,7 +296,7 @@ fn sync(
         .store
         .cleanup(config.email.retention_days, config.email.max_storage_bytes)?;
     for uid in uids.iter().copied().filter(|uid| *uid > record.last_uid) {
-        if shutdown.is_cancelled() {
+        if shutdown.is_cancelled() || reconfigure_stopping.is_cancelled() {
             return Ok(());
         }
         if let Some(message) = inbox.message(uid)? {
@@ -287,7 +316,7 @@ fn sync(
     }
     let mut flags = Vec::with_capacity(uids.len());
     for chunk in uids.chunks(network::FETCH_BATCH) {
-        if shutdown.is_cancelled() {
+        if shutdown.is_cancelled() || reconfigure_stopping.is_cancelled() {
             return Ok(());
         }
         flags.extend(inbox.flags(chunk)?);
@@ -343,8 +372,8 @@ pub(crate) async fn dispatch(state: &AppState, operation: &str, args: Value) -> 
 
 async fn dispatch_admitted(state: &AppState, operation: &str, args: Value) -> Value {
     let config = state.config.read().await.clone();
-    if !config.email.enabled {
-        return error_value("email_disabled");
+    if !config.toolsets.is_enabled(ToolNamespace::RoomEmail) {
+        return json!({"error":{"code":"toolset_required","message":"operation requires toolset room.email to be enabled"}});
     }
     let Some(account) = config.email.account.clone() else {
         return error_value("email_account_required");

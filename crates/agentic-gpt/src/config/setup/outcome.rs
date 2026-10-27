@@ -1169,12 +1169,13 @@ mod tests {
             draft.max_file_search_context_lines = "23".into();
         }
         editor.save_optional_section(limits).unwrap();
-        let mut additional = editor.optional_draft(OptionalSection::Additional);
-        let policy_index = super::super::model::additional_entries()
+        let policy_index = super::super::model::catalog_entries()
             .iter()
             .position(|entry| entry.path == ["policy", "command", "allow"])
             .unwrap();
-        if let OptionalSectionDraft::Additional(draft) = &mut additional {
+        let section = super::super::model::catalog_section_at(policy_index);
+        let mut additional = editor.optional_draft(section);
+        if let OptionalSectionDraft::Catalog(draft) = &mut additional {
             draft
                 .values
                 .insert(policy_index, r#"["echo local"]"#.into());

@@ -180,9 +180,6 @@ impl AgentMcpServer {
     async fn current_tools(&self) -> Vec<Tool> {
         let config = self.state.config.read().await;
         tool_descriptors(&config.toolsets)
-            .into_iter()
-            .filter(|tool| !tool.name.starts_with("room.secret.") || config.room.secret.enabled)
-            .collect()
     }
 
     async fn tool_is_available(&self, name: &str) -> bool {
@@ -191,9 +188,6 @@ impl AgentMcpServer {
         }
         if name == "privateevent.inject" {
             return self.ingress == RequestIngress::LocalUnix;
-        }
-        if name.starts_with("room.secret.") && !self.state.config.read().await.room.secret.enabled {
-            return false;
         }
         let Some(namespace) = tool_namespace(name) else {
             return false;

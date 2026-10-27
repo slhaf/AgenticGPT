@@ -57,7 +57,27 @@ pub(crate) enum ToolNamespace {
     Skills,
     Tmux,
     Browser,
-    Room,
+    #[serde(rename = "room.bootstrap")]
+    #[value(name = "room.bootstrap")]
+    RoomBootstrap,
+    #[serde(rename = "room.diary")]
+    #[value(name = "room.diary")]
+    RoomDiary,
+    #[serde(rename = "room.notebook")]
+    #[value(name = "room.notebook")]
+    RoomNotebook,
+    #[serde(rename = "room.state")]
+    #[value(name = "room.state")]
+    RoomState,
+    #[serde(rename = "room.maintenance")]
+    #[value(name = "room.maintenance")]
+    RoomMaintenance,
+    #[serde(rename = "room.email")]
+    #[value(name = "room.email")]
+    RoomEmail,
+    #[serde(rename = "room.secret")]
+    #[value(name = "room.secret")]
+    RoomSecret,
 }
 
 impl ToolNamespace {
@@ -71,7 +91,13 @@ impl ToolNamespace {
             Self::Skills,
             Self::Tmux,
             Self::Browser,
-            Self::Room,
+            Self::RoomBootstrap,
+            Self::RoomDiary,
+            Self::RoomNotebook,
+            Self::RoomState,
+            Self::RoomMaintenance,
+            Self::RoomEmail,
+            Self::RoomSecret,
         ]
     }
 
@@ -85,8 +111,34 @@ impl ToolNamespace {
             Self::Skills => "skills",
             Self::Tmux => "tmux",
             Self::Browser => "browser",
-            Self::Room => "room",
+            Self::RoomBootstrap => "room.bootstrap",
+            Self::RoomDiary => "room.diary",
+            Self::RoomNotebook => "room.notebook",
+            Self::RoomState => "room.state",
+            Self::RoomMaintenance => "room.maintenance",
+            Self::RoomEmail => "room.email",
+            Self::RoomSecret => "room.secret",
         }
+    }
+
+    pub(crate) fn is_room(self) -> bool {
+        matches!(
+            self,
+            Self::RoomBootstrap
+                | Self::RoomDiary
+                | Self::RoomNotebook
+                | Self::RoomState
+                | Self::RoomMaintenance
+                | Self::RoomEmail
+                | Self::RoomSecret
+        )
+    }
+
+    pub(crate) fn uses_room_repository(self) -> bool {
+        matches!(
+            self,
+            Self::RoomDiary | Self::RoomNotebook | Self::RoomState | Self::RoomMaintenance
+        )
     }
 
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
@@ -119,28 +171,31 @@ pub(crate) struct ToolsetConfig {
 }
 
 impl ToolsetConfig {
-    pub(crate) fn all() -> Self {
-        Self {
-            enabled: ToolNamespace::all().iter().copied().collect(),
-        }
-    }
-
     pub(crate) fn normal() -> Self {
         Self {
             enabled: ToolNamespace::all()
                 .iter()
                 .copied()
-                .filter(|namespace| {
-                    !matches!(namespace, ToolNamespace::Room | ToolNamespace::Config)
-                })
+                .filter(|namespace| !namespace.is_room() && *namespace != ToolNamespace::Config)
                 .collect(),
         }
     }
 
     pub(crate) fn room() -> Self {
-        let mut value = Self::all();
-        value.disable(ToolNamespace::Config);
-        value
+        Self {
+            enabled: ToolNamespace::all()
+                .iter()
+                .copied()
+                .filter(|namespace| {
+                    !matches!(
+                        namespace,
+                        ToolNamespace::Config
+                            | ToolNamespace::RoomEmail
+                            | ToolNamespace::RoomSecret
+                    )
+                })
+                .collect(),
+        }
     }
 
     pub(crate) fn for_profile(profile: WorkerProfile) -> Self {
@@ -169,6 +224,12 @@ impl ToolsetConfig {
             .filter(|namespace| self.is_enabled(*namespace))
             .map(ToolNamespace::as_str)
             .collect()
+    }
+
+    pub(crate) fn uses_room_repository(&self) -> bool {
+        self.enabled
+            .iter()
+            .any(|namespace| namespace.uses_room_repository())
     }
 }
 
@@ -1262,6 +1323,7 @@ impl Config {
         config.events.validate()?;
         config.email.validate()?;
         config.room.secret.validate()?;
+        config.validate_configured_services()?;
         Ok(config)
     }
 
@@ -1599,10 +1661,21 @@ impl Config {
         self.events.validate()?;
         self.email.validate()?;
         self.room.secret.validate()?;
+        self.validate_configured_services()?;
         self.validate_policies()?;
         self.validate_mcp_servers()?;
         if self.auxiliary_hub_enabled() {
             self.validate_hub_connection()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_configured_services(&self) -> Result<()> {
+        if self.toolsets.is_enabled(ToolNamespace::RoomEmail) {
+            self.email.validate_enabled()?;
+        }
+        if self.toolsets.is_enabled(ToolNamespace::RoomSecret) {
+            self.room.secret.validate_enabled()?;
         }
         Ok(())
     }
@@ -1720,6 +1793,7 @@ fn materialize_import_value(value: &Value) -> Result<Config> {
     config.validate_policies()?;
     config.email.validate()?;
     config.room.secret.validate()?;
+    config.validate_configured_services()?;
     Ok(config)
 }
 
@@ -3052,18 +3126,18 @@ mod tests {
     }
 
     #[test]
-    fn explicit_import_preserves_toolsets_that_omit_a_room_profile_namespace() {
+    fn explicit_import_preserves_toolsets_that_omit_profile_defaults() {
         let root = temp_config_path();
         let value = json!({
             "policy": SecurityPolicyConfig::default(),
             "mode": "standalone",
             "profile": "room",
-            "toolsets": {"enabled": ["room"]}
+            "toolsets": {"enabled": ["room.diary"]}
         });
         fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
         let imported = Config::import(&root).unwrap();
-        assert_eq!(imported.config.toolsets.enabled_names(), vec!["room"]);
+        assert_eq!(imported.config.toolsets.enabled_names(), vec!["room.diary"]);
         let _ = fs::remove_file(root);
     }
 

@@ -745,7 +745,7 @@ async fn absent_room_tools_are_rejected_when_room_toolset_disabled() {
     }
 }
 #[tokio::test]
-async fn changing_live_toolsets_updates_surface_and_authorization() {
+async fn room_toolsets_independently_control_discovery_and_calls() {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let initial_names = server
         .current_tools()
@@ -756,36 +756,84 @@ async fn changing_live_toolsets_updates_surface_and_authorization() {
     assert!(!initial_names.iter().any(|name| name == "bootstrap"));
     assert!(!initial_names.iter().any(|name| name.starts_with("room.")));
 
-    let error = server
-        .call(CallToolRequestParams::new("bootstrap"))
-        .await
-        .expect_err("Room tools must be unavailable before enabling Room");
-    assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
-
-    let mut room_config = server.state.config.read().await.clone();
-    room_config.toolsets = ToolsetConfig::room();
-    *server.state.config.write().await = room_config;
-    let room_names = server
+    let mut diary_config = server.state.config.read().await.clone();
+    diary_config.toolsets = ToolsetConfig::normal();
+    diary_config
+        .toolsets
+        .enable(crate::config::ToolNamespace::RoomDiary);
+    *server.state.config.write().await = diary_config;
+    let diary_names = server
         .current_tools()
         .await
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
-    assert!(room_names.iter().any(|name| name == "bootstrap"));
-    assert!(room_names.iter().any(|name| name == "room.diary.active"));
+    assert!(diary_names.iter().any(|name| name == "room.diary.active"));
+    assert!(!diary_names.iter().any(|name| name == "bootstrap"));
+    assert!(!diary_names
+        .iter()
+        .any(|name| name.starts_with("room.email.")));
+    assert!(!diary_names
+        .iter()
+        .any(|name| name.starts_with("room.secret.")));
+    let error = server
+        .call(CallToolRequestParams::new("room.secret.list"))
+        .await
+        .expect_err("Secret tools stay hidden when only Diary is enabled");
+    assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+
+    let mut email_config = server.state.config.read().await.clone();
+    email_config
+        .toolsets
+        .enable(crate::config::ToolNamespace::RoomEmail);
+    *server.state.config.write().await = email_config;
+    let email_names = server
+        .current_tools()
+        .await
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
+    assert!(email_names.iter().any(|name| name == "room.email.list"));
+    assert!(email_names.iter().any(|name| name == "room.diary.active"));
+    assert!(!email_names
+        .iter()
+        .any(|name| name.starts_with("room.secret.")));
+    assert!(server.get_tool("room.email.list").is_some());
+    assert!(server.get_tool("room.secret.list").is_none());
+    let error = server
+        .call(CallToolRequestParams::new("room.secret.list"))
+        .await
+        .expect_err("Email enablement must not expose Secret tools");
+    assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+
+    let mut bootstrap_config = server.state.config.read().await.clone();
+    bootstrap_config
+        .toolsets
+        .enable(crate::config::ToolNamespace::RoomBootstrap);
+    *server.state.config.write().await = bootstrap_config;
+    let bootstrap_names = server
+        .current_tools()
+        .await
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
+    assert!(bootstrap_names.iter().any(|name| name == "bootstrap"));
+    assert!(!bootstrap_names
+        .iter()
+        .any(|name| name.starts_with("room.secret.")));
     let bootstrap = server
         .call(CallToolRequestParams::new("bootstrap"))
         .await
         .expect("enabled Room tool should reach the read path");
     assert!(bootstrap.get("entrypoint").is_some());
 
-    let mut normal_config = server.state.config.read().await.clone();
-    normal_config.toolsets = ToolsetConfig::normal();
-    *server.state.config.write().await = normal_config;
+    let mut disabled_config = server.state.config.read().await.clone();
+    disabled_config.toolsets = ToolsetConfig::normal();
+    *server.state.config.write().await = disabled_config;
     let error = server
         .call(CallToolRequestParams::new("bootstrap"))
         .await
-        .expect_err("Room tools must disappear after disabling Room");
+        .expect_err("Bootstrap must disappear after disabling its toolset");
     assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
 }
 

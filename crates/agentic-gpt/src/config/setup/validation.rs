@@ -223,16 +223,22 @@ mod tests {
         }));
     }
     #[test]
-    fn normal_profile_accepts_explicit_room_toolset_and_round_trips_room_settings() {
+    fn room_settings_remain_editable_while_room_services_are_preconfigured() {
         let mut session = session(RuntimeMode::Local, WorkerProfile::Normal);
         let mut toolsets = ToolsetConfig::normal();
-        toolsets.enable(ToolNamespace::Room);
+        toolsets.enable(ToolNamespace::RoomDiary);
         session
             .save_optional_section(toolsets_draft(&toolsets))
             .unwrap();
         assert!(session
             .available_optional_sections()
             .contains(&OptionalSection::Room));
+        assert!(session
+            .available_optional_sections()
+            .contains(&OptionalSection::Email));
+        assert!(session
+            .available_optional_sections()
+            .contains(&OptionalSection::RoomSecret));
 
         session.set_profile(WorkerProfile::Room);
         assert!(session
@@ -250,7 +256,6 @@ mod tests {
                 repository_root: "/tmp/room-repository".to_string(),
                 maintenance_mode: "workflow".to_string(),
                 maintenance_auto_push: true,
-                secret: Default::default(),
             }))
             .unwrap();
 
@@ -321,12 +326,16 @@ pub(super) fn available_optional_sections(
         OptionalSection::Shell,
         OptionalSection::Toolsets,
         OptionalSection::McpServers,
+        OptionalSection::Browser,
+        OptionalSection::Skills,
+        OptionalSection::SecurityPolicy,
+        OptionalSection::ConfigManagement,
         OptionalSection::Room,
+        OptionalSection::RoomSecret,
         OptionalSection::Email,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
         OptionalSection::Events,
-        OptionalSection::Additional,
     ]
     .into_iter()
     .filter(|section| section_is_legal(*section, mode, toolsets))
@@ -568,10 +577,10 @@ pub(super) fn validate_field(
         | SetupField::AgentId
         | SetupField::AgentSecret
         | SetupField::HubEnabled => validate_connection(session).err().unwrap_or_default(),
-        SetupField::Catalog(_) => validate_optional(
-            OptionalSection::Additional,
-            &session.optional_draft(OptionalSection::Additional),
-        ),
+        SetupField::Catalog(index) => {
+            let section = super::model::catalog_section_at(index);
+            validate_optional(section, &session.optional_draft(section))
+        }
         SetupField::DisplayName => validate_optional(
             OptionalSection::Identity,
             &session.optional_draft(OptionalSection::Identity),
@@ -643,8 +652,11 @@ pub(super) fn validate_field(
         | SetupField::RoomSecretGetPolicy
         | SetupField::RoomSecretUpsertPolicy
         | SetupField::RoomSecretDeletePolicy
-        | SetupField::RoomSecretSyncWaitTimeoutMs
-        | SetupField::RoomTimezone
+        | SetupField::RoomSecretSyncWaitTimeoutMs => validate_optional(
+            OptionalSection::RoomSecret,
+            &session.optional_draft(OptionalSection::RoomSecret),
+        ),
+        SetupField::RoomTimezone
         | SetupField::DiaryBoundaryHour
         | SetupField::RepositoryRoot
         | SetupField::RoomMaintenanceMode
@@ -843,15 +855,16 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 errors.extend(mcp_errors);
             }
         }
-        (OptionalSection::Email, OptionalSectionDraft::Email(value)) => {
-            if let Err((field, code)) = value.to_config() {
-                errors.push(error(field, code));
+        (OptionalSection::Email, OptionalSectionDraft::Email(value)) => match value.to_config() {
+            Ok(config) if value.enabled => {
+                if let Err(problem) = config.validate_enabled() {
+                    errors.push(map_email_enabled_error(problem.to_string()));
+                }
             }
-        }
+            Ok(_) => {}
+            Err((field, code)) => errors.push(error(field, code)),
+        },
         (OptionalSection::Room, OptionalSectionDraft::Room(value)) => {
-            if let Err((field, code)) = value.secret.to_config() {
-                errors.push(error(field, code));
-            }
             required(
                 &value.timezone,
                 SetupField::RoomTimezone,
@@ -870,6 +883,17 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                     SetupField::RoomMaintenanceMode,
                     "config_init_room_maintenance_mode_invalid",
                 ));
+            }
+        }
+        (OptionalSection::RoomSecret, OptionalSectionDraft::RoomSecret(value)) => {
+            match value.to_config() {
+                Ok(config) if value.enabled => {
+                    if let Err(problem) = config.validate_enabled() {
+                        errors.push(map_room_secret_enabled_error(problem.to_string()));
+                    }
+                }
+                Ok(_) => {}
+                Err((field, code)) => errors.push(error(field, code)),
             }
         }
         (OptionalSection::TunnelClient, OptionalSectionDraft::TunnelClient(value)) => {
@@ -901,7 +925,13 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 ));
             }
         }
-        (OptionalSection::Additional, OptionalSectionDraft::Additional(value)) => {
+        (
+            OptionalSection::Browser
+            | OptionalSection::Skills
+            | OptionalSection::SecurityPolicy
+            | OptionalSection::ConfigManagement,
+            OptionalSectionDraft::Catalog(value),
+        ) => {
             if let Err(index) = value.changes() {
                 errors.push(error(
                     SetupField::Catalog(index),
@@ -920,6 +950,65 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
         )),
     }
     errors
+}
+
+fn map_email_enabled_error(problem: String) -> ValidationError {
+    let (field, code) = match problem.as_str() {
+        "email_account_required" => (SetupField::EmailImapHost, "email_account_required"),
+        "email_account_host_invalid" => (SetupField::EmailImapHost, "email_account_host_invalid"),
+        "email_account_port_invalid" => (SetupField::EmailImapPort, "email_account_port_invalid"),
+        "email_account_username_invalid" => {
+            (SetupField::EmailUsername, "email_account_username_invalid")
+        }
+        "email_account_from_invalid" => (SetupField::EmailFrom, "email_account_from_invalid"),
+        "email_account_password_reference_invalid" => (
+            SetupField::EmailPassword,
+            "email_account_password_reference_invalid",
+        ),
+        "email_sync_interval_seconds_invalid" => (
+            SetupField::EmailSyncInterval,
+            "email_sync_interval_seconds_invalid",
+        ),
+        "email_retention_days_invalid" => (
+            SetupField::EmailRetentionDays,
+            "email_retention_days_invalid",
+        ),
+        "email_max_storage_bytes_invalid" => (
+            SetupField::EmailMaxStorageBytes,
+            "email_max_storage_bytes_invalid",
+        ),
+        _ => (
+            SetupField::EmailImapHost,
+            "email_config_required_when_enabled",
+        ),
+    };
+    error(field, code)
+}
+
+fn map_room_secret_enabled_error(problem: String) -> ValidationError {
+    let field = match problem.as_str() {
+        "room_secret_server_url_invalid" => SetupField::RoomSecretServerUrl,
+        "room_secret_account_invalid" => SetupField::RoomSecretAccount,
+        "room_secret_client_id_reference_invalid" => SetupField::RoomSecretClientId,
+        "room_secret_client_secret_reference_invalid" => SetupField::RoomSecretClientSecret,
+        "room_secret_master_password_reference_invalid" => SetupField::RoomSecretMasterPassword,
+        "room_secret_sync_wait_timeout_ms_invalid" => SetupField::RoomSecretSyncWaitTimeoutMs,
+        _ => SetupField::RoomSecretServerUrl,
+    };
+    let code = match problem.as_str() {
+        "room_secret_server_url_invalid" => "room_secret_server_url_invalid",
+        "room_secret_account_invalid" => "room_secret_account_invalid",
+        "room_secret_client_id_reference_invalid" => "room_secret_client_id_reference_invalid",
+        "room_secret_client_secret_reference_invalid" => {
+            "room_secret_client_secret_reference_invalid"
+        }
+        "room_secret_master_password_reference_invalid" => {
+            "room_secret_master_password_reference_invalid"
+        }
+        "room_secret_sync_wait_timeout_ms_invalid" => "room_secret_sync_wait_timeout_ms_invalid",
+        _ => "room_secret_config_required_when_enabled",
+    };
+    error(field, code)
 }
 
 fn events_config_from_draft(draft: &EventsDraft) -> Result<EventsConfig, ValidationErrors> {
@@ -1123,8 +1212,27 @@ pub(super) fn validate_for_review(session: &SetupSession) -> Result<(), Validati
     if let Err(mut connection) = validate_connection(session) {
         errors.append(&mut connection);
     }
+    let toolsets = session.effective_toolsets();
     for section in session.available_optional_sections() {
-        if let Some(draft) = configured_draft(session, section) {
+        let draft = match section {
+            // Email and Secret may be enabled from Toolsets before their
+            // settings page has been saved. Validate their effective default
+            // drafts too, so missing setup points back to the relevant page.
+            OptionalSection::Email | OptionalSection::RoomSecret => {
+                Some(session.optional_draft(section))
+            }
+            _ => configured_draft(session, section),
+        };
+        if let Some(mut draft) = draft {
+            match &mut draft {
+                OptionalSectionDraft::Email(value) => {
+                    value.enabled = toolsets.is_enabled(ToolNamespace::RoomEmail);
+                }
+                OptionalSectionDraft::RoomSecret(value) => {
+                    value.enabled = toolsets.is_enabled(ToolNamespace::RoomSecret);
+                }
+                _ => {}
+            }
             errors.extend(
                 validate_optional_draft(session, &draft)
                     .err()
@@ -1166,6 +1274,10 @@ fn configured_draft(
             .clone()
             .map(OptionalSectionDraft::McpServers),
         OptionalSection::Room => drafts.room.clone().map(OptionalSectionDraft::Room),
+        OptionalSection::RoomSecret => drafts
+            .room_secret
+            .clone()
+            .map(OptionalSectionDraft::RoomSecret),
         OptionalSection::Email => drafts.email.clone().map(OptionalSectionDraft::Email),
         OptionalSection::TunnelClient => drafts
             .tunnel_client
@@ -1176,10 +1288,14 @@ fn configured_draft(
             .clone()
             .map(OptionalSectionDraft::HubReporting),
         OptionalSection::Events => drafts.events.clone().map(OptionalSectionDraft::Events),
-        OptionalSection::Additional => drafts
-            .additional
-            .clone()
-            .map(OptionalSectionDraft::Additional),
+        OptionalSection::Browser
+        | OptionalSection::Skills
+        | OptionalSection::SecurityPolicy
+        | OptionalSection::ConfigManagement => drafts
+            .catalog
+            .get(&section)
+            .cloned()
+            .map(OptionalSectionDraft::Catalog),
     }
 }
 
@@ -1391,10 +1507,7 @@ fn apply_optional_draft(
                 }
             };
             input.room = Some(RoomConfig {
-                secret: value
-                    .secret
-                    .to_config()
-                    .map_err(|(field, code)| vec![error(field, code)])?,
+                secret: default_room_config().secret,
                 repository_root: optional_path(&value.repository_root),
                 timezone: value.timezone.trim().to_string(),
                 diary_day_boundary_hour,
@@ -1404,6 +1517,12 @@ fn apply_optional_draft(
                 },
                 skills: default_room_config().skills,
             });
+        }
+        (OptionalSection::RoomSecret, OptionalSectionDraft::RoomSecret(value)) => {
+            let secret = value
+                .to_config()
+                .map_err(|(field, code)| vec![error(field, code)])?;
+            input.room.get_or_insert_with(default_room_config).secret = secret;
         }
         (OptionalSection::TunnelClient, OptionalSectionDraft::TunnelClient(value)) => {
             input.tunnel_client = Some(TunnelClientConfig {
@@ -1449,13 +1568,19 @@ fn apply_optional_draft(
             };
             input.shell = Some(ShellConfig { init_file });
         }
-        (OptionalSection::Additional, OptionalSectionDraft::Additional(value)) => {
-            input.additional = value.changes().map_err(|index| {
+        (
+            OptionalSection::Browser
+            | OptionalSection::Skills
+            | OptionalSection::SecurityPolicy
+            | OptionalSection::ConfigManagement,
+            OptionalSectionDraft::Catalog(value),
+        ) => {
+            input.additional.extend(value.changes().map_err(|index| {
                 vec![error(
                     SetupField::Catalog(index),
                     "config_init_catalog_value_invalid",
                 )]
-            })?;
+            })?);
         }
         (OptionalSection::Events, OptionalSectionDraft::Events(value)) => {
             input.events = Some(events_config_from_draft(value)?);
@@ -1480,6 +1605,25 @@ fn optional_path(value: &str) -> Option<PathBuf> {
 
 fn map_build_error(session: &SetupSession, code: String) -> ValidationError {
     let (field, safe_code) = match code.as_str() {
+        "email_account_required"
+        | "email_account_host_invalid"
+        | "email_account_port_invalid"
+        | "email_account_username_invalid"
+        | "email_account_from_invalid"
+        | "email_account_password_reference_invalid"
+        | "email_sync_interval_seconds_invalid"
+        | "email_retention_days_invalid"
+        | "email_max_storage_bytes_invalid" => {
+            return map_email_enabled_error(code.clone());
+        }
+        "room_secret_server_url_invalid"
+        | "room_secret_account_invalid"
+        | "room_secret_client_id_reference_invalid"
+        | "room_secret_client_secret_reference_invalid"
+        | "room_secret_master_password_reference_invalid"
+        | "room_secret_sync_wait_timeout_ms_invalid" => {
+            return map_room_secret_enabled_error(code.clone());
+        }
         "tunnel_id_required" => (SetupField::TunnelId, "tunnel_id_required"),
         "tunnel_api_key_reference_invalid" => (
             SetupField::TunnelSecretPath,
@@ -1522,9 +1666,6 @@ fn map_build_error(session: &SetupSession, code: String) -> ValidationError {
             (SetupField::TunnelSha256, "tunnel_download_sha256_required")
         }
         "tunnel_sha256_invalid" => (SetupField::TunnelSha256, "tunnel_sha256_invalid"),
-        "room_config_requires_room_toolset" => {
-            (SetupField::Toolsets, "room_config_requires_room_toolset")
-        }
         _ => (
             match session.selected_mode() {
                 RuntimeMode::Standalone => SetupField::TunnelId,
@@ -1547,11 +1688,15 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::Shell => SetupField::ShellInitFileMode,
         OptionalSection::Toolsets => SetupField::Toolsets,
         OptionalSection::McpServers => SetupField::McpServerId,
+        OptionalSection::Browser
+        | OptionalSection::Skills
+        | OptionalSection::SecurityPolicy
+        | OptionalSection::ConfigManagement => SetupField::Catalog(0),
         OptionalSection::Room => SetupField::RoomTimezone,
+        OptionalSection::RoomSecret => SetupField::RoomSecretServerUrl,
         OptionalSection::Email => SetupField::EmailEnabled,
         OptionalSection::TunnelClient => SetupField::TunnelClientVersion,
         OptionalSection::HubReporting => SetupField::HubReportingDetail,
         OptionalSection::Events => SetupField::EventsLowTtlSeconds,
-        OptionalSection::Additional => SetupField::Catalog(0),
     }
 }

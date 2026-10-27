@@ -647,7 +647,8 @@ mod tests {
         app.config_path = disk_path.clone();
 
         let mut disk = effective.clone();
-        disk.toolsets.enable(crate::config::ToolNamespace::Room);
+        disk.toolsets
+            .enable(crate::config::ToolNamespace::RoomDiary);
         fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
 
         let before_reload = config_health(&app, &effective);
