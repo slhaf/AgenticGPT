@@ -216,7 +216,17 @@ pub(crate) fn numeric_input_value_line(
     theme: &Theme,
 ) -> Line<'static> {
     let mut spans = vec![Span::raw("  "), focus_span(focused, theme)];
-    spans.extend(inline_input_spans(value, editing, cursor, 5, theme));
+    spans.extend(inline_input_spans(
+        value,
+        editing,
+        cursor,
+        value
+            .chars()
+            .count()
+            .saturating_add(usize::from(editing))
+            .clamp(5, 20),
+        theme,
+    ));
     Line::from(spans)
 }
 

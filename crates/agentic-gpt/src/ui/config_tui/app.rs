@@ -13,6 +13,7 @@ use crate::config_templates::{InitSummary, RuntimeMode, SecretValue, TunnelSecre
 use crate::tui::{TerminalEvent, Theme};
 use crate::WorkerProfile;
 
+use super::editor::{EditorAction, StructuredEditor};
 use super::input::{apply_text_key, EditState};
 use super::navigation::{ConfigPage, Navigation, ReturnTarget};
 use super::pages;
@@ -108,6 +109,7 @@ pub(crate) struct ConfigTuiApp {
     review_focus_anchor: Option<ReviewRowKey>,
     language: UiLanguage,
     committer: Box<dyn Committer>,
+    structured_editor: Option<StructuredEditor>,
 }
 
 impl ConfigTuiApp {
@@ -154,6 +156,7 @@ impl ConfigTuiApp {
             review_focus_anchor: None,
             language,
             committer,
+            structured_editor: None,
         }
     }
 
@@ -226,6 +229,29 @@ impl ConfigTuiApp {
     }
 
     pub(crate) fn handle_action(&mut self, action: TuiAction) -> Result<()> {
+        if self.structured_editor.is_some() {
+            let key = match action {
+                TuiAction::Cancel => {
+                    self.structured_editor = None;
+                    None
+                }
+                TuiAction::Next | TuiAction::Activate => Some(KeyCode::Enter),
+                TuiAction::Back => Some(KeyCode::Esc),
+                TuiAction::Text(character) => Some(KeyCode::Char(character)),
+                TuiAction::Backspace => Some(KeyCode::Backspace),
+                TuiAction::Delete | TuiAction::RemoveListItem => Some(KeyCode::Delete),
+                TuiAction::CursorLeft => Some(KeyCode::Left),
+                TuiAction::CursorRight => Some(KeyCode::Right),
+                TuiAction::MoveNext => Some(KeyCode::Down),
+                TuiAction::MovePrevious => Some(KeyCode::Up),
+                TuiAction::AddListItem => Some(KeyCode::Insert),
+                TuiAction::SetMode(_) | TuiAction::SetProfile(_) => return Ok(()),
+            };
+            if let Some(key) = key {
+                self.handle_structured_key(KeyEvent::new(key, KeyModifiers::NONE));
+                return Ok(());
+            }
+        }
         match action {
             TuiAction::Next => {
                 if self.state.editing.is_some() {
@@ -289,10 +315,10 @@ impl ConfigTuiApp {
                 }
             }
             TuiAction::Text(character) => {
-                let accepts_character =
-                    self.state.editing.as_ref().is_none_or(|edit| {
-                        !numeric_field(edit.field) || character.is_ascii_digit()
-                    });
+                let accepts_character = self.state.editing.as_ref().is_none_or(|edit| {
+                    (!edit.field.is_numeric() || character.is_ascii_digit())
+                        && (!edit.field.is_hex() || character.is_ascii_hexdigit())
+                });
                 if accepts_character {
                     self.with_edit(|edit| apply_text_key(edit, KeyCode::Char(character)));
                 }
@@ -351,11 +377,73 @@ impl ConfigTuiApp {
                 );
             }
         }
+        if let Some(editor) = &self.structured_editor {
+            let error = self
+                .field_errors
+                .get(&editor.field())
+                .map(|code| pages::localized_error(code, self.language));
+            editor.render(frame, theme, self.language, error.as_deref());
+        }
+    }
+
+    fn begin_value_edit(&mut self, field: SetupField, value: String) {
+        if let Some(editor) = StructuredEditor::new(field, &value) {
+            self.structured_editor = Some(editor);
+        } else {
+            self.state.editing = Some(EditState::new(field, value));
+        }
+    }
+
+    fn handle_structured_key(&mut self, key: KeyEvent) {
+        let Some(editor) = self.structured_editor.as_mut() else {
+            return;
+        };
+        let field = editor.field();
+        match editor.handle_key(key) {
+            EditorAction::Continue => {}
+            EditorAction::Cancel => {
+                self.structured_editor = None;
+                self.field_errors.remove(&field);
+                self.review_focus_anchor = None;
+            }
+            EditorAction::Submit(value) => {
+                let editor = self.structured_editor.take();
+                let original_section = self.section_draft.clone();
+                let original_connection =
+                    pages::connection_value(self.session(), field).unwrap_or_default();
+                self.state.editing = Some(EditState::new(field, value));
+                self.commit_edit();
+                if self.field_errors.contains_key(&field) {
+                    // Keep failed input in the editor; Esc must still discard the whole attempt.
+                    if matches!(self.state.page, ConfigPage::Optional(_)) {
+                        self.section_draft = original_section;
+                    } else if self.state.page == ConfigPage::Connection {
+                        let draft = self.session_mut().standalone_mut();
+                        match field {
+                            SetupField::HttpMcpBearerToken => {
+                                draft.http_mcp_bearer_token = (!original_connection.is_empty())
+                                    .then(|| SecretValue::new(original_connection));
+                            }
+                            SetupField::HttpMcpAllowHosts => {
+                                draft.http_mcp_allow_hosts = original_connection
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.state.editing = None;
+                    self.structured_editor = editor;
+                }
+            }
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return self.handle_action(TuiAction::Cancel);
+        }
+        if self.structured_editor.is_some() {
+            self.handle_structured_key(key);
+            return Ok(());
         }
         if self.review_preview_active() {
             if self.state.review_preview_search_active {
@@ -468,6 +556,10 @@ impl ConfigTuiApp {
                 KeyCode::Delete => self.handle_action(TuiAction::Delete),
                 KeyCode::Left => self.handle_action(TuiAction::CursorLeft),
                 KeyCode::Right => self.handle_action(TuiAction::CursorRight),
+                KeyCode::Home | KeyCode::End => {
+                    self.with_edit(|edit| apply_text_key(edit, key.code));
+                    Ok(())
+                }
                 KeyCode::Char(character) => self.handle_action(TuiAction::Text(character)),
                 _ => Ok(()),
             };
@@ -719,7 +811,7 @@ impl ConfigTuiApp {
                 }
             } else if let Some(draft) = self.section_draft.as_ref() {
                 let value = pages::optional_field_value(draft, field);
-                self.state.editing = Some(EditState::new(field, value));
+                self.begin_value_edit(field, value);
             }
             return;
         }
@@ -737,6 +829,22 @@ impl ConfigTuiApp {
             SetupField::Profile => {
                 if let Some(profile) = pages::basic_profile_for_focus(self.state.focus) {
                     self.session_mut().set_profile(profile);
+                }
+            }
+            SetupField::HubTransport => {
+                let choices = field.choices();
+                let current = &self.session().hub().hub_transport;
+                let index = choices
+                    .iter()
+                    .position(|choice| choice == current)
+                    .unwrap_or(0);
+                self.session_mut().hub_mut().hub_transport =
+                    choices[(index + 1) % choices.len()].clone();
+                match self.session().validate_field(field) {
+                    Ok(()) => {
+                        self.field_errors.remove(&field);
+                    }
+                    Err(errors) => self.record_errors(errors),
                 }
             }
             SetupField::ProvisionTunnelSecret => {
@@ -766,7 +874,7 @@ impl ConfigTuiApp {
             }
             _ => {
                 let value = pages::connection_value(self.session(), field).unwrap_or_default();
-                self.state.editing = Some(EditState::new(field, value));
+                self.begin_value_edit(field, value);
             }
         }
     }
@@ -1776,11 +1884,10 @@ impl ConfigTuiApp {
             return result;
         }
         if field == SetupField::HttpMcpBearerToken {
-            let previous = self
-                .session_mut()
-                .standalone_mut()
-                .http_mcp_bearer_token
-                .replace(SecretValue::new(value));
+            let previous = std::mem::replace(
+                &mut self.session_mut().standalone_mut().http_mcp_bearer_token,
+                (!value.is_empty()).then(|| SecretValue::new(value)),
+            );
             let result = self.session().validate_field(field);
             if result.is_err() {
                 self.session_mut().standalone_mut().http_mcp_bearer_token = previous;
@@ -2349,7 +2456,7 @@ impl ConfigTuiApp {
                 };
                 self.review_focus_anchor = row_key;
                 self.field_errors.remove(&field);
-                self.state.editing = Some(EditState::new(field, value));
+                self.begin_value_edit(field, value);
             }
             ReviewEditorKind::Choice => {
                 let Some(field) = field else {
@@ -2502,6 +2609,12 @@ impl ConfigTuiApp {
             | SetupField::TunnelSecretEnvironment
             | SetupField::ProvisionTunnelSecret
             | SetupField::TunnelSecretValue
+            | SetupField::HttpMcpEnabled
+            | SetupField::HttpMcpHost
+            | SetupField::HttpMcpPort
+            | SetupField::HttpMcpPublicUrl
+            | SetupField::HttpMcpBearerToken
+            | SetupField::HttpMcpAllowHosts
             | SetupField::HubUrl
             | SetupField::HubEnabled
             | SetupField::HubTransport
@@ -2640,6 +2753,7 @@ impl ConfigTuiApp {
             message: system_error_message(code, self.language),
         });
         self.state.page = ConfigPage::SystemError;
+        self.structured_editor = None;
         self.state.focus = 0;
         self.state.editing = None;
         self.state.list_edit = None;
@@ -2647,17 +2761,6 @@ impl ConfigTuiApp {
         self.section_draft = None;
         self.section_original = None;
     }
-}
-
-fn numeric_field(field: SetupField) -> bool {
-    matches!(
-        field,
-        SetupField::MaxConcurrentTasks
-            | SetupField::MaxActiveProcesses
-            | SetupField::MaxFileSearchContextLines
-            | SetupField::ProcessResponseBytes
-            | SetupField::DiaryBoundaryHour
-    )
 }
 
 fn optional_section_for_field(field: SetupField) -> crate::config_templates::OptionalSection {
@@ -3018,3 +3121,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "input_tests.rs"]
+mod input_tests;

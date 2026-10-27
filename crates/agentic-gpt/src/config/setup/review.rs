@@ -196,52 +196,8 @@ impl ReviewItem {
         }
     }
 
-    pub(crate) fn choice_values(&self) -> &'static [&'static str] {
-        match self.field {
-            Some(SetupField::Mode) => &["standalone", "hub", "local"],
-            Some(SetupField::Profile) => &["normal", "room"],
-            Some(SetupField::TunnelSecretSource) => &["file", "env"],
-            Some(SetupField::HubTransport) => &["websocket", "sse"],
-            Some(SetupField::ShellInitFileMode) => &["default", "disabled", "path"],
-            Some(SetupField::ConfirmationLanguage) => &["zh-CN", "en"],
-            Some(SetupField::PathDefaultAction) => &["allow", "deny"],
-            Some(SetupField::EmailImapTls | SetupField::EmailSmtpTls) => &["implicit", "starttls"],
-            Some(SetupField::EmailSendPolicy | SetupField::EmailTrashPolicy) => {
-                &["allow", "confirm", "deny"]
-            }
-            Some(SetupField::EmailEnabled) => &["false", "true"],
-            Some(
-                SetupField::RoomSecretGetPolicy
-                | SetupField::RoomSecretUpsertPolicy
-                | SetupField::RoomSecretDeletePolicy,
-            ) => &["allow", "confirm"],
-            Some(SetupField::RoomSecretEnabled) => &["false", "true"],
-            Some(SetupField::RoomMaintenanceMode) => &["local", "workflow"],
-            Some(
-                SetupField::ProvisionTunnelSecret
-                | SetupField::HttpMcpEnabled
-                | SetupField::HubEnabled
-                | SetupField::Bubblewrap
-                | SetupField::TunnelAutoDownload
-                | SetupField::HubReportingEnabled
-                | SetupField::RoomMaintenanceAutoPush,
-            ) => &["false", "true"],
-            Some(SetupField::HubReportingDetail) => &["metadata", "full"],
-            Some(
-                SetupField::EventProcessCompletedLevel
-                | SetupField::EventProcessFailedLevel
-                | SetupField::EventProcessRejectedLevel
-                | SetupField::EventProcessCancelledLevel
-                | SetupField::EventProcessTimedOutLevel
-                | SetupField::EventProcessDetachedLevel
-                | SetupField::EventProcessUnknownAfterRestartLevel
-                | SetupField::EventProcessSkippedLevel
-                | SetupField::EventSkillInstallCompletedLevel
-                | SetupField::EventSkillInstallFailedLevel
-                | SetupField::EventSkillInstallCancelledLevel,
-            ) => &["inherit", "low", "medium", "high", "off"],
-            _ => &[],
-        }
+    pub(crate) fn choice_values(&self) -> Vec<String> {
+        self.field.map(SetupField::choices).unwrap_or_default()
     }
 }
 

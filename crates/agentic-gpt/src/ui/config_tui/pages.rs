@@ -48,15 +48,25 @@ fn editor_title(session: &SetupSession, language: UiLanguage) -> &'static str {
     }
 }
 
-fn localized_error(code: &str, language: UiLanguage) -> String {
+pub(super) fn localized_error(code: &str, language: UiLanguage) -> String {
     let key = code.split(':').next().unwrap_or(code).trim();
     let (en, zh) = match key {
-        "config_edit_validation_failed" => ("The latest file cannot accept these edits. The configuration was not written; review the fields and retry.", "最新文件无法接受这些修改，未写入配置。请检查配置项后重试。"),
-        "config_init_catalog_value_invalid" => ("Enter a value matching this field's documented type.", "请输入符合本字段说明与类型的值。"),
+        "config_edit_validation_failed" => (
+            "The latest file cannot accept these edits. The configuration was not written; review the fields and retry.",
+            "最新文件无法接受这些修改，未写入配置。请检查配置项后重试。",
+        ),
+        "config_init_catalog_value_invalid" => (
+            "Enter a value matching this field's documented type.",
+            "请输入符合本字段说明与类型的值。",
+        ),
         "config_init_required_value_missing" => ("Required value is missing.", "必填项不能为空。"),
         "config_init_secret_empty" => ("Secret must not be empty.", "密钥不能为空。"),
         "config_init_secret_path_invalid" => ("Secret path is invalid.", "密钥路径无效。"),
         "config_init_secret_source_invalid" => ("Secret source is invalid.", "密钥来源无效。"),
+        "hub_transport_invalid" => (
+            "Choose websocket or sse for the Hub transport.",
+            "Hub 传输方式请选择 websocket 或 sse。",
+        ),
         "config_init_number_invalid" => ("Enter a valid number.", "请输入有效数字。"),
         "config_init_path_policy_invalid" => (
             "Choose allow or deny and enter valid path-root arrays.",
@@ -118,8 +128,12 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         | "http_mcp_allow_hosts_empty"
         | "http_mcp_allow_hosts_wildcard_mixed"
         | "http_mcp_allow_host_invalid" => (
-            "allowHosts must be null, [\"*\"], or a non-empty authority array.",
-            "allowHosts 必须是 null、[\"*\"] 或非空 authority 数组。",
+            "Choose automatic validation, all hosts, or a non-empty list of valid host authorities; use * alone for all hosts.",
+            "请选择自动校验、允许全部主机或非空的有效主机列表；允许全部时只能单独使用 *。",
+        ),
+        "hub_url_invalid" => (
+            "Enter a valid HTTP(S) Hub base URL.",
+            "请输入有效的 Hub HTTP(S) 基地址。",
         ),
         "config_init_optional_section_invalid" => {
             ("Optional section is invalid.", "可选配置区块无效。")
@@ -186,6 +200,14 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "email_config_invalid" => (
             "Use implicit/starttls for TLS and allow/confirm/deny for policies.",
             "加密方式使用 implicit/starttls，策略使用 allow/confirm/deny。",
+        ),
+        "email_tls_invalid" => (
+            "Choose implicit or starttls for the email connection security mode.",
+            "邮件连接加密方式请选择 implicit 或 starttls。",
+        ),
+        "email_policy_invalid" => (
+            "Choose allow, confirm, or deny for the email action policy.",
+            "邮件操作策略请选择 allow、confirm 或 deny。",
         ),
         "email_account_required" => (
             "Configure the email account before enabling email.",
@@ -624,6 +646,32 @@ fn render_connection(
                             row,
                         );
                     }
+                } else if matches!(
+                    field,
+                    SetupField::HubTransport | SetupField::HttpMcpAllowHosts
+                ) {
+                    if let Some(row) = next_surface_row(left, &mut cursor) {
+                        let summary = match field {
+                            SetupField::HttpMcpAllowHosts => match value.trim() {
+                                "null" => t(language, "Automatic validation", "自动校验"),
+                                "[\"*\"]" => {
+                                    t(language, "All hosts explicitly", "显式允许全部主机")
+                                }
+                                _ => t(language, "Custom host list", "自定义主机列表"),
+                            },
+                            _ => value,
+                        };
+                        frame.render_widget(
+                            Paragraph::new(value_row_line(
+                                &label,
+                                summary,
+                                focused,
+                                CONNECTION_LABEL_WIDTH,
+                                theme,
+                            )),
+                            row,
+                        );
+                    }
                 } else if let Some(row) = next_surface_row(left, &mut cursor) {
                     let edit_cursor = editing_cursor(state, field);
                     let editing = edit_cursor.is_some();
@@ -736,16 +784,21 @@ fn render_connection_footer(
     let action = if action_focused {
         t(language, "continue", "继续")
     } else if connection_secret_source_for_focus(session, state.focus).is_some()
-        || matches!(
-            field,
-            Some(
-                SetupField::ProvisionTunnelSecret
-                    | SetupField::HttpMcpEnabled
-                    | SetupField::HubEnabled
-            )
-        )
+        || matches!(field, Some(SetupField::HttpMcpBearerToken))
     {
+        t(language, "configure", "配置")
+    } else if matches!(
+        field,
+        Some(
+            SetupField::ProvisionTunnelSecret | SetupField::HttpMcpEnabled | SetupField::HubEnabled
+        )
+    ) {
         t(language, "toggle", "切换")
+    } else if matches!(
+        field,
+        Some(SetupField::HubTransport | SetupField::HttpMcpAllowHosts)
+    ) {
+        t(language, "configure", "配置")
     } else {
         t(language, "edit", "编辑")
     };
@@ -893,22 +946,24 @@ fn connection_inspector_body(
         },
         Some(SetupField::TunnelSecretPath) => match language {
             UiLanguage::En => &[
-                "The Tunnel API key is read from this file at startup.",
-                "Default: ~/.agentic_gpt/secrets/tunnel-api-key; naming the path does not create it.",
+                "Enter the file path from which startup reads the Tunnel API key.",
+                "Default: ~/.agentic_gpt/secrets/tunnel-api-key; ~ expands to the current user's home directory.",
+                "The path reference does not create the file unless provisioning is enabled.",
             ],
             UiLanguage::ZhCn => &[
-                "启动时从此文件读取 Tunnel API key。",
-                "默认 ~/.agentic_gpt/secrets/tunnel-api-key；填写路径本身不会创建文件。",
+                "启动时从此文件路径读取 Tunnel API key。",
+                "默认 ~/.agentic_gpt/secrets/tunnel-api-key；~ 会展开为当前用户的主目录。",
+                "填写路径不会创建文件；只有开启立即写入后才会创建。",
             ],
         },
         Some(SetupField::TunnelSecretEnvironment) => match language {
             UiLanguage::En => &[
-                "The Tunnel API key is read from this environment variable at startup.",
-                "Enter a valid variable name and ensure the launching process receives a non-empty value.",
+                "Enter the environment variable name that contains the Tunnel API key, without an env: prefix.",
+                "Ensure the launching process receives a non-empty value for this name.",
             ],
             UiLanguage::ZhCn => &[
-                "启动时从这个环境变量读取 Tunnel API key。",
-                "切到 env 后必须填写有效变量名，并确保启动进程能读取到非空值。",
+                "填写保存 Tunnel API key 的环境变量名，不要添加 env: 前缀。",
+                "请确保启动进程能通过该名称读取到非空值。",
             ],
         },
         Some(SetupField::ProvisionTunnelSecret) => match language {
@@ -943,11 +998,11 @@ fn connection_inspector_body(
         },
         Some(SetupField::HttpMcpHost) => match language {
             UiLanguage::En => &[
-                "Host address where the standalone HTTP MCP listener binds.",
+                "Enter a hostname or IP address, not a URL, for the standalone HTTP MCP listener.",
                 "Default: 127.0.0.1.",
             ],
             UiLanguage::ZhCn => &[
-                "Standalone HTTP MCP 监听器绑定的主机地址。",
+                "填写 Standalone HTTP MCP 监听器绑定的主机名或 IP 地址，不要填写 URL。",
                 "默认：127.0.0.1。",
             ],
         },
@@ -963,11 +1018,11 @@ fn connection_inspector_body(
         },
         Some(SetupField::HttpMcpPublicUrl) => match language {
             UiLanguage::En => &[
-                "External HTTPS origin advertised to ChatGPT for standalone HTTP MCP OAuth.",
+                "Enter an HTTPS origin such as https://mcp.example.com; do not include a path, query, fragment, or user information.",
                 "Optional for direct bearer use; leave empty to disable OAuth discovery and token issuance.",
             ],
             UiLanguage::ZhCn => &[
-                "向 ChatGPT 公布的 Standalone HTTP MCP OAuth 外部 HTTPS 来源。",
+                "填写 HTTPS 来源，例如 https://mcp.example.com；不要包含路径、查询参数、片段或用户信息。",
                 "直接 Bearer 使用时可选；留空会关闭 OAuth 发现和令牌签发。",
             ],
         },
@@ -983,22 +1038,24 @@ fn connection_inspector_body(
         },
         Some(SetupField::HttpMcpAllowHosts) => match language {
             UiLanguage::En => &[
-                "JSON authority allowlist for HTTP Host validation.",
-                "Use a non-empty array, null, or [\"*\"] for explicit unrestricted access.",
+                "Choose automatic validation (null), allow every host ([\"*\"]), or edit a list of host authorities.",
+                "A custom list must contain at least one authority, such as example.com or example.com:8443.",
+                "The wildcard cannot be mixed with other entries.",
             ],
             UiLanguage::ZhCn => &[
-                "HTTP Host 校验使用的 JSON authority 白名单。",
-                "使用非空数组、null 或 [\"*\"] 明确允许全部主机。",
+                "选择自动校验（null）、允许全部主机（[\"*\"]）或逐项编辑主机 authority 列表。",
+                "自定义列表至少包含一项，例如 example.com 或 example.com:8443。",
+                "通配符不能与其他条目混用。",
             ],
         },
         Some(SetupField::HubUrl) => match language {
             UiLanguage::En => &[
-                "Base URL of the Hub this agent connects to.",
-                "Default: http://localhost:8787; change it when the Hub is not running locally.",
+                "Enter the Hub's HTTP(S) base URL, for example http://localhost:8787; do not append an API path.",
+                "Use the Hub host and port reachable from this Agent.",
             ],
             UiLanguage::ZhCn => &[
-                "Agent 连接的 Hub 基地址。",
-                "默认 http://localhost:8787；Hub 不在本机时改为它的 HTTP(S) 地址。",
+                "填写 Hub 的 HTTP(S) 基地址，例如 http://localhost:8787；末尾不要附加 API 路径。",
+                "请使用此 Agent 实际可访问的 Hub 主机和端口。",
             ],
         },
         Some(SetupField::HubTransport) => match language {
@@ -1162,23 +1219,30 @@ fn connection_label(field: SetupField, _value: Option<&str>, language: UiLanguag
     match field {
         SetupField::TunnelId => t(language, "Tunnel ID", "隧道 ID").to_string(),
         SetupField::TunnelSecretSource => t(language, "Secret source", "密钥来源").to_string(),
-        SetupField::TunnelSecretPath => t(language, "Secret file", "密钥文件").to_string(),
+        SetupField::TunnelSecretPath => {
+            t(language, "Secret file reference", "密钥文件引用").to_string()
+        }
         SetupField::TunnelSecretEnvironment => {
-            t(language, "Secret environment", "密钥环境变量").to_string()
+            t(language, "Secret environment variable", "密钥环境变量名").to_string()
         }
         SetupField::ProvisionTunnelSecret => {
             t(language, "Provision secret now", "立即写入密钥").to_string()
         }
-        SetupField::TunnelSecretValue => t(language, "Secret value", "密钥值").to_string(),
+        SetupField::TunnelSecretValue => {
+            t(language, "Secret value to provision", "要写入的密钥值").to_string()
+        }
         SetupField::HttpMcpEnabled => t(language, "HTTP MCP enabled", "启用 HTTP MCP").to_string(),
         SetupField::HttpMcpHost => t(language, "HTTP MCP host", "HTTP MCP 主机").to_string(),
         SetupField::HttpMcpPort => t(language, "HTTP MCP port", "HTTP MCP 端口").to_string(),
         SetupField::HttpMcpPublicUrl => {
             t(language, "HTTP MCP public URL", "HTTP MCP 公共 URL").to_string()
         }
-        SetupField::HttpMcpBearerToken => {
-            t(language, "HTTP MCP bearer token", "HTTP MCP Bearer 令牌").to_string()
-        }
+        SetupField::HttpMcpBearerToken => t(
+            language,
+            "HTTP MCP bearer token reference",
+            "HTTP MCP Bearer 令牌引用",
+        )
+        .to_string(),
         SetupField::HttpMcpAllowHosts => {
             t(language, "HTTP MCP allowHosts", "HTTP MCP allowHosts").to_string()
         }
@@ -1571,6 +1635,31 @@ fn render_optional_form(
                         language,
                         theme,
                         errors,
+                    );
+                } else if matches!(
+                    field,
+                    SetupField::EmailImapTls
+                        | SetupField::EmailSmtpTls
+                        | SetupField::EmailSendPolicy
+                        | SetupField::EmailTrashPolicy
+                ) {
+                    let choices = field
+                        .static_choices()
+                        .iter()
+                        .map(|value| (*value, *value))
+                        .collect::<Vec<_>>();
+                    push_choice_group(
+                        &mut lines,
+                        &mut focused_line,
+                        section,
+                        draft,
+                        state,
+                        field,
+                        optional_field_label(field, language),
+                        &choices,
+                        theme,
+                        errors,
+                        language,
                     );
                 } else {
                     push_long_form_field(
@@ -1973,16 +2062,7 @@ fn push_long_form_field(
     } else {
         None
     };
-    if catalog_entry
-        .as_ref()
-        .is_some_and(|entry| entry.kind.contains("integer"))
-        || matches!(
-            field,
-            SetupField::DiaryBoundaryHour
-                | SetupField::EventsLowTtlSeconds
-                | SetupField::RoomSecretSyncWaitTimeoutMs
-        )
-    {
+    if field.is_numeric() {
         lines.push(numeric_input_value_line(
             current,
             focused,
@@ -3039,23 +3119,46 @@ pub(super) fn optional_focus_items(
                 .collect(),
             _ => Vec::new(),
         },
-        OptionalSection::Email => vec![
-            OptionalFocusItem::Field(SetupField::EmailEnabled),
-            OptionalFocusItem::Field(SetupField::EmailImapHost),
-            OptionalFocusItem::Field(SetupField::EmailImapPort),
-            OptionalFocusItem::Field(SetupField::EmailImapTls),
-            OptionalFocusItem::Field(SetupField::EmailSmtpHost),
-            OptionalFocusItem::Field(SetupField::EmailSmtpPort),
-            OptionalFocusItem::Field(SetupField::EmailSmtpTls),
-            OptionalFocusItem::Field(SetupField::EmailUsername),
-            OptionalFocusItem::Field(SetupField::EmailPassword),
-            OptionalFocusItem::Field(SetupField::EmailFrom),
-            OptionalFocusItem::Field(SetupField::EmailSyncInterval),
-            OptionalFocusItem::Field(SetupField::EmailRetentionDays),
-            OptionalFocusItem::Field(SetupField::EmailMaxStorageBytes),
-            OptionalFocusItem::Field(SetupField::EmailSendPolicy),
-            OptionalFocusItem::Field(SetupField::EmailTrashPolicy),
-        ],
+        OptionalSection::Email => {
+            let mut items = vec![
+                OptionalFocusItem::Field(SetupField::EmailEnabled),
+                OptionalFocusItem::Field(SetupField::EmailImapHost),
+                OptionalFocusItem::Field(SetupField::EmailImapPort),
+            ];
+            for field in [SetupField::EmailImapTls, SetupField::EmailSmtpTls] {
+                items.extend(
+                    field
+                        .static_choices()
+                        .iter()
+                        .copied()
+                        .map(|value| OptionalFocusItem::Choice { field, value }),
+                );
+                if field == SetupField::EmailImapTls {
+                    items.extend([
+                        OptionalFocusItem::Field(SetupField::EmailSmtpHost),
+                        OptionalFocusItem::Field(SetupField::EmailSmtpPort),
+                    ]);
+                }
+            }
+            items.extend([
+                OptionalFocusItem::Field(SetupField::EmailUsername),
+                OptionalFocusItem::Field(SetupField::EmailPassword),
+                OptionalFocusItem::Field(SetupField::EmailFrom),
+                OptionalFocusItem::Field(SetupField::EmailSyncInterval),
+                OptionalFocusItem::Field(SetupField::EmailRetentionDays),
+                OptionalFocusItem::Field(SetupField::EmailMaxStorageBytes),
+            ]);
+            for field in [SetupField::EmailSendPolicy, SetupField::EmailTrashPolicy] {
+                items.extend(
+                    field
+                        .static_choices()
+                        .iter()
+                        .copied()
+                        .map(|value| OptionalFocusItem::Choice { field, value }),
+                );
+            }
+            items
+        }
         OptionalSection::Room => vec![
             OptionalFocusItem::Field(SetupField::RoomTimezone),
             OptionalFocusItem::Field(SetupField::DiaryBoundaryHour),
@@ -3428,7 +3531,10 @@ fn optional_center_inspector_body(
     match section {
         Some(section) => match language {
             UiLanguage::En => match section {
-                OptionalSection::Additional => &["Edit Browser, Skills, command policy and configuration update settings.", "Each field uses its catalog type; arrays support item editing, addition and removal."],
+                OptionalSection::Additional => &[
+                    "Edit Browser, Skills, command policy and configuration update settings.",
+                    "Each field uses its catalog type; arrays support item editing, addition and removal.",
+                ],
                 OptionalSection::Identity => &[
                     "Set the human-readable name shown for this agent.",
                     "The display name is separate from the Agent ID used for routing.",
@@ -3506,7 +3612,10 @@ fn optional_center_inspector_body(
                 ],
             },
             UiLanguage::ZhCn => match section {
-                OptionalSection::Additional => &["编辑 Browser、Skills、命令策略及配置更新设置。", "各字段按目录类型编辑；数组支持逐项编辑、增加和删除。"],
+                OptionalSection::Additional => &[
+                    "编辑 Browser、Skills、命令策略及配置更新设置。",
+                    "各字段按目录类型编辑；数组支持逐项编辑、增加和删除。",
+                ],
                 OptionalSection::Identity => &[
                     "设置此 Agent 的可读显示名称。",
                     "显示名称与用于路由的 Agent ID 相互独立。",
@@ -3710,6 +3819,50 @@ fn optional_form_inspector_body(
                     "Enter the token without the Bearer prefix.",
                     "The TUI masks this value and redacts it from the final JSON preview.",
                 ],
+                SetupField::EmailEnabled => &[
+                    "Enable email tools. Configure both IMAP and SMTP account details before turning this on.",
+                ],
+                SetupField::EmailImapHost | SetupField::EmailSmtpHost => &[
+                    "Enter a server hostname or IP address without a URL scheme, path, or credentials.",
+                    "Example: imap.example.com. The account settings require both IMAP and SMTP hosts.",
+                ],
+                SetupField::EmailImapPort | SetupField::EmailSmtpPort => &[
+                    "Enter a TCP port from 1 through 65535.",
+                    "Defaults: IMAP 993; SMTP 465. TLS mode may affect the server's expected port.",
+                ],
+                SetupField::EmailImapTls | SetupField::EmailSmtpTls => &[
+                    "implicit starts TLS immediately; starttls upgrades the connection after connecting.",
+                    "Select the mode supported by the corresponding mail server.",
+                ],
+                SetupField::EmailUsername => &[
+                    "Enter the account username used to authenticate with the mail server.",
+                    "It must be non-empty when an account is configured.",
+                ],
+                SetupField::EmailPassword => &[
+                    "Enter a secret reference, not the password itself: env:NAME or file:/absolute/path.",
+                    "The referenced value is resolved when the email account connects.",
+                ],
+                SetupField::EmailFrom => &[
+                    "Enter one sender email address without a display name, commas, or angle brackets.",
+                    "Example: agent@example.com.",
+                ],
+                SetupField::EmailSyncInterval => {
+                    &["Sync interval in seconds; valid range: 10–86400. Default: 60."]
+                }
+                SetupField::EmailRetentionDays => {
+                    &["Number of days to retain email content; valid range: 1–36500. Default: 90."]
+                }
+                SetupField::EmailMaxStorageBytes => &[
+                    "Maximum local email storage in bytes; minimum: 1048576 (1 MiB). Default: 2147483648 (2 GiB).",
+                ],
+                SetupField::EmailSendPolicy => &[
+                    "Choose whether sending is allowed directly, requires confirmation, or is denied.",
+                    "Default: confirm.",
+                ],
+                SetupField::EmailTrashPolicy => &[
+                    "Choose whether moving messages to Trash is allowed directly, requires confirmation, or is denied.",
+                    "Default: confirm.",
+                ],
                 SetupField::RoomSecretEnabled => &[
                     "Enable Room Secret on the active Room toolset.",
                     "Configure the server, account and all three credential references first.",
@@ -3744,7 +3897,8 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::RoomTimezone => &[
                     "Timezone used to assign Room diary and Notebook dates.",
-                    "Default: Asia/Shanghai. Use an IANA timezone such as Europe/Berlin.",
+                    "Enter an IANA timezone identifier in Area/Location form, such as Asia/Shanghai or Europe/Berlin.",
+                    "Default: Asia/Shanghai.",
                     "",
                     "The wizard checks only that it is non-empty; an invalid timezone fails at runtime.",
                 ],
@@ -3935,6 +4089,50 @@ fn optional_form_inspector_body(
                     "只填写 token 本身，不要带 Bearer 前缀。",
                     "TUI 会掩码该值，并在最终 JSON 预览中脱敏。",
                 ],
+                SetupField::EmailEnabled => {
+                    &["开启邮件工具；启用前需要填写完整的 IMAP 和 SMTP 账户信息。"]
+                }
+                SetupField::EmailImapHost | SetupField::EmailSmtpHost => &[
+                    "填写服务器主机名或 IP 地址，不带 URL 协议、路径或登录凭据。",
+                    "例如 imap.example.com；账户配置需要同时填写 IMAP 和 SMTP 主机。",
+                ],
+                SetupField::EmailImapPort | SetupField::EmailSmtpPort => &[
+                    "填写 1 到 65535 之间的 TCP 端口。",
+                    "默认值：IMAP 993、SMTP 465；服务器的 TLS 模式可能要求不同端口。",
+                ],
+                SetupField::EmailImapTls | SetupField::EmailSmtpTls => &[
+                    "implicit 表示连接后立即启用 TLS；starttls 表示连接后再升级加密。",
+                    "请选择对应邮件服务器支持的模式。",
+                ],
+                SetupField::EmailUsername => &[
+                    "填写登录邮件服务器时使用的账户名。",
+                    "配置账户时此项不能为空。",
+                ],
+                SetupField::EmailPassword => &[
+                    "填写密钥引用，不要填写密码明文：env:NAME 或 file:/绝对路径。",
+                    "连接邮件账户时会解析引用对应的密钥值。",
+                ],
+                SetupField::EmailFrom => &[
+                    "填写单个发件邮箱地址，不含显示名、逗号或尖括号。",
+                    "例如 agent@example.com。",
+                ],
+                SetupField::EmailSyncInterval => {
+                    &["同步间隔，单位秒；有效范围 10–86400，默认 60。"]
+                }
+                SetupField::EmailRetentionDays => {
+                    &["邮件内容保留天数；有效范围 1–36500，默认 90。"]
+                }
+                SetupField::EmailMaxStorageBytes => &[
+                    "邮件本地存储容量上限，单位字节；至少 1048576（1 MiB），默认 2147483648（2 GiB）。",
+                ],
+                SetupField::EmailSendPolicy => &[
+                    "选择直接允许发送、要求确认后发送，或拒绝发送。",
+                    "默认：confirm。",
+                ],
+                SetupField::EmailTrashPolicy => &[
+                    "选择直接允许移入垃圾箱、要求确认，或拒绝移入垃圾箱。",
+                    "默认：confirm。",
+                ],
                 SetupField::RoomSecretEnabled => &[
                     "在已启用的 Room 工具集中开启密钥服务。",
                     "请先填写服务地址、账号和三个凭据引用。",
@@ -3969,7 +4167,8 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::RoomTimezone => &[
                     "Room 日记和 Notebook 日期归属使用的时区。",
-                    "默认 Asia/Shanghai；建议使用 Europe/Berlin 这类 IANA 时区。",
+                    "填写 IANA 时区标识，格式通常为区域/地点，例如 Asia/Shanghai 或 Europe/Berlin。",
+                    "默认 Asia/Shanghai。",
                     "",
                     "向导只检查非空；无效时区会在运行时失败。",
                 ],
@@ -4636,9 +4835,9 @@ fn render_review(
                     if item.editor == ReviewEditorKind::Choice && item.choice_values().len() > 2 {
                         for choice in item.choice_values() {
                             lines.push(choice_row_line(
-                                choice,
-                                editing.buffer == *choice,
-                                item.value.eq_ignore_ascii_case(choice),
+                                &choice,
+                                editing.buffer == choice,
+                                item.value.eq_ignore_ascii_case(&choice),
                                 0,
                                 theme,
                             ));
