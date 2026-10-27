@@ -2243,14 +2243,16 @@ fn commit_new_file(temp: &Path, target: &Path) -> std::result::Result<(), FileEr
 fn commit_replace(change: &mut PlannedChange) -> std::result::Result<(), FileError> {
     let temp = change
         .temp
-        .take()
+        .as_ref()
         .ok_or_else(|| FileError::new("file_write_failed", "staged file is missing"))?;
     fs::rename(temp, &change.target.path).map_err(|error| {
         FileError::new(
             "file_write_failed",
             &format!("atomic file commit failed: {error}"),
         )
-    })
+    })?;
+    change.temp = None;
+    Ok(())
 }
 
 fn commit_delete(change: &mut PlannedChange) -> std::result::Result<(), FileError> {
@@ -2266,7 +2268,7 @@ fn commit_move(change: &mut PlannedChange) -> std::result::Result<(), FileError>
         .ok_or_else(|| FileError::new("file_write_failed", "move destination is missing"))?;
     let temp = change
         .temp
-        .take()
+        .as_ref()
         .ok_or_else(|| FileError::new("file_write_failed", "staged file is missing"))?;
     fs::rename(temp, &destination.requested).map_err(|error| {
         FileError::new(
@@ -2274,6 +2276,7 @@ fn commit_move(change: &mut PlannedChange) -> std::result::Result<(), FileError>
             &format!("move destination commit failed: {error}"),
         )
     })?;
+    change.temp = None;
     let source = change
         .source
         .as_ref()
@@ -3102,6 +3105,82 @@ mod tests {
             0o640
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_replace_and_move_renames_leave_no_staged_files() {
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        // Tier ⑤: real rename failures must preserve existing data and release
+        // staged files; the source-removal test covers a later failure instead.
+        let root = Cleanup(
+            std::env::temp_dir().join(format!("file-rename-cleanup-{}", uuid::Uuid::new_v4())),
+        );
+        let mut leaked = Vec::new();
+        for action in ["update", "move"] {
+            let workspace = root.0.join(action);
+            fs::create_dir_all(&workspace).unwrap();
+            fs::write(workspace.join("source.txt"), b"original\n").unwrap();
+            let config = config(&workspace);
+            let source = resolve_path(&config, "source.txt", Access::Write).unwrap();
+            let destination = (action == "move")
+                .then(|| resolve_absent_path(&config, "destination.txt").unwrap());
+            let target = destination.as_ref().unwrap_or(&source).clone();
+            let candidate = b"replacement\n".to_vec();
+            let temp = stage_temp(&target.path, &candidate, None).unwrap();
+            let retained_source = if action == "update" {
+                let saved = workspace.join("retained-source.txt");
+                fs::rename(&source.path, &saved).unwrap();
+                saved
+            } else {
+                source.path.clone()
+            };
+            // Replace the target with a populated directory after staging. A
+            // file cannot rename over it, regardless of the runner's privileges.
+            fs::create_dir(&target.path).unwrap();
+            fs::write(target.path.join("keep.txt"), b"keep\n").unwrap();
+            let blocked_target = target.path.clone();
+            let mut change = PlannedChange {
+                action,
+                source: Some(source),
+                target,
+                parents_to_create: Vec::new(),
+                destination,
+                before_bytes: Some(b"original\n".to_vec()),
+                before_revision: Some(revision(b"original\n")),
+                before_mode: None,
+                candidate: Some(candidate),
+                after_revision: Some(revision(b"replacement\n")),
+                changed_lines: ChangedLines {
+                    added: 1,
+                    removed: 1,
+                },
+                status: ChangeStatus::Pending,
+                temp: Some(temp.clone()),
+            };
+            let error = match action {
+                "update" => commit_replace(&mut change),
+                _ => commit_move(&mut change),
+            }
+            .unwrap_err();
+            cleanup_temps(std::slice::from_mut(&mut change));
+
+            assert_eq!(error.code, "file_write_failed");
+            assert_eq!(fs::read(retained_source).unwrap(), b"original\n");
+            assert_eq!(
+                fs::read(blocked_target.join("keep.txt")).unwrap(),
+                b"keep\n"
+            );
+            if temp.exists() {
+                leaked.push(action);
+            }
+        }
+        assert!(leaked.is_empty(), "staged files leaked after {leaked:?}");
     }
 
     #[test]
