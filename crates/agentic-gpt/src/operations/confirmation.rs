@@ -117,7 +117,7 @@ fn confirmation_content(
             short_confirmation_text(identity, 40 - suffix.chars().count())
         ),
         body: acquisition
-            .map(|a| a.reason.trim().to_string())
+            .map(|a| a.reason.as_str().trim().to_string())
             .unwrap_or_else(|| short_confirmation_text(automatic_reason, 100)),
     }
 }
@@ -247,9 +247,6 @@ pub(crate) async fn authorize_operation_cancellable(
     use crate::policy::PolicyDecision;
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
-    }
-    if let Some(acquisition) = acquisition {
-        acquisition.validate()?;
     }
     let method = acquisition
         .and_then(|a| a.method.as_ref())

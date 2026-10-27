@@ -63,12 +63,6 @@ pub(crate) struct ReadOutput {
     pub(crate) encoded_image_bytes: usize,
 }
 
-#[derive(Debug)]
-pub(crate) struct ReadBatchOutput {
-    pub(crate) value: Value,
-    pub(crate) images_by_result: Vec<Vec<FileImageBlock>>,
-}
-
 #[cfg(test)]
 static INJECT_EXTERNAL_CHANGE: Mutex<Vec<(PathBuf, Vec<u8>)>> = Mutex::new(Vec::new());
 
@@ -246,7 +240,6 @@ pub(crate) fn resolve_path(
     } else {
         config.workspace_root.join(expanded)
     };
-    fs::symlink_metadata(&candidate).map_err(|error| path_io_error(error, &candidate, false))?;
     let resolved =
         fs::canonicalize(&candidate).map_err(|error| path_io_error(error, &candidate, false))?;
     check_policy(config, &resolved, access)?;
@@ -534,7 +527,7 @@ pub(crate) fn read_with_images(
             "line range is invalid",
         ));
     }
-    let (content, next_start) = bounded_lines(&text, start, end)?;
+    let (content, next_start) = bounded_lines(&text, total_lines, start, end)?;
     let mut result = json!({"content": content});
     if let Some(next_start) = next_start {
         result["nextStartLine"] = json!(next_start);
@@ -1309,10 +1302,10 @@ fn line_count(text: &str) -> usize {
 
 fn bounded_lines(
     text: &str,
+    total_lines: usize,
     start: usize,
     end: usize,
 ) -> std::result::Result<(String, Option<usize>), FileError> {
-    let total_lines = line_count(text);
     if text.is_empty() || start > total_lines {
         return Ok((String::new(), None));
     }
@@ -1392,29 +1385,22 @@ pub(crate) async fn read_batch_with_images(
     state: &AppState,
     requests: &[ReadRequest],
     acquisition: Option<AcquireConfirmation>,
-) -> ReadBatchOutput {
+) -> Vec<std::result::Result<ReadOutput, FileError>> {
     let base = state.config.read().await.clone();
-    let config = match authorize_read_requests(state, &base, requests, acquisition.as_ref(), None)
-        .await
-    {
-        Ok(config) => config,
-        Err(error) => {
-            return ReadBatchOutput {
-                value: finalize_read_search_batch(
-                    requests
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| envelope(i, Err(FileError::new(&error.code, &error.message))))
-                        .collect(),
-                ),
-                images_by_result: (0..requests.len()).map(|_| Vec::new()).collect(),
+    let config =
+        match authorize_read_requests(state, &base, requests, acquisition.as_ref(), None).await {
+            Ok(config) => config,
+            Err(error) => {
+                return requests
+                    .iter()
+                    .map(|_| Err(FileError::new(&error.code, &error.message)))
+                    .collect();
             }
-        }
-    };
+        };
     let mut image_budget_used = 0usize;
-    let mut images_by_result = Vec::with_capacity(requests.len());
-    let mut results = Vec::with_capacity(requests.len());
-    for (index, request) in requests.iter().enumerate() {
+    let mut results: Vec<std::result::Result<ReadOutput, FileError>> =
+        Vec::with_capacity(requests.len());
+    for request in requests {
         let result = resolve_path(&config, &request.path, Access::Read).and_then(|resolved| {
             read_with_images(
                 &resolved,
@@ -1429,13 +1415,11 @@ pub(crate) async fn read_batch_with_images(
                 while image_budget_used.saturating_add(output.encoded_image_bytes)
                     > MAX_IMAGE_RESPONSE_BYTES
                 {
-                    let largest = images_by_result
+                    let largest = results
                         .iter()
                         .enumerate()
-                        .filter_map(|(position, images): (usize, &Vec<FileImageBlock>)| {
-                            let bytes = images.iter().try_fold(0usize, |total, image| {
-                                total.checked_add(base64_encoded_len(image.bytes.len())?)
-                            })?;
+                        .filter_map(|(position, result)| {
+                            let bytes = result.as_ref().ok()?.encoded_image_bytes;
                             (bytes > 0).then_some((position, bytes))
                         })
                         .max_by_key(|(_, bytes)| *bytes);
@@ -1444,43 +1428,28 @@ pub(crate) async fn read_batch_with_images(
                     else {
                         break;
                     };
-                    images_by_result[position].clear();
                     image_budget_used -= bytes;
-                    results[position] = envelope(
-                        position,
-                        Err(FileError::new(
-                            "file_image_response_too_large",
-                            "image omitted to keep the ordered batch response within the 8 MiB bound",
-                        )),
-                    );
+                    results[position] = Err(FileError::new(
+                        "file_image_response_too_large",
+                        "image omitted to keep the ordered batch response within the 8 MiB bound",
+                    ));
                 }
                 if image_budget_used.saturating_add(output.encoded_image_bytes)
                     > MAX_IMAGE_RESPONSE_BYTES
                 {
-                    images_by_result.push(Vec::new());
-                    results.push(envelope(
-                        index,
-                        Err(FileError::new(
-                            "file_image_response_too_large",
-                            "image omitted to keep the ordered batch response within the 8 MiB bound",
-                        )),
-                    ));
+                    results.push(Err(FileError::new(
+                        "file_image_response_too_large",
+                        "image omitted to keep the ordered batch response within the 8 MiB bound",
+                    )));
                 } else {
                     image_budget_used += output.encoded_image_bytes;
-                    images_by_result.push(output.images);
-                    results.push(envelope(index, Ok(output.value)));
+                    results.push(Ok(output));
                 }
             }
-            Err(error) => {
-                images_by_result.push(Vec::new());
-                results.push(envelope(index, Err(error)));
-            }
+            Err(error) => results.push(Err(error)),
         }
     }
-    ReadBatchOutput {
-        value: finalize_read_search_batch(results),
-        images_by_result,
-    }
+    results
 }
 
 pub(crate) async fn search_batch(
@@ -1589,7 +1558,7 @@ pub(crate) async fn search_batch(
     finalize_read_search_batch(results)
 }
 
-fn envelope(index: usize, result: std::result::Result<Value, FileError>) -> Value {
+pub(crate) fn envelope(index: usize, result: std::result::Result<Value, FileError>) -> Value {
     match result {
         Ok(result) => json!({"index": index, "status": "completed", "result": result}),
         Err(error) => {
@@ -1598,7 +1567,7 @@ fn envelope(index: usize, result: std::result::Result<Value, FileError>) -> Valu
     }
 }
 
-fn finalize_read_search_batch(results: Vec<Value>) -> Value {
+pub(crate) fn finalize_read_search_batch(results: Vec<Value>) -> Value {
     let failed = results
         .iter()
         .filter(|value| value["status"] == "failed")

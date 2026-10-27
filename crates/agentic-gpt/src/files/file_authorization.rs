@@ -31,10 +31,6 @@ pub(super) async fn authorize_file_targets(
     operation: &str,
     targets: &[(PathBuf, Access)],
 ) -> std::result::Result<(Config, crate::confirmation::OperationAuthorization), FileError> {
-    if let Some(a) = acquisition {
-        a.validate_scope(false)
-            .map_err(|r| FileError::new("file_invalid_acquisition", &r))?;
-    }
     let mut decision = PolicyDecision::Allow;
     let mut preview = Vec::new();
     let identities = targets
@@ -128,10 +124,6 @@ pub(super) async fn authorize_read_requests(
     acquisition: Option<&AcquireConfirmation>,
     searches: Option<&[SearchRequest]>,
 ) -> std::result::Result<Config, FileError> {
-    if let Some(a) = acquisition {
-        a.validate_scope(false)
-            .map_err(|r| FileError::new("file_invalid_acquisition", &r))?;
-    }
     let unrestricted = exec::permissive_paths(config);
     let proactive = acquisition.is_some();
     let mut targets = Vec::new();

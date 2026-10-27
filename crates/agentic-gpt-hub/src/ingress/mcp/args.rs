@@ -1,4 +1,4 @@
-use agentic_gpt_protocol::{AcquireConfirmation, AcquireConfirmationMethod};
+use agentic_gpt_protocol::{AcquireConfirmation, AcquireConfirmationMethod, ConfirmationReason};
 use agentic_gpt_protocol::{
     EventSeverity, EventStatus, McpBatchMode, NotificationAction, RoomDiaryLayer,
     RoomMaintenanceExecutionMode, RoomMaintenanceRequestItem, RoomMaintenanceSlot,
@@ -11,18 +11,6 @@ use super::{
     default_process_list_limit, default_process_wait_seconds, default_room_notebook_limit,
     default_room_wait_seconds, default_standard_wait_seconds,
 };
-
-fn deserialize_confirmation_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let confirmation = AcquireConfirmation {
-        reason: String::deserialize(deserializer)?,
-        ..AcquireConfirmation::default()
-    };
-    confirmation.validate().map_err(serde::de::Error::custom)?;
-    Ok(confirmation.reason)
-}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -43,13 +31,13 @@ impl From<AcquireConfirmationMethodArgs> for AcquireConfirmationMethod {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct AcquireConfirmationArgs {
-    #[serde(deserialize_with = "deserialize_confirmation_reason")]
     #[schemars(
+        with = "String",
         length(min = 1, max = 100),
         regex(pattern = r"\S"),
         description = "向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。"
     )]
-    reason: String,
+    reason: ConfirmationReason,
     #[serde(default)]
     #[schemars(description = "确认提供方；省略沿用 Agent 配置。")]
     method: Option<AcquireConfirmationMethodArgs>,
@@ -75,13 +63,13 @@ impl From<AcquireConfirmationArgs> for AcquireConfirmation {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct AcquireConfirmationNoScopeArgs {
-    #[serde(deserialize_with = "deserialize_confirmation_reason")]
     #[schemars(
+        with = "String",
         length(min = 1, max = 100),
         regex(pattern = r"\S"),
         description = "向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。"
     )]
-    reason: String,
+    reason: ConfirmationReason,
     #[serde(default)]
     #[schemars(description = "确认提供方；省略沿用 Agent 配置。")]
     method: Option<AcquireConfirmationMethodArgs>,
@@ -92,7 +80,8 @@ impl From<AcquireConfirmationNoScopeArgs> for AcquireConfirmation {
         Self {
             reason: value.reason,
             method: value.method.map(Into::into),
-            ..Self::default()
+            read: Vec::new(),
+            write: Vec::new(),
         }
     }
 }

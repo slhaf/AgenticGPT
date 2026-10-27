@@ -480,10 +480,33 @@ impl AgentMcpServer {
             return Ok((admission_error_value(error), None));
         }
         if tool_namespace(name).is_some() || operation::is_event_api_operation(name) {
-            validate_stdio_arguments(name, &arguments)?;
+            if let Some(invocation) = validate_stdio_arguments(name, &arguments)? {
+                return match invocation.requests {
+                    FileReadRequests::Batch(requests) => {
+                        let outputs = crate::file_ops::read_batch_with_images(
+                            &self.state,
+                            &requests,
+                            invocation.acquire_confirmation,
+                        )
+                        .await;
+                        Ok(ordered_file_read_batch_result(outputs))
+                    }
+                    FileReadRequests::Single(request) => {
+                        match crate::file_ops::read_request_with_images(
+                            &self.state,
+                            &request,
+                            invocation.acquire_confirmation,
+                        )
+                        .await
+                        {
+                            Ok(output) => Ok(ordered_file_read_result(output)),
+                            Err(error) => Ok((error.value(), None)),
+                        }
+                    }
+                };
+            }
         }
         let request_id = request_id();
-        let mut file_read_result = None;
         let result = match name {
             "config.manual" => {
                 dispatch(
@@ -563,44 +586,6 @@ impl AgentMcpServer {
             "browser.reset" => self.dispatch_browser_reset(arguments).await,
             "browser.release" => self.dispatch_browser_release(arguments).await,
             "browser.list" => self.dispatch_browser_list(arguments).await,
-            "file.read" => {
-                let args: FileReadArgs = from_value(arguments)?;
-                validate_file_read_args(&args)?;
-                if let Some(requests) = args.requests {
-                    let output = crate::file_ops::read_batch_with_images(
-                        &self.state,
-                        &requests.into_iter().map(Into::into).collect::<Vec<_>>(),
-                        args.acquire_confirmation,
-                    )
-                    .await;
-                    let (value, special_result) =
-                        ordered_file_read_result(output.value, output.images_by_result, true);
-                    file_read_result = special_result;
-                    Ok(value)
-                } else {
-                    let request = crate::file_ops::ReadRequest {
-                        path: args.path.expect("validated single file.read path"),
-                        metadata: args.metadata.unwrap_or(false),
-                        start_line: args.start_line,
-                        end_line: args.end_line,
-                    };
-                    match crate::file_ops::read_request_with_images(
-                        &self.state,
-                        &request,
-                        args.acquire_confirmation,
-                    )
-                    .await
-                    {
-                        Ok(output) => {
-                            let (value, special_result) =
-                                ordered_file_read_result(output.value, vec![output.images], false);
-                            file_read_result = special_result;
-                            Ok(value)
-                        }
-                        Err(error) => Ok(error.value()),
-                    }
-                }
-            }
             "file.search" => {
                 let args: FileSearchArgs = from_value(arguments)?;
                 validate_file_search_args(&args)?;
@@ -1217,7 +1202,7 @@ impl AgentMcpServer {
             }
             _ => Err(anyhow::anyhow!("unknown agent tool: {name}")),
         };
-        result.map(|value| (value, file_read_result))
+        result.map(|value| (value, None))
     }
 
     async fn dispatch_process_exec(
@@ -1871,25 +1856,19 @@ impl ServerHandler for AgentMcpServer {
 }
 
 fn ordered_file_read_result(
-    value: Value,
-    images_by_result: Vec<Vec<crate::file_ops::FileImageBlock>>,
-    is_batch: bool,
+    output: crate::file_ops::ReadOutput,
 ) -> (Value, Option<CallToolResult>) {
-    if is_batch {
-        return ordered_file_read_batch_result(value, images_by_result);
-    }
-    if !images_by_result.iter().any(|images| !images.is_empty()) {
+    let crate::file_ops::ReadOutput { value, images, .. } = output;
+    if images.is_empty() {
         return (value, None);
     }
 
     let mut content = vec![Content::text(value.to_string())];
-    for images in images_by_result {
-        for image in images {
-            content.push(Content::image(
-                base64::engine::general_purpose::STANDARD.encode(image.bytes),
-                image.mime_type,
-            ));
-        }
+    for image in images {
+        content.push(Content::image(
+            base64::engine::general_purpose::STANDARD.encode(image.bytes),
+            image.mime_type,
+        ));
     }
 
     let mut result = CallToolResult::structured(value.clone());
@@ -1912,24 +1891,37 @@ fn ordered_file_read_result(
 }
 
 fn ordered_file_read_batch_result(
-    mut value: Value,
-    mut images_by_result: Vec<Vec<crate::file_ops::FileImageBlock>>,
+    mut outputs: Vec<std::result::Result<crate::file_ops::ReadOutput, crate::file_ops::FileError>>,
 ) -> (Value, Option<CallToolResult>) {
-    if !images_by_result.iter().any(|images| !images.is_empty()) {
+    let batch_results = outputs
+        .iter_mut()
+        .enumerate()
+        .map(|(index, output)| match output {
+            Ok(output) => crate::file_ops::envelope(index, Ok(std::mem::take(&mut output.value))),
+            Err(error) => crate::file_ops::envelope(index, Err(error.clone())),
+        })
+        .collect();
+    let mut value = crate::file_ops::finalize_read_search_batch(batch_results);
+    if !outputs.iter().any(|output| {
+        output
+            .as_ref()
+            .is_ok_and(|output| !output.images.is_empty())
+    }) {
         return (value, None);
     }
-    let Some(result_count) = value["results"].as_array().map(Vec::len) else {
-        return (value, None);
-    };
-    images_by_result.resize_with(result_count, Vec::new);
-    images_by_result.truncate(result_count);
 
-    let image_costs = batch_image_serialized_costs(&images_by_result);
-    let mut include_images = vec![false; result_count];
+    let image_costs = batch_image_serialized_costs(&outputs);
+    let mut include_images = vec![false; outputs.len()];
     let mut image_bytes = 0usize;
-    let mut serialized_bytes = batch_text_result_serialized_size(&value);
-    for index in 0..result_count {
-        if images_by_result[index].is_empty() {
+    let batch_results = value["results"]
+        .as_array()
+        .expect("batch results are produced internally");
+    let mut serialized_bytes = batch_text_result_serialized_size(&value, batch_results);
+    for index in 0..outputs.len() {
+        if !outputs[index]
+            .as_ref()
+            .is_ok_and(|output| !output.images.is_empty())
+        {
             continue;
         }
         let cost = image_costs[index].unwrap_or(usize::MAX);
@@ -1961,7 +1953,7 @@ fn ordered_file_read_batch_result(
     }
 
     loop {
-        let result = build_ordered_batch_image_result(&value, &images_by_result, &include_images);
+        let result = build_ordered_batch_image_result(&value, &outputs, &include_images);
         let actual_size = serde_json::to_vec(&result)
             .map(|serialized| serialized.len())
             .unwrap_or(usize::MAX);
@@ -1976,10 +1968,7 @@ fn ordered_file_read_batch_result(
     }
 }
 
-fn batch_text_result_serialized_size(value: &Value) -> usize {
-    let Some(results) = value["results"].as_array() else {
-        return usize::MAX;
-    };
+fn batch_text_result_serialized_size(value: &Value, results: &[Value]) -> usize {
     let mut result = CallToolResult::structured(value.clone());
     result.content = results
         .iter()
@@ -1991,12 +1980,13 @@ fn batch_text_result_serialized_size(value: &Value) -> usize {
 }
 
 fn batch_image_serialized_costs(
-    images_by_result: &[Vec<crate::file_ops::FileImageBlock>],
+    outputs: &[std::result::Result<crate::file_ops::ReadOutput, crate::file_ops::FileError>],
 ) -> Vec<Option<usize>> {
     let mut block_overhead = HashMap::<&'static str, usize>::new();
-    images_by_result
+    outputs
         .iter()
-        .map(|images| {
+        .map(|output| {
+            let images = &output.as_ref().ok()?.images;
             images.iter().try_fold(0usize, |total, image| {
                 let encoded_bytes = image
                     .bytes
@@ -2069,19 +2059,21 @@ fn largest_included_image_group(
 
 fn build_ordered_batch_image_result(
     value: &Value,
-    images_by_result: &[Vec<crate::file_ops::FileImageBlock>],
+    outputs: &[std::result::Result<crate::file_ops::ReadOutput, crate::file_ops::FileError>],
     include_images: &[bool],
 ) -> CallToolResult {
     let results = value["results"].as_array().expect("batch result array");
     let mut content = Vec::new();
     for (index, item) in results.iter().enumerate() {
         content.push(Content::text(item.to_string()));
-        if include_images.get(index).copied().unwrap_or(false) {
-            for image in &images_by_result[index] {
-                content.push(Content::image(
-                    base64::engine::general_purpose::STANDARD.encode(&image.bytes),
-                    image.mime_type,
-                ));
+        if include_images[index] {
+            if let Ok(output) = &outputs[index] {
+                for image in &output.images {
+                    content.push(Content::image(
+                        base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+                        image.mime_type,
+                    ));
+                }
             }
         }
     }
@@ -2523,7 +2515,7 @@ fn from_value<T: DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(Into::into)
 }
 
-fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<()> {
+fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<Option<FileReadInvocation>> {
     let object = arguments
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("tool arguments must be an object"))?;
@@ -2543,7 +2535,7 @@ fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<()> {
         }
         "file.read" => {
             let args: FileReadArgs = from_value(arguments.clone())?;
-            validate_file_read_args(&args)?;
+            return parse_file_read_args(args).map(Some);
         }
         "file.search" => {
             let args: FileSearchArgs = from_value(arguments.clone())?;
@@ -2578,7 +2570,7 @@ fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<()> {
         }
         _ => {}
     }
-    Ok(())
+    Ok(None)
 }
 
 fn validate_browser_manual_args(
@@ -2809,9 +2801,24 @@ fn browser_state_label(state: crate::browser_manager::BrowserLeaseState) -> &'st
     }
 }
 
-fn validate_file_read_args(args: &FileReadArgs) -> Result<()> {
-    match (&args.path, &args.requests) {
-        (Some(_), None) => Ok(()),
+enum FileReadRequests {
+    Single(crate::file_ops::ReadRequest),
+    Batch(Vec<crate::file_ops::ReadRequest>),
+}
+
+struct FileReadInvocation {
+    requests: FileReadRequests,
+    acquire_confirmation: Option<AcquireConfirmation>,
+}
+
+fn parse_file_read_args(args: FileReadArgs) -> Result<FileReadInvocation> {
+    let requests = match (args.path, args.requests) {
+        (Some(path), None) => FileReadRequests::Single(crate::file_ops::ReadRequest {
+            path,
+            metadata: args.metadata.unwrap_or(false),
+            start_line: args.start_line,
+            end_line: args.end_line,
+        }),
         (None, Some(requests))
             if !requests.is_empty()
                 && requests.len() <= crate::file_ops::MAX_BATCH_OPERATIONS
@@ -2819,16 +2826,24 @@ fn validate_file_read_args(args: &FileReadArgs) -> Result<()> {
                 && args.start_line.is_none()
                 && args.end_line.is_none() =>
         {
-            Ok(())
+            FileReadRequests::Batch(requests.into_iter().map(Into::into).collect())
         }
-        (Some(_), Some(_)) => Err(anyhow::anyhow!(
-            "file.read single fields and requests are mutually exclusive"
-        )),
-        (None, Some(_)) => Err(anyhow::anyhow!(
-            "file.read requests must contain 1..32 items"
-        )),
-        (None, None) => Err(anyhow::anyhow!("file.read requires path or requests")),
-    }
+        (Some(_), Some(_)) => {
+            return Err(anyhow::anyhow!(
+                "file.read single fields and requests are mutually exclusive"
+            ))
+        }
+        (None, Some(_)) => {
+            return Err(anyhow::anyhow!(
+                "file.read requests must contain 1..32 items"
+            ))
+        }
+        (None, None) => return Err(anyhow::anyhow!("file.read requires path or requests")),
+    };
+    Ok(FileReadInvocation {
+        requests,
+        acquire_confirmation: args.acquire_confirmation,
+    })
 }
 
 fn validate_file_search_args(args: &FileSearchArgs) -> Result<()> {
