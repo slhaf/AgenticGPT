@@ -422,14 +422,30 @@ impl EmailDraft {
                 SetupField::EmailEnabled => serde_json::Value::Bool(
                     text.parse().map_err(|_| (*field, "email_config_invalid"))?,
                 ),
-                SetupField::EmailImapPort
-                | SetupField::EmailSmtpPort
-                | SetupField::EmailSyncInterval
+                SetupField::EmailImapPort | SetupField::EmailSmtpPort => serde_json::Value::from(
+                    text.parse::<u16>()
+                        .map_err(|_| (*field, "email_account_port_invalid"))?,
+                ),
+                SetupField::EmailSyncInterval
                 | SetupField::EmailRetentionDays
                 | SetupField::EmailMaxStorageBytes => serde_json::Value::from(
                     text.parse::<u64>()
                         .map_err(|_| (*field, "config_init_number_invalid"))?,
                 ),
+                SetupField::EmailImapTls | SetupField::EmailSmtpTls => {
+                    serde_json::from_value::<crate::config::EmailTls>(serde_json::Value::String(
+                        text.clone(),
+                    ))
+                    .map_err(|_| (*field, "email_tls_invalid"))?;
+                    serde_json::Value::String(text)
+                }
+                SetupField::EmailSendPolicy | SetupField::EmailTrashPolicy => {
+                    serde_json::from_value::<crate::config::EmailPolicy>(
+                        serde_json::Value::String(text.clone()),
+                    )
+                    .map_err(|_| (*field, "email_policy_invalid"))?;
+                    serde_json::Value::String(text)
+                }
                 _ => serde_json::Value::String(text),
             };
             if let Some(key) = pointer.strip_prefix("/account/") {
