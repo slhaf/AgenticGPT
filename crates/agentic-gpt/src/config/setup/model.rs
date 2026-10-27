@@ -65,7 +65,6 @@ pub(crate) enum SetupField {
     McpServerEndpoint,
     McpServerBearerAuth,
     McpServerBearerToken,
-    EmailEnabled,
     EmailImapHost,
     EmailImapPort,
     EmailImapTls,
@@ -80,7 +79,6 @@ pub(crate) enum SetupField {
     EmailMaxStorageBytes,
     EmailSendPolicy,
     EmailTrashPolicy,
-    RoomSecretEnabled,
     RoomSecretServerUrl,
     RoomSecretAccount,
     RoomSecretClientId,
@@ -346,16 +344,6 @@ impl ToolsetsDraft {
         Ok(config)
     }
 
-    fn set_namespace_enabled(&mut self, namespace: ToolNamespace, enabled: bool) {
-        let name = namespace.as_str().to_string();
-        let mut selected = self.selection.selected().to_vec();
-        selected.retain(|value| value != &name);
-        if enabled {
-            selected.push(name);
-        }
-        self.selection = OrderedMultiSelectState::new(tool_namespace_options(), selected);
-    }
-
     pub(crate) fn toggle_room_group(&mut self) {
         let room_names: Vec<String> = ToolNamespace::all()
             .iter()
@@ -395,7 +383,6 @@ pub(crate) struct McpServersDraft {
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct EmailDraft {
     pub(crate) values: BTreeMap<SetupField, String>,
-    pub(crate) enabled: bool,
 }
 impl fmt::Debug for EmailDraft {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -441,10 +428,7 @@ impl EmailDraft {
                 (*field, text)
             })
             .collect();
-        Self {
-            values,
-            enabled: false,
-        }
+        Self { values }
     }
     pub(crate) fn value(&self, field: SetupField) -> String {
         self.values.get(&field).cloned().unwrap_or_default()
@@ -545,7 +529,6 @@ impl EmailDraft {
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RoomSecretDraft {
     pub(crate) values: BTreeMap<SetupField, String>,
-    pub(crate) enabled: bool,
 }
 
 impl Default for RoomSecretDraft {
@@ -603,10 +586,7 @@ impl RoomSecretDraft {
                 (*field, text)
             })
             .collect();
-        Self {
-            values,
-            enabled: false,
-        }
+        Self { values }
     }
 
     pub(crate) fn value(&self, field: SetupField) -> String {
@@ -961,16 +941,6 @@ impl SetupSession {
                 value.channels = r#"["freedesktop"]"#.to_string();
             }
         }
-        let toolsets = self.effective_toolsets();
-        match &mut draft {
-            OptionalSectionDraft::Email(value) => {
-                value.enabled = toolsets.is_enabled(ToolNamespace::RoomEmail);
-            }
-            OptionalSectionDraft::RoomSecret(value) => {
-                value.enabled = toolsets.is_enabled(ToolNamespace::RoomSecret);
-            }
-            _ => {}
-        }
         draft
     }
 
@@ -1072,7 +1042,7 @@ impl SetupSession {
         &mut self,
         draft: OptionalSectionDraft,
     ) -> Result<(), validation::ValidationErrors> {
-        self.save_service_section(draft, true)
+        validation::save_optional_section(self, draft)
     }
 
     pub(crate) fn validate_optional_draft(
@@ -1086,35 +1056,8 @@ impl SetupSession {
         &mut self,
         draft: OptionalSectionDraft,
     ) -> Result<(), validation::ValidationErrors> {
-        self.save_service_section(draft, false)?;
-        Ok(())
-    }
-
-    fn save_service_section(
-        &mut self,
-        draft: OptionalSectionDraft,
-        validate: bool,
-    ) -> Result<(), validation::ValidationErrors> {
-        let service = match &draft {
-            OptionalSectionDraft::Email(value) => Some((ToolNamespace::RoomEmail, value.enabled)),
-            OptionalSectionDraft::RoomSecret(value) => {
-                Some((ToolNamespace::RoomSecret, value.enabled))
-            }
-            _ => None,
-        };
-        if validate {
-            validation::save_optional_section(self, draft)?;
-        } else {
-            validation::validate_optional_draft(self, &draft)?;
-            self.optional.set(draft);
-        }
-        if let Some((namespace, enabled)) = service {
-            let mut toolsets = self.optional.toolsets.clone().unwrap_or_else(|| {
-                ToolsetsDraft::from_config(&ToolsetConfig::for_profile(self.selected_profile))
-            });
-            toolsets.set_namespace_enabled(namespace, enabled);
-            self.optional.toolsets = Some(toolsets);
-        }
+        validation::validate_optional_draft(self, &draft)?;
+        self.optional.set(draft);
         Ok(())
     }
 

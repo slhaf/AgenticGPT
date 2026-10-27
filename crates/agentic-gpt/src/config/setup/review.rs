@@ -708,12 +708,6 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
         }
         OptionalSectionDraft::Email(value) => vec![
             ReviewItem::field(
-                SetupField::EmailEnabled,
-                "email_enabled",
-                value.enabled.to_string(),
-                ReviewEditorKind::Choice,
-            ),
-            ReviewItem::field(
                 SetupField::EmailImapHost,
                 "email_imapHost",
                 value.value(SetupField::EmailImapHost),
@@ -837,12 +831,7 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
             ),
         ],
         OptionalSectionDraft::RoomSecret(value) => {
-            let mut items = vec![ReviewItem::field(
-                SetupField::RoomSecretEnabled,
-                "room_secret_enabled",
-                value.enabled.to_string(),
-                ReviewEditorKind::Choice,
-            )];
+            let mut items = Vec::new();
             for field in super::model::RoomSecretDraft::FIELDS {
                 let sensitive = field.room_secret_is_sensitive();
                 let editor = if sensitive {

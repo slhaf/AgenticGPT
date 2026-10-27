@@ -2796,8 +2796,7 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         SetupField::ShellInitFileMode | SetupField::ShellInitFilePath => {
             crate::config_templates::OptionalSection::Shell
         }
-        SetupField::EmailEnabled
-        | SetupField::EmailImapHost
+        SetupField::EmailImapHost
         | SetupField::EmailImapPort
         | SetupField::EmailImapTls
         | SetupField::EmailSmtpHost
@@ -2811,8 +2810,7 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         | SetupField::EmailMaxStorageBytes
         | SetupField::EmailSendPolicy
         | SetupField::EmailTrashPolicy => crate::config_templates::OptionalSection::Email,
-        SetupField::RoomSecretEnabled
-        | SetupField::RoomSecretServerUrl
+        SetupField::RoomSecretServerUrl
         | SetupField::RoomSecretAccount
         | SetupField::RoomSecretClientId
         | SetupField::RoomSecretClientSecret

@@ -122,7 +122,7 @@ Browser、Skills、安全策略和配置管理，不再有“其他配置”兜�
   Toolsets、Events 与下游 MCP server 集合。
 - Toolsets 从配置档 preset 开始；一旦显式编辑，其 namespace selection 具有权威性。
   Room 通用、Email、Secret 配置在工具集关闭时仍可进入和预配置；启停状态来自相应子工具集，
-  不再单独保存 Email 或 Secret 的 enabled 字段。启用时要求完整配置，关闭时允许保留部分设置。
+  Email、Secret 页面和 Review 的对应分组只编辑服务参数，启停统一在 Toolsets 分组操作。启用时要求完整配置，关闭时允许保留部分设置。
 - 只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会
   显示这些 tunnel 部分。
 - Standalone 和 Local 的 Connection 页默认关闭 Hub 辅助连接。打开后可配置 Hub URL、传输方式、

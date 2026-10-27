@@ -1629,7 +1629,6 @@ fn render_optional_form(
         ),
         OptionalSection::Email => {
             for field in [
-                SetupField::EmailEnabled,
                 SetupField::EmailImapHost,
                 SetupField::EmailImapPort,
                 SetupField::EmailImapTls,
@@ -1645,19 +1644,7 @@ fn render_optional_form(
                 SetupField::EmailSendPolicy,
                 SetupField::EmailTrashPolicy,
             ] {
-                if field == SetupField::EmailEnabled {
-                    push_boolean_field(
-                        &mut lines,
-                        &mut focused_line,
-                        section,
-                        draft,
-                        state,
-                        field,
-                        language,
-                        theme,
-                        errors,
-                    );
-                } else if matches!(
+                if matches!(
                     field,
                     SetupField::EmailImapTls
                         | SetupField::EmailSmtpTls
@@ -1745,17 +1732,6 @@ fn render_optional_form(
             );
         }
         OptionalSection::RoomSecret => {
-            push_boolean_field(
-                &mut lines,
-                &mut focused_line,
-                section,
-                draft,
-                state,
-                SetupField::RoomSecretEnabled,
-                language,
-                theme,
-                errors,
-            );
             for field in [
                 SetupField::RoomSecretServerUrl,
                 SetupField::RoomSecretAccount,
@@ -3143,7 +3119,6 @@ pub(super) fn optional_focus_items(
         },
         OptionalSection::Email => {
             let mut items = vec![
-                OptionalFocusItem::Field(SetupField::EmailEnabled),
                 OptionalFocusItem::Field(SetupField::EmailImapHost),
                 OptionalFocusItem::Field(SetupField::EmailImapPort),
             ];
@@ -3196,7 +3171,6 @@ pub(super) fn optional_focus_items(
             OptionalFocusItem::Field(SetupField::RoomMaintenanceAutoPush),
         ],
         OptionalSection::RoomSecret => vec![
-            OptionalFocusItem::Field(SetupField::RoomSecretEnabled),
             OptionalFocusItem::Field(SetupField::RoomSecretServerUrl),
             OptionalFocusItem::Field(SetupField::RoomSecretAccount),
             OptionalFocusItem::Field(SetupField::RoomSecretClientId),
@@ -3625,7 +3599,8 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::Email => &[
                     "Configure IMAP/SMTP, synchronization, local storage, and sending/trash permissions.",
-                    "Account connection changes require restart; other changes apply immediately.",
+                    "Enable or disable room.email in Toolsets; this page only edits service settings.",
+                    "Account connection changes apply after active requests drain; other changes apply immediately.",
                     "Password: env:NAME or file:/absolute/path. TLS: implicit or starttls. Policies: allow, confirm, deny.",
                 ],
                 OptionalSection::Room => &[
@@ -3633,7 +3608,7 @@ fn optional_center_inspector_body(
                     "The repository defaults to <workspace>/room; maintenance is local with auto-push off.",
                 ],
                 OptionalSection::RoomSecret => &[
-                    "Preconfigure the Room Secret API independently of whether its toolset is enabled.",
+                    "Configure the Room Secret API here; enable or disable room.secret in Toolsets.",
                     "Enabling the Room Secret toolset requires a complete server URL, account, and credential references.",
                     "Credentials use env:NAME or file:/absolute/path references.",
                 ],
@@ -3722,7 +3697,8 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::Email => &[
                     "配置 IMAP/SMTP、同步、本地保存及发送和移入垃圾箱权限。",
-                    "账户连接修改后需重启；其他修改立即生效。",
+                    "启停在 Toolsets 中设置 room.email；本页只编辑服务参数。",
+                    "账户连接修改排空在途请求后生效；其他修改立即生效。",
                     "密码使用 env:NAME 或 file:/绝对路径。加密方式：implicit 或 starttls；策略：allow、confirm、deny。",
                 ],
                 OptionalSection::Room => &[
@@ -3730,7 +3706,7 @@ fn optional_center_inspector_body(
                     "仓库默认使用 <workspace>/room；维护默认为 local 且关闭自动推送。",
                 ],
                 OptionalSection::RoomSecret => &[
-                    "可在独立启用 Secret 工具集前预先配置 Room Secret API。",
+                    "本页只编辑密钥服务参数；启停在 Toolsets 中设置 room.secret。",
                     "启用 Room Secret 工具集前，必须配置完整服务地址、账号和凭据引用。",
                     "凭据使用 env:NAME 或 file:/绝对路径引用。",
                 ],
@@ -3875,9 +3851,6 @@ fn optional_form_inspector_body(
                     "Enter the token without the Bearer prefix.",
                     "The TUI masks this value and redacts it from the final JSON preview.",
                 ],
-                SetupField::EmailEnabled => &[
-                    "Enable email tools. Configure both IMAP and SMTP account details before turning this on.",
-                ],
                 SetupField::EmailImapHost | SetupField::EmailSmtpHost => &[
                     "Enter a server hostname or IP address without a URL scheme, path, or credentials.",
                     "Example: imap.example.com. The account settings require both IMAP and SMTP hosts.",
@@ -3919,25 +3892,20 @@ fn optional_form_inspector_body(
                     "Choose whether moving messages to Trash is allowed directly, requires confirmation, or is denied.",
                     "Default: confirm.",
                 ],
-                SetupField::RoomSecretEnabled => &[
-                    "Enable Room Secret on the active Room toolset.",
-                    "Configure the server, account and all three credential references first.",
-                    "Changes to this setting require restart.",
-                ],
                 SetupField::RoomSecretServerUrl => &[
                     "Vaultwarden HTTP(S) server URL, without credentials, query or fragment.",
-                    "Changes to this setting require restart.",
+                    "Applied after the Secret service drains active requests.",
                 ],
                 SetupField::RoomSecretAccount => &[
                     "Dedicated Vaultwarden account used to verify the logged-in identity.",
-                    "Changes to this setting require restart.",
+                    "Applied after the Secret service drains active requests.",
                 ],
                 SetupField::RoomSecretClientId
                 | SetupField::RoomSecretClientSecret
                 | SetupField::RoomSecretMasterPassword => &[
                     "Use env:NAME or file:PATH; plaintext is rejected.",
                     "File paths support ~ expansion. The reference is masked in Review.",
-                    "Changes to this setting require restart.",
+                    "Applied after the Secret service drains active requests.",
                 ],
                 SetupField::RoomSecretGetPolicy
                 | SetupField::RoomSecretUpsertPolicy
@@ -4145,9 +4113,6 @@ fn optional_form_inspector_body(
                     "只填写 token 本身，不要带 Bearer 前缀。",
                     "TUI 会掩码该值，并在最终 JSON 预览中脱敏。",
                 ],
-                SetupField::EmailEnabled => {
-                    &["开启邮件工具；启用前需要填写完整的 IMAP 和 SMTP 账户信息。"]
-                }
                 SetupField::EmailImapHost | SetupField::EmailSmtpHost => &[
                     "填写服务器主机名或 IP 地址，不带 URL 协议、路径或登录凭据。",
                     "例如 imap.example.com；账户配置需要同时填写 IMAP 和 SMTP 主机。",
@@ -4189,25 +4154,20 @@ fn optional_form_inspector_body(
                     "选择直接允许移入垃圾箱、要求确认，或拒绝移入垃圾箱。",
                     "默认：confirm。",
                 ],
-                SetupField::RoomSecretEnabled => &[
-                    "在已启用的 Room 工具集中开启密钥服务。",
-                    "请先填写服务地址、账号和三个凭据引用。",
-                    "此设置修改后需重启。",
-                ],
                 SetupField::RoomSecretServerUrl => &[
                     "Vaultwarden HTTP(S) 服务地址，不含凭据、查询参数或片段。",
-                    "此设置修改后需重启。",
+                    "密钥服务排空在途请求后应用此修改。",
                 ],
                 SetupField::RoomSecretAccount => &[
                     "用于核对登录身份的 Vaultwarden 专用账号。",
-                    "此设置修改后需重启。",
+                    "密钥服务排空在途请求后应用此修改。",
                 ],
                 SetupField::RoomSecretClientId
                 | SetupField::RoomSecretClientSecret
                 | SetupField::RoomSecretMasterPassword => &[
                     "仅接受 env:NAME 或 file:PATH 引用，不接受明文。",
                     "文件路径支持 ~ 展开；Review 隐藏引用内容。",
-                    "此设置修改后需重启。",
+                    "密钥服务排空在途请求后应用此修改。",
                 ],
                 SetupField::RoomSecretGetPolicy
                 | SetupField::RoomSecretUpsertPolicy
@@ -4343,11 +4303,6 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
 
 fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str {
     match field {
-        SetupField::RoomSecretEnabled => t(
-            language,
-            "Room Secret tools enabled",
-            "启用 Room Secret 工具",
-        ),
         SetupField::RoomSecretServerUrl => {
             t(language, "Vaultwarden server URL", "Vaultwarden 服务地址")
         }
@@ -4366,7 +4321,6 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
             t(language, "Sync wait (milliseconds)", "同步等待（毫秒）")
         }
 
-        SetupField::EmailEnabled => t(language, "Email tools enabled", "启用邮件工具"),
         SetupField::EmailImapHost => t(language, "IMAP host", "IMAP 服务器"),
         SetupField::EmailImapPort => t(language, "IMAP port", "IMAP 端口"),
         SetupField::EmailImapTls => t(language, "IMAP TLS", "IMAP 加密方式"),
@@ -4469,8 +4423,6 @@ pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
             | SetupField::TunnelAutoDownload
             | SetupField::HubReportingEnabled
             | SetupField::RoomMaintenanceAutoPush
-            | SetupField::RoomSecretEnabled
-            | SetupField::EmailEnabled
     )
 }
 
@@ -4518,13 +4470,7 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             _ => String::new(),
         },
         OptionalSectionDraft::McpServers(_) => String::new(),
-        OptionalSectionDraft::Email(value) => {
-            if field == SetupField::EmailEnabled {
-                value.enabled.to_string()
-            } else {
-                value.value(field)
-            }
-        }
+        OptionalSectionDraft::Email(value) => value.value(field),
         OptionalSectionDraft::Room(value) => match field {
             SetupField::RoomTimezone => value.timezone.clone(),
             SetupField::DiaryBoundaryHour => value.diary_boundary_hour.clone(),
@@ -4533,13 +4479,7 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             SetupField::RoomMaintenanceAutoPush => value.maintenance_auto_push.to_string(),
             _ => String::new(),
         },
-        OptionalSectionDraft::RoomSecret(value) => {
-            if field == SetupField::RoomSecretEnabled {
-                value.enabled.to_string()
-            } else {
-                value.value(field)
-            }
-        }
+        OptionalSectionDraft::RoomSecret(value) => value.value(field),
         OptionalSectionDraft::TunnelClient(value) => match field {
             SetupField::TunnelClientVersion => value.version.clone(),
             SetupField::TunnelCacheDir => value.cache_dir.clone(),
@@ -4623,11 +4563,7 @@ pub(super) fn set_optional_field(
             _ => {}
         },
         OptionalSectionDraft::RoomSecret(draft) => {
-            if field == SetupField::RoomSecretEnabled {
-                draft.enabled = value == "true";
-            } else {
-                draft.values.insert(field, value);
-            }
+            draft.values.insert(field, value);
         }
         OptionalSectionDraft::TunnelClient(draft) => match field {
             SetupField::TunnelClientVersion => draft.version = value,
@@ -4686,12 +4622,6 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
         }
         OptionalSectionDraft::HubReporting(draft) if field == SetupField::HubReportingEnabled => {
             draft.enabled = !draft.enabled
-        }
-        OptionalSectionDraft::Email(draft) if field == SetupField::EmailEnabled => {
-            draft.enabled = !draft.enabled;
-        }
-        OptionalSectionDraft::RoomSecret(draft) if field == SetupField::RoomSecretEnabled => {
-            draft.enabled = !draft.enabled;
         }
         OptionalSectionDraft::Room(draft) if field == SetupField::RoomMaintenanceAutoPush => {
             draft.maintenance_auto_push = !draft.maintenance_auto_push
@@ -4784,7 +4714,12 @@ fn render_review(
                         let configured = value
                             .to_config()
                             .is_ok_and(|config| config.validate_enabled().is_ok());
-                        match (value.enabled, configured) {
+                        match (
+                            session
+                                .effective_toolsets()
+                                .is_enabled(ToolNamespace::RoomEmail),
+                            configured,
+                        ) {
                             (true, true) => SectionStatus::Enabled,
                             (true, false) => SectionStatus::Incomplete,
                             (false, true) => SectionStatus::Disabled,
@@ -4795,7 +4730,12 @@ fn render_review(
                         let configured = value
                             .to_config()
                             .is_ok_and(|config| config.validate_enabled().is_ok());
-                        match (value.enabled, configured) {
+                        match (
+                            session
+                                .effective_toolsets()
+                                .is_enabled(ToolNamespace::RoomSecret),
+                            configured,
+                        ) {
                             (true, true) => SectionStatus::Enabled,
                             (true, false) => SectionStatus::Incomplete,
                             (false, true) => SectionStatus::Disabled,
@@ -5523,7 +5463,6 @@ fn review_field_label(item: &ReviewItem, language: UiLanguage) -> String {
 
 fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
     match label_key {
-        "enabled" => t(language, "Secret enabled", "启用密钥服务"),
         "serverUrl" => t(language, "Vaultwarden server URL", "Vaultwarden 服务地址"),
         "account" => t(language, "Vaultwarden account", "Vaultwarden 账号"),
         "clientId" => t(language, "Client ID reference", "Client ID 引用"),
@@ -5570,7 +5509,6 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "shell_init_file_mode" => t(language, "Init file mode", "初始化文件模式"),
         "shell_init_file_path" => t(language, "Init file path", "初始化文件路径"),
         "mcp_server" => t(language, "MCP server", "MCP 服务"),
-        "email_enabled" => t(language, "Enabled", "启用邮件"),
         "email_imapHost" => t(language, "IMAP host", "IMAP 服务器"),
         "email_imapPort" => t(language, "IMAP port", "IMAP 端口"),
         "email_imapTls" => t(language, "IMAP TLS", "IMAP 加密方式"),

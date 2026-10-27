@@ -579,9 +579,10 @@ pub(super) fn validate_field(
         | SetupField::HubEnabled => validate_connection(session).err().unwrap_or_default(),
         SetupField::Catalog(index) => {
             let section = super::model::catalog_section_at(index);
-            validate_optional(section, &session.optional_draft(section))
+            validate_optional(session, section, &session.optional_draft(section))
         }
         SetupField::DisplayName => validate_optional(
+            session,
             OptionalSection::Identity,
             &session.optional_draft(OptionalSection::Identity),
         ),
@@ -590,10 +591,12 @@ pub(super) fn validate_field(
         | SetupField::PathReadOnlyPaths
         | SetupField::PathWritePaths
         | SetupField::PathDenyPaths => validate_optional(
+            session,
             OptionalSection::Workspace,
             &session.optional_draft(OptionalSection::Workspace),
         ),
         SetupField::ConfirmationChannels | SetupField::ConfirmationLanguage => validate_optional(
+            session,
             OptionalSection::Confirmation,
             &session.optional_draft(OptionalSection::Confirmation),
         ),
@@ -601,18 +604,22 @@ pub(super) fn validate_field(
         | SetupField::MaxActiveProcesses
         | SetupField::MaxFileSearchContextLines
         | SetupField::ProcessResponseBytes => validate_optional(
+            session,
             OptionalSection::Limits,
             &session.optional_draft(OptionalSection::Limits),
         ),
         SetupField::Bubblewrap => validate_optional(
+            session,
             OptionalSection::Sandbox,
             &session.optional_draft(OptionalSection::Sandbox),
         ),
         SetupField::ShellInitFileMode | SetupField::ShellInitFilePath => validate_optional(
+            session,
             OptionalSection::Shell,
             &session.optional_draft(OptionalSection::Shell),
         ),
         SetupField::Toolsets => validate_optional(
+            session,
             OptionalSection::Toolsets,
             &session.optional_draft(OptionalSection::Toolsets),
         ),
@@ -622,11 +629,11 @@ pub(super) fn validate_field(
         | SetupField::McpServerEndpoint
         | SetupField::McpServerBearerAuth
         | SetupField::McpServerBearerToken => validate_optional(
+            session,
             OptionalSection::McpServers,
             &session.optional_draft(OptionalSection::McpServers),
         ),
-        SetupField::EmailEnabled
-        | SetupField::EmailImapHost
+        SetupField::EmailImapHost
         | SetupField::EmailImapPort
         | SetupField::EmailImapTls
         | SetupField::EmailSmtpHost
@@ -640,11 +647,11 @@ pub(super) fn validate_field(
         | SetupField::EmailMaxStorageBytes
         | SetupField::EmailSendPolicy
         | SetupField::EmailTrashPolicy => validate_optional(
+            session,
             OptionalSection::Email,
             &session.optional_draft(OptionalSection::Email),
         ),
-        SetupField::RoomSecretEnabled
-        | SetupField::RoomSecretServerUrl
+        SetupField::RoomSecretServerUrl
         | SetupField::RoomSecretAccount
         | SetupField::RoomSecretClientId
         | SetupField::RoomSecretClientSecret
@@ -653,6 +660,7 @@ pub(super) fn validate_field(
         | SetupField::RoomSecretUpsertPolicy
         | SetupField::RoomSecretDeletePolicy
         | SetupField::RoomSecretSyncWaitTimeoutMs => validate_optional(
+            session,
             OptionalSection::RoomSecret,
             &session.optional_draft(OptionalSection::RoomSecret),
         ),
@@ -661,6 +669,7 @@ pub(super) fn validate_field(
         | SetupField::RepositoryRoot
         | SetupField::RoomMaintenanceMode
         | SetupField::RoomMaintenanceAutoPush => validate_optional(
+            session,
             OptionalSection::Room,
             &session.optional_draft(OptionalSection::Room),
         ),
@@ -670,10 +679,12 @@ pub(super) fn validate_field(
         | SetupField::TunnelExecutable
         | SetupField::TunnelDownloadUrl
         | SetupField::TunnelSha256 => validate_optional(
+            session,
             OptionalSection::TunnelClient,
             &session.optional_draft(OptionalSection::TunnelClient),
         ),
         SetupField::HubReportingEnabled | SetupField::HubReportingDetail => validate_optional(
+            session,
             OptionalSection::HubReporting,
             &session.optional_draft(OptionalSection::HubReporting),
         ),
@@ -689,6 +700,7 @@ pub(super) fn validate_field(
         | SetupField::EventSkillInstallCompletedLevel
         | SetupField::EventSkillInstallFailedLevel
         | SetupField::EventSkillInstallCancelledLevel => validate_optional(
+            session,
             OptionalSection::Events,
             &session.optional_draft(OptionalSection::Events),
         ),
@@ -725,7 +737,7 @@ pub(super) fn validate_optional_draft(
             "config_init_optional_section_invalid",
         )]);
     }
-    let mut errors = validate_optional(section, draft);
+    let mut errors = validate_optional(session, section, draft);
     if let OptionalSectionDraft::Confirmation(value) = draft {
         let channels = parse_confirmation_channels(&value.channels).ok();
         let legacy_ntfy = session.imported_base().is_some_and(|config| {
@@ -758,7 +770,11 @@ pub(super) fn validate_optional_draft(
     }
 }
 
-fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> ValidationErrors {
+fn validate_optional(
+    session: &SetupSession,
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+) -> ValidationErrors {
     let mut errors = Vec::new();
     match (section, draft) {
         (OptionalSection::Identity, OptionalSectionDraft::Identity(value)) => required(
@@ -856,7 +872,11 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
             }
         }
         (OptionalSection::Email, OptionalSectionDraft::Email(value)) => match value.to_config() {
-            Ok(config) if value.enabled => {
+            Ok(config)
+                if session
+                    .effective_toolsets()
+                    .is_enabled(ToolNamespace::RoomEmail) =>
+            {
                 if let Err(problem) = config.validate_enabled() {
                     errors.push(map_email_enabled_error(problem.to_string()));
                 }
@@ -887,7 +907,11 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
         }
         (OptionalSection::RoomSecret, OptionalSectionDraft::RoomSecret(value)) => {
             match value.to_config() {
-                Ok(config) if value.enabled => {
+                Ok(config)
+                    if session
+                        .effective_toolsets()
+                        .is_enabled(ToolNamespace::RoomSecret) =>
+                {
                     if let Err(problem) = config.validate_enabled() {
                         errors.push(map_room_secret_enabled_error(problem.to_string()));
                     }
@@ -1212,7 +1236,6 @@ pub(super) fn validate_for_review(session: &SetupSession) -> Result<(), Validati
     if let Err(mut connection) = validate_connection(session) {
         errors.append(&mut connection);
     }
-    let toolsets = session.effective_toolsets();
     for section in session.available_optional_sections() {
         let draft = match section {
             // Email and Secret may be enabled from Toolsets before their
@@ -1223,16 +1246,7 @@ pub(super) fn validate_for_review(session: &SetupSession) -> Result<(), Validati
             }
             _ => configured_draft(session, section),
         };
-        if let Some(mut draft) = draft {
-            match &mut draft {
-                OptionalSectionDraft::Email(value) => {
-                    value.enabled = toolsets.is_enabled(ToolNamespace::RoomEmail);
-                }
-                OptionalSectionDraft::RoomSecret(value) => {
-                    value.enabled = toolsets.is_enabled(ToolNamespace::RoomSecret);
-                }
-                _ => {}
-            }
+        if let Some(draft) = draft {
             errors.extend(
                 validate_optional_draft(session, &draft)
                     .err()
@@ -1694,7 +1708,7 @@ fn first_field(section: OptionalSection) -> SetupField {
         | OptionalSection::ConfigManagement => SetupField::Catalog(0),
         OptionalSection::Room => SetupField::RoomTimezone,
         OptionalSection::RoomSecret => SetupField::RoomSecretServerUrl,
-        OptionalSection::Email => SetupField::EmailEnabled,
+        OptionalSection::Email => SetupField::EmailImapHost,
         OptionalSection::TunnelClient => SetupField::TunnelClientVersion,
         OptionalSection::HubReporting => SetupField::HubReportingDetail,
         OptionalSection::Events => SetupField::EventsLowTtlSeconds,

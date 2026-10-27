@@ -14,7 +14,6 @@ impl SetupField {
             Self::PathDefaultAction => &["allow", "deny"],
             Self::EmailImapTls | Self::EmailSmtpTls => &["implicit", "starttls"],
             Self::EmailSendPolicy | Self::EmailTrashPolicy => &["allow", "confirm", "deny"],
-            Self::EmailEnabled | Self::RoomSecretEnabled => &["false", "true"],
             Self::RoomSecretGetPolicy
             | Self::RoomSecretUpsertPolicy
             | Self::RoomSecretDeletePolicy => &["allow", "confirm"],

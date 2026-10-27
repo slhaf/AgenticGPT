@@ -68,7 +68,6 @@ fn typed_mail_form_selections_and_numbers_survive_review() {
     assert_eq!(app.editing().unwrap().buffer, "70000");
     key(&mut app, KeyCode::Enter);
     assert!(app.field_errors.contains_key(&SetupField::EmailSmtpPort));
-    assert!(!app.field_errors.contains_key(&SetupField::EmailEnabled));
     key(&mut app, KeyCode::Enter);
     for _ in 0..5 {
         key(&mut app, KeyCode::Backspace);
@@ -317,10 +316,20 @@ fn room_service_preconfiguration_and_review_share_toolset_state() {
         SetupField::RoomSecretMasterPassword,
         "INPUT_TEST_MASTER_PASSWORD",
     );
-    app.focus_field(SetupField::RoomSecretEnabled);
-    key(&mut app, KeyCode::Enter);
     app.handle_action(TuiAction::Next).unwrap();
     assert_eq!(app.page(), ConfigPage::OptionalCenter);
+    assert!(!app
+        .session()
+        .effective_toolsets()
+        .is_enabled(crate::config::ToolNamespace::RoomSecret));
+
+    open_section(&mut app, OptionalSection::Toolsets);
+    app.state.focus = crate::config::ToolNamespace::all()
+        .iter()
+        .position(|namespace| *namespace == crate::config::ToolNamespace::RoomSecret)
+        .unwrap();
+    key(&mut app, KeyCode::Char(' '));
+    app.handle_action(TuiAction::Next).unwrap();
     assert!(app
         .session()
         .effective_toolsets()
@@ -340,8 +349,14 @@ fn room_service_preconfiguration_and_review_share_toolset_state() {
         .is_enabled(crate::config::ToolNamespace::RoomSecret));
     app.handle_action(TuiAction::Next).unwrap();
     assert_eq!(app.page(), ConfigPage::Review);
-    app.focus_field(SetupField::RoomSecretEnabled);
+    app.focus_field(SetupField::Toolsets);
     key(&mut app, KeyCode::Enter);
+    app.state.review_subfocus = crate::config::ToolNamespace::all()
+        .iter()
+        .position(|namespace| *namespace == crate::config::ToolNamespace::RoomSecret)
+        .unwrap();
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::Esc);
     assert_eq!(app.page(), ConfigPage::Review);
     assert!(app
         .session()
