@@ -24,7 +24,7 @@ Agentic GPT 将 ChatGPT 连接到 Linux 机器，提供文件操作、命令执�
 
 ## 安装与要求
 
-Agent 运行在 Linux 上，发行包支持 `x86_64` 和 `aarch64`。从[发行版页面](https://github.com/slhaf/AgenticGPT/releases)下载对应架构的压缩包并安装；以下以 `x86_64` 为例：
+Agent 运行在 Linux 上，发行包支持 `x86_64` 和 `aarch64`，每种架构均提供 GNU 和静态链接的 musl 构建。从[发行版页面](https://github.com/slhaf/AgenticGPT/releases)下载适合架构和运行环境的压缩包并安装；若系统缺少所需的 glibc 版本，可选择同架构文件名以 `-linux-musl.tar.gz` 结尾的压缩包。以下以 `x86_64` GNU 为例：
 
 ```bash
 tar -xzf agentic-gpt-x86_64-unknown-linux-gnu.tar.gz

@@ -24,7 +24,7 @@ Agentic GPT connects ChatGPT to Linux machines for file operations, command exec
 
 ## Install and requirements
 
-The Agent runs on Linux. Release archives support `x86_64` and `aarch64`; download the archive for your architecture from the [releases page](https://github.com/slhaf/AgenticGPT/releases). For `x86_64`:
+The Agent runs on Linux. Release archives support `x86_64` and `aarch64`, with GNU and statically linked musl builds for each architecture. Download the archive for your architecture and environment from the [releases page](https://github.com/slhaf/AgenticGPT/releases). If the system lacks the required glibc version, choose the archive for the same architecture whose filename ends in `-linux-musl.tar.gz`. For `x86_64` GNU:
 
 ```bash
 tar -xzf agentic-gpt-x86_64-unknown-linux-gnu.tar.gz

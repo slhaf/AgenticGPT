@@ -594,7 +594,7 @@ secret 仍可能出现在本地进程检查中。请只在可信机器上执行�
 
 自动化检查覆盖配置/reference 验证、worker 工具列表精确性、secret 的 argv/environment 隔离、可信资源/cache 行为、supervisor 重启与进程树清理、
 reporting 隐私/幂等性，以及 Full/Coordinator MCP 工具表面。仓库的多目标 release 脚本为
-[`scripts/dist-linux.sh`](../scripts/dist-linux.sh)；安装了 `cross` 和对应工具链时，该脚本会构建两个 Linux 目标。
+[`scripts/dist-linux.sh`](../scripts/dist-linux.sh)；安装了 `cross` 和对应工具链时，该脚本会构建 `x86_64` 和 `aarch64` 的 GNU 与 musl 四个 Linux 目标。
 
 `crates/agentic-gpt/tests/standalone_supervisor.rs` 会启动实际的 Agentic supervisor 和隐藏 stdio worker，对 Normal profile 执行
 initialize/list/call smoke。它还会启动隐藏 worker，并将旧的 initialized notification 和一个工具调用作为首个请求，以证明重启恢复可以让 worker 保持运行、

@@ -45,21 +45,23 @@ cargo install cross --git https://github.com/cross-rs/cross
 ./scripts/dist-linux.sh
 ```
 
-脚本对 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu` 执行工作区的 release 构建，并将三个二进制复制到各自 `dist/<target>/` 目录：`agentic-gpt`、`agentic-gpt-hub`、`agentic-browser-host`。
+脚本对 `x86_64` 和 `aarch64` 的 GNU 与 musl 四个目标执行工作区的 release 构建，其中 musl 产物静态链接。脚本将三个二进制复制到各自 `dist/<target>/` 目录：`agentic-gpt`、`agentic-gpt-hub`、`agentic-browser-host`。
 
-ARM Linux 构建机可改用 [`scripts/dist-linux-on-arm.sh`](../../scripts/dist-linux-on-arm.sh)，ARM 目标原生构建，x86_64 目标通过 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) 与 Zig 交叉编译；产物名称和 `dist/<target>/` 布局相同。Arch Linux 上先安装系统工具和当前 Rust 工具链的标准库：
+构建镜像由 [`Cross.toml`](../../Cross.toml) 指定；首次构建需要下载镜像。各目标使用独立的构建缓存，避免不同镜像复用不兼容的构建中间文件。
+
+ARM Linux 构建机可改用 [`scripts/dist-linux-on-arm.sh`](../../scripts/dist-linux-on-arm.sh)，`aarch64` GNU 目标原生构建，其余目标通过 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) 与 Zig 构建；产物名称和 `dist/<target>/` 布局相同。Arch Linux 上先安装系统工具和当前 Rust 工具链的标准库：
 
 ```bash
 sudo pacman -S --needed cargo-zigbuild zig
-rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 ./scripts/dist-linux-on-arm.sh
 ```
 
-`CARGO_TARGET_DIR` 可调整构建缓存目录，发行产物仍写入仓库的 `dist/<target>/`。
+两个脚本均可通过 `CARGO_TARGET_DIR` 调整构建缓存目录，发行产物仍写入仓库的 `dist/<target>/`。
 
 此命令会编译并写入或覆盖本地 `dist/` 产物，但不会创建 tag 或发布 GitHub Release。
 
-[`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述三个二进制，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布两个压缩包与校验和文件，并使用标签对应的 `docs/release-notes-<tag>.md` 作为 Release 正文。
+[`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述三个二进制，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布四个压缩包与校验和文件，并使用标签对应的 `docs/release-notes-<tag>.md` 作为 Release 正文。
 
 ## 触发实际发布
 
@@ -81,6 +83,6 @@ rust_version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import
 
 严格 Clippy 属于 CI 门禁；本地发布预检与标签发布工作流都**不运行 Clippy**，因此预检成功不能证明严格 Clippy 已通过，也不能据此判断是否存在警告。
 
-发布工作流检查标签提交的格式、编译、测试、Agent/Hub 构建、标签与 Cargo 版本配对及跨端契约，再构建两个 Linux 目标的包。
+发布工作流检查标签提交的格式、编译、测试、Agent/Hub 构建、标签与 Cargo 版本配对及跨端契约，再构建四个 Linux 目标的包。
 
 其结果只证明这些步骤在该次运行中通过；不证明 ARM 上的实际运行行为、外部 Actions 导入、Console 构建或生产部署。请以对应工作流运行记录为准，不将本指南或本地预检视为这些独立范围的验证。

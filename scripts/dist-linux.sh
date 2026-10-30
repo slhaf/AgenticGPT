@@ -7,12 +7,15 @@ cd "$ROOT_DIR"
 TARGETS=(
   "x86_64-unknown-linux-gnu"
   "aarch64-unknown-linux-gnu"
+  "x86_64-unknown-linux-musl"
+  "aarch64-unknown-linux-musl"
 )
 BINS=(
   "agentic-gpt"
   "agentic-gpt-hub"
   "agentic-browser-host"
 )
+BUILD_DIR="${CARGO_TARGET_DIR:-target}"
 
 if ! command -v cross >/dev/null 2>&1; then
   echo "error: cross is required for multi-target Linux release builds" >&2
@@ -21,10 +24,11 @@ if ! command -v cross >/dev/null 2>&1; then
 fi
 
 for target in "${TARGETS[@]}"; do
-  cross build --release --target "$target" --workspace
+  target_build_dir="$BUILD_DIR/cross/$target"
+  cross build --release --locked --target "$target" --target-dir "$target_build_dir" --workspace
   mkdir -p "dist/$target"
   for bin in "${BINS[@]}"; do
-    cp "target/$target/release/$bin" "dist/$target/$bin"
+    cp "$target_build_dir/$target/release/$bin" "dist/$target/$bin"
   done
 done
 
