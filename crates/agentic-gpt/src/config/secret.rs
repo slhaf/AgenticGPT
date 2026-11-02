@@ -117,29 +117,15 @@ impl RoomSecretConfig {
         Ok(())
     }
 
-    pub(crate) fn validate_enabled(&self) -> Result<()> {
-        self.validate()?;
-        if self.server_url.is_empty() {
-            return Err(anyhow!("room_secret_server_url_invalid"));
-        }
-        if self.account.is_empty() {
-            return Err(anyhow!("room_secret_account_invalid"));
-        }
-        for (reference, code) in [
-            (&self.client_id, "room_secret_client_id_reference_invalid"),
-            (
-                &self.client_secret,
-                "room_secret_client_secret_reference_invalid",
-            ),
-            (
-                &self.master_password,
-                "room_secret_master_password_reference_invalid",
-            ),
-        ] {
-            if reference.is_empty() {
-                return Err(anyhow!(code));
-            }
-        }
-        Ok(())
+    pub(crate) fn missing_field(&self) -> Option<&'static str> {
+        [
+            (&self.server_url, "room.secret.serverUrl"),
+            (&self.account, "room.secret.account"),
+            (&self.client_id, "room.secret.clientId"),
+            (&self.client_secret, "room.secret.clientSecret"),
+            (&self.master_password, "room.secret.masterPassword"),
+        ]
+        .into_iter()
+        .find_map(|(value, field)| value.is_empty().then_some(field))
     }
 }

@@ -26,19 +26,19 @@ pub(crate) async fn diary_active(
     let root = read_root(state).await?;
     Ok(RoomDiaryActiveResponse {
         daily: read_diary_layer(
-            root.as_deref(),
+            &root,
             RoomDiaryLayer::Daily,
             "current",
             "Diary/Daily/current.md",
         ),
         weekly: read_diary_layer(
-            root.as_deref(),
+            &root,
             RoomDiaryLayer::Weekly,
             "current",
             "Diary/Weekly/current.md",
         ),
         monthly: read_diary_layer(
-            root.as_deref(),
+            &root,
             RoomDiaryLayer::Monthly,
             "current",
             "Diary/Monthly/current.md",
@@ -52,7 +52,7 @@ pub(crate) async fn diary_read(
 ) -> Result<RoomDiaryReadResponse> {
     let (period, relative) = diary_relative_path(request.layer, &request.period)?;
     let root = read_root(state).await?;
-    let document = read_diary_layer(root.as_deref(), request.layer, &period, &relative);
+    let document = read_diary_layer(&root, request.layer, &period, &relative);
     Ok(RoomDiaryReadResponse { document })
 }
 
@@ -61,9 +61,7 @@ pub(crate) async fn notebook_recent(
     request: RoomNotebookRecentRequest,
 ) -> Result<RoomNotebookResultsResponse> {
     let limit = normalize_limit(request.limit)?;
-    let Some(root) = read_root(state).await? else {
-        return Ok(RoomNotebookResultsResponse::default());
-    };
+    let root = read_root(state).await?;
     let (paths, mut warnings) = notebook_paths(&root)?;
     let mut documents = Vec::with_capacity(paths.len().min(limit));
     for relative in paths {
@@ -91,9 +89,7 @@ pub(crate) async fn notebook_search(
         return Err(anyhow!("room_notebook_query_too_long"));
     }
     let limit = normalize_limit(request.limit)?;
-    let Some(root) = read_root(state).await? else {
-        return Ok(RoomNotebookResultsResponse::default());
-    };
+    let root = read_root(state).await?;
     let (paths, mut warnings) = notebook_paths(&root)?;
     let query = query.to_lowercase();
     let mut documents = Vec::with_capacity(limit);
@@ -125,9 +121,7 @@ pub(crate) async fn notebook_read(
     request: RoomNotebookReadRequest,
 ) -> Result<RoomNotebookReadResponse> {
     let relative = validate_notebook_path(&request.path)?;
-    let Some(root) = read_root(state).await? else {
-        return Err(anyhow!("room_notebook_not_found"));
-    };
+    let root = read_root(state).await?;
     let content = room_repository::read_bounded_markdown(&root, &relative)?;
     if content.truncated {
         return Err(anyhow!("room_markdown_too_large"));
@@ -142,9 +136,7 @@ pub(crate) async fn state_list(
     state: &AppState,
     _request: RoomStateListRequest,
 ) -> Result<RoomStateListResponse> {
-    let Some(root) = read_root(state).await? else {
-        return Ok(RoomStateListResponse::default());
-    };
+    let root = read_root(state).await?;
     let entities_root = match room_repository::repository_path(&root, "State/entities") {
         Ok(path) => path,
         Err(error) => return Err(error),
@@ -193,9 +185,7 @@ pub(crate) async fn state_read(
     request: RoomStateReadRequest,
 ) -> Result<RoomStateReadResponse> {
     let relative = state_relative_path(&request.entity)?;
-    let Some(root) = read_root(state).await? else {
-        return Err(anyhow!("room_state_entity_not_found"));
-    };
+    let root = read_root(state).await?;
     let content = room_repository::read_bounded_markdown(&root, &relative)?;
     if content.truncated {
         return Err(anyhow!("room_markdown_too_large"));
@@ -206,16 +196,18 @@ pub(crate) async fn state_read(
     })
 }
 
-async fn read_root(state: &AppState) -> Result<Option<PathBuf>> {
+async fn read_root(state: &AppState) -> Result<PathBuf> {
     let config = state.config.read().await.clone();
     let status = room_repository::inspect_repository(&config)?;
     match fs::symlink_metadata(&status.root) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             Err(anyhow!("room_repository_symlink_escape"))
         }
-        Ok(metadata) if metadata.is_dir() => Ok(Some(status.root)),
+        Ok(metadata) if metadata.is_dir() => Ok(status.root),
         Ok(_) => Err(anyhow!("room_repository_root_not_directory")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(anyhow!("room_repository_root_missing"))
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -285,7 +277,7 @@ fn diary_directory(layer: RoomDiaryLayer) -> &'static str {
 }
 
 fn read_diary_layer(
-    root: Option<&Path>,
+    root: &Path,
     layer: RoomDiaryLayer,
     period: &str,
     relative: &str,
@@ -297,9 +289,6 @@ fn read_diary_layer(
         available: false,
         content: None,
         issue: Some(issue),
-    };
-    let Some(root) = root else {
-        return unavailable(RoomDiaryLayerIssue::Missing);
     };
     let path = match room_repository::repository_path(root, relative) {
         Ok(path) => path,

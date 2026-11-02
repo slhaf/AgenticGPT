@@ -814,7 +814,7 @@ async fn normal_hub_rejects_current_room_commands_without_room_profile() {
 #[tokio::test]
 async fn room_mode_dispatches_current_diary_command() {
     let workspace = unique_temp_dir("room-current-diary").join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(workspace.join("room")).unwrap();
     let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
 
     hub::handle_hub_command(

@@ -224,9 +224,17 @@ pub(crate) fn build_app_state_with_private_state(
     browser_runtime: Option<Arc<BrowserRuntimeContext>>,
     private_state: private_state::PrivateStatePaths,
 ) -> Result<AppState> {
-    if config.toolsets.uses_room_repository() {
-        room_repository::ensure_repository(&config)?;
-    }
+    let room_error = if config.toolsets.uses_room_repository() {
+        room_repository::ensure_repository(&config)
+            .err()
+            .map(|error| {
+                let code = error_code(&error.to_string());
+                log_warn(format!("room repository unavailable; errorCode={code}"));
+                code
+            })
+    } else {
+        None
+    };
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
     let event_store = crate::event_store::EventStore::open(&private_state)?;
     let email = crate::email::EmailService::open(&private_state)?;
@@ -239,6 +247,7 @@ pub(crate) fn build_app_state_with_private_state(
     let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(
         &config,
         browser_runtime.is_some(),
+        room_error,
     ));
     let browser_runtime_cell = Arc::new(crate::state::BrowserRuntimeSlot::new(browser_runtime));
     Ok(AppState {

@@ -41,7 +41,7 @@ Normal 并不等于 Room：Normal 运行时需显式启用相应 `room.*` 子工
 配置保存与运行态应用分别报告：只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据与 client 启动参数保留显式重启边界，待重启字段不阻止其他设置应用。Hub、HTTP、Browser、邮件账户、Secret 后端、Room 根目录和 Skills 安装并发由具体所有者局部协调，保留进程注册表与持久任务。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已准入操作保留各自快照，不自动重放副作用。完整边界见[配置生效说明](configuration.zh-CN.md#热加载与重启边界)。
 
 Tmux 与 Browser 工具集关闭时，启动不创建默认 tmux 会话，也不发现或准备 Browser 运行时。
-热启用 Tmux 时准备默认会话；Browser 启停或配置变化通过局部 runtime 协调，旧租约和 JS 会话可能失效。
+热启用 Tmux 时准备默认会话；Browser 启停或配置变化通过局部 runtime 协调，旧租约和 JS 会话可能失效。Browser 工具集启用但 runtime 缺失时，工具仍保留在能力列表中，需要 runtime 的调用返回 `browser_runtime_unavailable`，`browser.list` 报告 runtime 不可用。
 关闭 Skills 时保留重启恢复记录与提交日志协调，但不重新调度排队安装；热启用后幂等恢复。
 基础 Event API、历史状态协调与显式 CLI 管理入口继续保留。`agent.info.connections.hubAuxiliary`
 报告 Standalone/Local 辅助连接的启用与连接状态，`hubReporting` 单独报告运行上报状态。辅助连接由 `hub.enabled` 控制；报告开关只控制上报，连接关闭时上报暂停，但设置保留。
@@ -234,7 +234,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 ## Room 密钥
 
-`room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete` 由同一 Agent 本地服务执行。Standalone／Local 要求 `room.secret` 工具集；Hub Full 使用活动 Room 租约，对应 `POST /v1/room/secret/<action>`，请求不含 `agentId`。Coordinator 隐藏并拒绝这些工具。Secret 工具集与后端变更通过局部服务排空并释放旧 owner 后应用，运行中工具集关闭按实时准入生效。本地 MCP 随开关隐藏工具，Hub Full MCP 保持固定工具列表并在调用时检查。账号组定位沿用 bw 可读列表；解密失败的条目可能被 bw 省略，具体影响见使用指南。
+`room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete` 由同一 Agent 本地服务执行。Standalone／Local 要求 `room.secret` 工具集；Hub Full 使用活动 Room 租约，对应 `POST /v1/room/secret/<action>`，请求不含 `agentId`。Coordinator 隐藏并拒绝这些工具。工具集开关决定发现和准入，不要求后端配置完整；四项操作都要求完整的服务地址、账号和三项凭据引用，调用时检查配置完整性，凭据引用读取和外部连接则在实际使用时判断。Secret 工具集与后端变更通过局部服务排空并释放旧 owner 后应用，运行中工具集关闭按实时准入生效。本地 MCP 随开关隐藏工具，Hub Full MCP 保持固定工具列表并在调用时检查。账号组定位沿用 bw 可读列表；解密失败的条目可能被 bw 省略，具体影响见使用指南。
 
 `list` 只返回 `site/account`，可按 `site` 或 `account` 过滤；`get` 必须指定 `site/account/type`，`type` 为 `password` 或 `totp`，后者返回当前验证码；`upsert` 至少提供非空 `password/totp` 之一，省略字段保留原值；`delete` 将整个账号组移入回收站。相同身份重复时返回 `ambiguous_secret`，不猜测或批量修改。
 
@@ -246,7 +246,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 ## Room 邮件
 
-`room.email.list`、`room.email.read`、`room.email.search`、`room.email.attachment`、`room.email.send` 和 `room.email.operate` 由 Agent 执行；Hub Full 通过活动 Room 路由，HTTP 为同名的 `/v1/room/email/<action>` POST 路由，请求不带 `agentId`。Coordinator 不提供这些操作。六项操作与后台同步统一受 `room.email` 工具集控制，启用时要求有效账户。
+`room.email.list`、`room.email.read`、`room.email.search`、`room.email.attachment`、`room.email.send` 和 `room.email.operate` 由 Agent 执行；Hub Full 通过活动 Room 路由，HTTP 为同名的 `/v1/room/email/<action>` POST 路由，请求不带 `agentId`。Coordinator 不提供这些操作。六项操作与后台同步统一受 `room.email` 工具集控制；启用只影响工具发现和准入，不要求账户完整。六项操作都要求完整账户，调用时检查账户完整性；后台同步只在账户配置完整时尝试，密码引用和外部连接在使用时判断。
 
 `list` 只列本地记录的当前 INBOX；`read` 提供默认 `text`、离线 `image` 和仅额外下载远程图片的 `imageWithRemote`；三种模式都不执行脚本或加载远程 CSS，续读保持原模式；`search` 可查本地收件及发送记录；`attachment` 可内联读取或受文件权限检查导出至 workspace；`send` 发送纯文本；`operate` 修改已读、标星或移入垃圾箱。发送和移入垃圾箱由各自 `allow/confirm/deny` 配置控制，`confirm` 失败时不执行。六项响应复用现有公共 `events` 面板。HTTP 保留 JSON 图片数据，MCP 将图片投影为原生图片内容块并保留文本及结构化结果中的 `events`。
 

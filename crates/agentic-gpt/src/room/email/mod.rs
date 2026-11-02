@@ -112,9 +112,9 @@ impl EmailService {
 pub(crate) async fn recover(config: &Config, notify_existing: bool) -> Result<Value> {
     let account = config
         .email
-        .account
-        .clone()
-        .ok_or_else(|| anyhow!("email_account_required"))?;
+        .configured_account()
+        .map_err(|path| anyhow!("Missing required configuration: {path}"))?
+        .clone();
     let paths = crate::private_state::prepare()?;
     blocking(move || {
         let service = EmailService::open(&paths)?;
@@ -175,7 +175,8 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) -> Result<
         let cycle_enabled = config.toolsets.is_enabled(ToolNamespace::RoomEmail);
         let cycle_reconfigure_stopping = state.email.sync_stopping();
         if cycle_enabled {
-            if let Some(account) = config.email.account.clone() {
+            if let Ok(account) = config.email.configured_account() {
+                let account = account.clone();
                 let key = account_key(&account);
                 let active_service = state.email.clone();
                 let active_key = key.clone();
@@ -238,6 +239,8 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) -> Result<
                             .unwrap_or("email_outbox_unavailable")
                     ));
                 }
+            } else {
+                state.email.deactivate();
             }
         } else {
             state.email.deactivate();
@@ -375,8 +378,16 @@ async fn dispatch_admitted(state: &AppState, operation: &str, args: Value) -> Va
     if !config.toolsets.is_enabled(ToolNamespace::RoomEmail) {
         return json!({"error":{"code":"toolset_required","message":"operation requires toolset room.email to be enabled"}});
     }
-    let Some(account) = config.email.account.clone() else {
-        return error_value("email_account_required");
+    let account = match config.email.configured_account() {
+        Ok(account) => account.clone(),
+        Err(path) => {
+            return json!({
+                "error": {
+                    "code": "email_account_required",
+                    "message": format!("Missing required configuration: {path}")
+                }
+            });
+        }
     };
     let service = state.email.clone();
     let key = account_key(&account);

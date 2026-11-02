@@ -509,8 +509,11 @@ pub(crate) async fn dispatch(state: &AppState, operation: &str, args: Value) -> 
         return json!({"error":{"code":"toolset_required","message":"operation requires toolset room.secret to be enabled"}});
     }
     let secret = &config.room.secret;
-    if secret.server_url.is_empty() || secret.account.is_empty() {
-        return Error::NotConfigured.value();
+    if let Some(field) = secret.missing_field() {
+        return json!({"error":{
+            "code":"secret_not_configured",
+            "message":format!("Missing required configuration: {field}")
+        }});
     }
     let write = matches!(operation, "room.secret.upsert" | "room.secret.delete");
     let state = state.clone();

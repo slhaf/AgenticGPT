@@ -511,7 +511,7 @@ impl EmailDraft {
                 "email_account_port_invalid" => {
                     (SetupField::EmailImapPort, "email_account_port_invalid")
                 }
-                _ => (SetupField::EmailImapHost, "email_account_required"),
+                _ => (SetupField::EmailImapHost, "email_config_invalid"),
             };
             (field, code)
         })?;

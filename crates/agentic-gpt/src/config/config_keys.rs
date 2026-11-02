@@ -786,8 +786,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Email,
         EmailAccount,
         true,
-        "Account connection object or null; changes require restart. Password must be an env:/file: reference.",
-        "账户连接 JSON 对象或 null；修改后重启生效。密码必须使用 env:/file: 引用。",
+        "Account connection object or null; changes apply after active requests drain. Password must be an env:/file: reference.",
+        "账户连接 JSON 对象或 null；排空在途请求后生效。密码必须使用 env:/file: 引用。",
         "null",
         set_email_account
     ),

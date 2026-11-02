@@ -1311,7 +1311,6 @@ impl Config {
         config.events.validate()?;
         config.email.validate()?;
         config.room.secret.validate()?;
-        config.validate_configured_services()?;
         Ok(config)
     }
 
@@ -1647,7 +1646,6 @@ impl Config {
         self.events.validate()?;
         self.email.validate()?;
         self.room.secret.validate()?;
-        self.validate_configured_services()?;
         self.validate_policies()?;
         self.validate_mcp_servers()?;
         if self.auxiliary_hub_enabled() {
@@ -1656,15 +1654,6 @@ impl Config {
         Ok(())
     }
 
-    pub(crate) fn validate_configured_services(&self) -> Result<()> {
-        if self.toolsets.is_enabled(ToolNamespace::RoomEmail) {
-            self.email.validate_enabled()?;
-        }
-        if self.toolsets.is_enabled(ToolNamespace::RoomSecret) {
-            self.room.secret.validate_enabled()?;
-        }
-        Ok(())
-    }
     pub(crate) fn validate_http_mcp(&self) -> Result<()> {
         validate_http_mcp_config(&self.http_mcp)
     }
@@ -1766,7 +1755,6 @@ fn materialize_import_value(value: &Value) -> Result<Config> {
     config.validate_policies()?;
     config.email.validate()?;
     config.room.secret.validate()?;
-    config.validate_configured_services()?;
     Ok(config)
 }
 

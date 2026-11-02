@@ -31,7 +31,9 @@ Standalone 和 Local 需要启用 `room.email` 工具集。Hub Full 通过活动
 }
 ```
 
-先保存完整账户配置，再开启邮件子工具集：
+`room.email` 只控制工具是否开放给 MCP 客户端，不代表邮箱已经可连接。可以先启用工具集，再逐步补齐账户字段；六项邮件操作都要求完整账户配置，缺少任一账户字段时调用会报配置错误。账户不完整时，邮件后台不会尝试同步；密码引用能否读取和服务器是否可连接，要到实际使用时才知道。
+
+启用邮件工具集：
 
 ```bash
 agentic-gpt config toolset enable room.email
@@ -43,7 +45,7 @@ agentic-gpt config toolset enable room.email
 
 | 配置键 | 默认值 | 范围或要求 |
 | --- | --- | --- |
-| `email.account` | 无 | 单账户连接对象；可设为 `null` 清除，但必须先关闭邮件。 |
+| `email.account` | 无 | 单账户连接对象；可设为 `null` 清除。账户可分步补齐；六项邮件操作都要求账户字段完整。 |
 | `email.account.imapHost`、`smtpHost` | 无 | 服务器主机名；不带 URL 协议前缀、路径或用户名。 |
 | `email.account.imapPort`、`smtpPort` | `993`、`465` | 1–65535。 |
 | `email.account.imapTls`、`smtpTls` | `implicit` | `implicit` 或 `starttls`。 |
@@ -56,7 +58,7 @@ agentic-gpt config toolset enable room.email
 | `email.sendPolicy` | `confirm` | `allow`、`confirm` 或 `deny`。 |
 | `email.trashPolicy` | `confirm` | `allow`、`confirm` 或 `deny`。 |
 
-通过 `agentic-gpt config keys --section email` 查询 CLI 支持的键。CLI 将整个账户作为一个 JSON 对象写入，避免将未填完的账户保存为有效配置；其余字段可单独设置：
+通过 `agentic-gpt config keys --section email` 查询 CLI 支持的键。CLI 配置目录包含账户的各个子字段，可通过路径逐项设置；TUI 和配置 API 也可逐项补齐。其余字段同样可单独设置：
 
 ```bash
 agentic-gpt config set email.syncIntervalSeconds 120
@@ -66,7 +68,7 @@ agentic-gpt config set email.sendPolicy confirm
 agentic-gpt config set email.trashPolicy deny
 ```
 
-`email.account` 连接配置变化通过邮件服务局部切换：先停止新准入并排空在途请求与同步，再释放旧账户 owner，保留本地数据库、游标和发送结果。繁忙或准备失败时保留旧账户并报告应用失败，不因重配置自动重发邮件；静态校验不保证远程登录成功。同步间隔、保存天数、容量上限和两个策略用于后续同步与请求，已接纳请求保留原策略。`room.email` 是唯一启停开关，关闭时排空请求与同步并释放账户 owner；重开后恢复。其他 Room 子工具集不影响邮件。通过配置 API 的 `value/appliedValue/applyStatus/error` 区分已保存与已应用，详见[配置生效边界](configuration.zh-CN.md#热加载与重启边界)。
+`email.account` 连接配置变化通过邮件服务局部切换：先停止新准入并排空在途请求与同步，再释放旧账户 owner，保留本地数据库、游标和发送结果。账户不完整时不会启动后台同步；字段格式和范围仍在保存时校验，密码引用能否读取及远程登录是否成功则在使用时判断。繁忙或准备失败时保留旧账户并报告应用失败，不因重配置自动重发邮件。同步间隔、保存天数、容量上限和两个策略用于后续同步与请求，已接纳请求保留原策略。`room.email` 是唯一启停开关，关闭时排空请求与同步并释放账户 owner；重开后按现有配置恢复。其他 Room 子工具集不影响邮件。通过配置 API 的 `value/appliedValue/applyStatus/error` 区分已保存与已应用，详见[配置生效边界](configuration.zh-CN.md#热加载与重启边界)。
 
 ## 收信、提醒与本地保存
 

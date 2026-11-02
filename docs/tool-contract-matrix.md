@@ -4,6 +4,8 @@
 
 确定性的 Agent 语料集和 `scripts/check_contract_parity.py` 是当前行为的运行时/schema 权威依据。本矩阵仅作说明：`scripts/evaluate_tool_contracts.py` 的形状预测探针不能证明 schema 有效，也不能证明请求会被派发。
 
+工具集启用只表示工具可被发现和调用，不代表依赖运行环境或数据仓库已就绪。Browser runtime 缺失时，需要 runtime 的调用返回 `browser_runtime_unavailable`，`browser.list` 报告 `runtimeAvailable: false`。Room 仓库暂不可初始化时，已启用的 Room 工具仍保留；根目录存在且可读时，读取仍可能成功，只有所需资源不可用时才报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时用现有状态字段报告就绪情况，路径不合法时返回错误。
+
 当前远程 Room 调用方应协调配对的 Hub 和 Agent 工件，并从 [`../openapi/hub.yaml`](../openapi/hub.yaml) 刷新导入的 schema。当前九项 Room 文档／维护操作使用现有语义 Agent DTO 和 camelCase JSON 请求体：`room.diary.active`/`room.diary.read`、`room.notebook.recent`/`room.notebook.search`/`room.notebook.read`、`room.state.list`/`room.state.read`，以及 `room.maintenance.status`/`room.maintenance.submit`。空请求使用 `{}`；远程 Room 操作均不接受 `agentId`。`room.notebook.recent` 和 `room.notebook.search` 现在返回当前 Markdown 预览/结果，不再返回已退役的 passage 型 JSONL 格式。
 
 ## Agent 准入与副作用边界（WP2）
@@ -34,7 +36,7 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `config.update` | 在最新持久配置上按意图批量修改，不修改 Hub 服务端配置、不重放用户副作用。 | changes 各含 op/path，set/add/remove 含原生 JSON value；可选 dryRun；Hub 必填 agentId。 | 1–64 项、请求最多 1MiB；最终整批校验；无 revision。 | confirm 默认且严格；dryRun 不保存，返回脱敏预览；实写 saved 与逐项 applyStatus 分开；组件失败不回滚已保存文件，超时不自动重试。 | Agent 各 MCP 入口与 Hub Full；HTTP 为 `POST /v1/config/update`；默认关闭的 config 工具集必须启用，本地 CLI/TUI 管理独立。 |
 | `agent.info` | 查看本地运行时；不执行操作。 | 无必填字段。 | 有界诊断和安全配置概要，策略只返回规则数量。 | 运行时快照；返回的事件提醒会记录展示次数，不标记为已处理。 | Normal + Room；Tunnel 与本地 Unix 一致。 |
 | `browser.manual` | 阅读或搜索所选运行时的官方 Browser 文档；不执行语义化 Browser 操作。 | `action`；`read` 必须提供 `path`，可选 `startLine`/`endLine`；`search` 必须提供 `query`，可选 `maxResults`/`contextLines`；与当前 action 不兼容的字段会被拒绝。 | 在文档根目录内读取且有界；搜索的 `maxResults` 范围为 1–100，`contextLines` 范围为 0–5。 | 运行时缺失以及文档范围/路径错误会返回稳定的 Browser 错误；只读、非破坏性。 | Normal + Room；使用所选运行时的文档根目录。 |
-| `browser.acquire` | 获取或复用一个具名的持久 Browser JavaScript 租约；不调用语义化 Browser 操作。 | `name`、`idleTimeoutSeconds`。 | 空闲超时为 1–86,400 秒；同名调用幂等。 | 运行时缺失或管理器错误使用稳定的 Browser 错误；成功时租约状态为 ready。 | Normal + Room；两个接入路径使用同一管理器。 |
+| `browser.acquire` | 获取或复用一个具名的持久 Browser JavaScript 租约；不调用语义化 Browser 操作。 | `name`、`idleTimeoutSeconds`。 | 空闲超时为 1–86,400 秒；同名调用幂等。 | runtime 缺失返回 `browser_runtime_unavailable`；管理器错误使用稳定的 Browser 错误；成功时租约状态为 ready。 | Normal + Room；两个接入路径使用同一管理器。 |
 | `browser.repl` | 在持久 Browser 租约中运行任意 JavaScript；不在 Rust 侧执行 Browser 语义转换。 | `name`、非空 `code`；可选 `timeoutMs` 和用于可观测性的 `title`。 | 代码最多 256 KiB UTF-8 字节；超时默认为 20,000 ms，范围为 1–120,000；`title` 最多 128 个 Unicode 标量值。 | 原样传递官方文本/图像/结构化内容、错误状态和元数据；先调用 acquire。具有破坏性，且属于开放世界。 | Normal + Room；两个接入路径共用同一持久租约管理器。 |
 | `browser.reset` | 恢复/管理员重置一个 Browser 租约；不是每次调用后的常规清理。 | `name`。 | 重置/重新引导内核状态时保留租约身份。 | 运行时、租约缺失或恢复失败会返回稳定的 Browser 错误；具有破坏性，但不属于开放世界。 | Normal + Room；两个接入路径使用同一管理器。 |
 | `browser.release` | 对一个 Browser 租约执行最终清理；释放后不会隐式复用。 | `name`。 | 在轮次结束/关闭时执行有界清理；名称不存在时返回 `released: false`。 | 清理失败仍返回稳定的 Browser 错误，但租约仍会移除；具有破坏性，但不属于开放世界。 | Normal + Room；两个接入路径使用同一管理器。 |
@@ -73,14 +75,14 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `room.notebook.read` | 读取一份指定的当前 Room Notebook Markdown 文档；不读取任意仓库路径。 | 必填且经过验证的 Notebook 相对 `.md` `path`。 | 一份有界 Markdown 文档；内容上限为 512 KiB。 | 不安全、非 Markdown、缺失或超大的路径返回类型化错误；只读。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
 | `room.state.list` | 列出确定排序的 Room state entity 文档；不修改内容。 | 空 JSON 对象。 | 返回 `State/entities` 下排序后的 `.md` entity。 | 跳过 symlink 和非文件；格式错误的仓库根目录返回类型化错误；只读。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
 | `room.state.read` | 读取一份指定的 Room state entity Markdown 文档；不读取任意路径。 | 必填且安全的 entity 文件名 stem `entity`。 | 读取 `State/entities` 下的一份有界 Markdown 文档；内容上限为 512 KiB。 | 不安全或缺失的 entity、超大内容均返回类型化错误；只读。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-| `room.maintenance.status` | 检查 Room 仓库、脚手架、执行器、工作流、远端、同步和 slot 就绪状态；不修改内容。 | 空 JSON 对象。 | 状态、heads、缺失路径和五 slot 占用情况均有界。 | 只读；就绪状态的各个维度保持独立，失败会以类型化错误返回。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
+| `room.maintenance.status` | 检查 Room 仓库、脚手架、执行器、工作流、远端、同步和 slot 就绪状态；不修改内容。 | 空 JSON 对象。 | 仓库路径合法且可检查时，返回有界状态、heads、缺失路径和五 slot 占用情况。 | 只读；就绪状态的各个维度保持独立；路径不合法时返回类型化错误。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
 | `room.maintenance.submit` | 通过仓库所有者的执行器应用一至五项经过验证的 Room 维护请求。 | `items`，各项含唯一 `slot`/`payload`；可选 `mode` 和 `waitSeconds`。 | items 数量为 1–5；mode 为 `local` 或 `workflow`；wait 默认为 0 秒，上限为 30 秒。 | 分别报告准入、本地应用、语义提交和远端/工作流同步；操作具有破坏性，但限于仓库范围。等待超时不会取消维护操作，也没有单独的等待 API。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
 
 当前九个 Room 文档／维护名称在本地 Agent MCP、Hub Full MCP 以及九个 `/v1/room/<namespace>/<action>` POST 路由上构成同一套语义契约。Hub 只选择已捕获的活动 Room 租约，并负责路由/回执，不拥有 Room 文件或内容。通用运行回执可能含有有界操作结果，但不是 Room 内容的权威来源。
 
 ## Room 密钥接口
 
-四项操作共用 Agent 本地 Vaultwarden 服务，要求 `room.secret` 工具集。Standalone／Local 使用本地入口；Hub Full 经活动 Room 路由，不接收 `agentId`，HTTP 为 `/v1/room/secret/<action>` POST。Coordinator 隐藏并拒绝。配置和部署边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
+四项操作共用 Agent 本地 Vaultwarden 服务，要求 `room.secret` 工具集。启用只控制工具发现和准入；配置可分步补齐，但四项操作都要求完整的服务地址、账号和三项凭据引用。调用时检查配置完整性，凭据引用和外部连接在使用时判断。Standalone／Local 使用本地入口；Hub Full 经活动 Room 路由，不接收 `agentId`，HTTP 为 `/v1/room/secret/<action>` POST。Coordinator 隐藏并拒绝。配置和部署边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
 
 | 名称 | 用途与输入 | 结果与副作用 |
 | --- | --- | --- |
@@ -93,7 +95,7 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 
 ## Room 邮件接口
 
-六项邮件操作要求 `room.email` 工具集；Standalone/Local 使用本地 Agent，Hub Full 经活动 Room 路由且不接收 `agentId`，Coordinator 隐藏并拒绝。HTTP 对应 `/v1/room/email/<action>` POST 路由。配置与完整例子见[Room 邮件使用指南](email.zh-CN.md)，字段以 [OpenAPI](../openapi/hub.yaml) 为准。
+六项邮件操作要求 `room.email` 工具集。启用只控制工具发现和准入；配置可分步补齐，但六项操作都要求完整账户，调用时检查账户完整性。后台同步仅在账户配置完整时尝试。Standalone/Local 使用本地 Agent，Hub Full 经活动 Room 路由且不接收 `agentId`，Coordinator 隐藏并拒绝。HTTP 对应 `/v1/room/email/<action>` POST 路由。配置与完整例子见[Room 邮件使用指南](email.zh-CN.md)，字段以 [OpenAPI](../openapi/hub.yaml) 为准。
 
 | 名称 | 用途与输入 | 结果与副作用 |
 | --- | --- | --- |

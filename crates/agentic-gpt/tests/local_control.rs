@@ -20,6 +20,467 @@ fn local_runtime_cli_exercises_real_unix_mcp_surface() {
     result.unwrap();
 }
 
+const CLI_TIMEOUT: Duration = Duration::from_secs(5);
+const CALL_TIMEOUT: Duration = Duration::from_secs(3);
+const RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[test]
+fn incomplete_room_toolsets_remain_enabled_and_report_missing_fields_at_call_time() {
+    let root =
+        PathBuf::from("/tmp").join(format!("al-{}", &Uuid::new_v4().simple().to_string()[..16]));
+    fs::create_dir_all(&root).unwrap();
+    let _root_cleanup = RootCleanup(root.clone());
+    let result = run_incomplete_room_toolsets_e2e(&root);
+    let _ = fs::remove_dir_all(&root);
+    result.unwrap();
+}
+
+fn run_incomplete_room_toolsets_e2e(root: &Path) -> Result<(), String> {
+    let binary = binary_path();
+    let config_path = root.join("config.json");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let initialized = output_with_timeout(
+        command(&binary, root)
+            .args(["config", "--config"])
+            .arg(&config_path)
+            .args([
+                "init",
+                "--non-interactive",
+                "--mode",
+                "local",
+                "--profile",
+                "normal",
+            ]),
+        CLI_TIMEOUT,
+    )?;
+    ensure_success(&initialized, "incomplete Room config init")?;
+
+    let agent_id = format!("local-{}", &Uuid::new_v4().simple().to_string()[..16]);
+    let mut config: Value =
+        serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    config["agentId"] = json!(agent_id);
+    config["mode"] = json!("local");
+    config["workspaceRoot"] = json!(workspace);
+    config["toolsets"]["enabled"] = json!(["agent", "file", "room.notebook"]);
+    config["room"]["repositoryRoot"] = json!(workspace);
+    // In particular, this runtime must not start a tmux-owned child process.
+    config["shell"]["initFile"] = Value::Null;
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    for namespace in ["room.email", "room.secret"] {
+        for action in ["enable", "disable", "enable"] {
+            let changed = output_with_timeout(
+                command(&binary, root)
+                    .args(["config", "--config"])
+                    .arg(&config_path)
+                    .args(["toolset", action, namespace]),
+                CLI_TIMEOUT,
+            )?;
+            ensure_success(&changed, "incomplete Room toolset mutation")?;
+            let loaded = output_with_timeout(
+                command(&binary, root)
+                    .args(["config", "--config"])
+                    .arg(&config_path)
+                    .arg("show"),
+                CLI_TIMEOUT,
+            )?;
+            ensure_success(&loaded, "incomplete Room config reload")?;
+        }
+    }
+
+    let socket_path = root
+        .join("h")
+        .join(".agentic_gpt/runtime/agent")
+        .join(&agent_id)
+        .join("mcp.sock");
+    let mut server = command(&binary, root)
+        .args(["run", "--config"])
+        .arg(&config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let cleanup = LocalCleanup {
+        child: &mut server,
+        socket_root: socket_path.parent().unwrap().to_path_buf(),
+    };
+
+    wait_for_socket(&socket_path, Duration::from_secs(5))?;
+    let tools = local_output_with_timeout(&binary, &config_path, ["list-tools"], CALL_TIMEOUT)?;
+    let tools: Value = serde_json::from_slice(&tools.stdout).map_err(|error| error.to_string())?;
+    let tools = tools.as_array().ok_or("local tool list is not an array")?;
+    for name in ["room.email.list", "room.secret.list"] {
+        if !tools.iter().any(|tool| tool["name"] == name) {
+            return Err(format!("enabled incomplete toolset did not expose {name}"));
+        }
+    }
+
+    expect_missing_room_config(
+        &binary,
+        &config_path,
+        "room.email.list",
+        "email_account_required",
+        "email.account",
+    )?;
+    expect_missing_room_config(
+        &binary,
+        &config_path,
+        "room.secret.list",
+        "secret_not_configured",
+        "room.secret.serverUrl",
+    )?;
+
+    for (key, value, tool, code, missing) in [
+        (
+            "email.account.imapHost",
+            "imap.example.invalid",
+            "room.email.list",
+            "email_account_required",
+            "email.account.smtpHost",
+        ),
+        (
+            "room.secret.serverUrl",
+            "https://secrets.example.invalid",
+            "room.secret.list",
+            "secret_not_configured",
+            "room.secret.account",
+        ),
+    ] {
+        let updated = output_with_timeout(
+            command(&binary, root)
+                .args(["config", "--config"])
+                .arg(&config_path)
+                .args(["set", key, value]),
+            CLI_TIMEOUT,
+        )?;
+        ensure_success(&updated, "incomplete Room config set")?;
+        expect_missing_room_config(&binary, &config_path, tool, code, missing)?;
+    }
+
+    let tools = local_output_with_timeout(&binary, &config_path, ["list-tools"], CALL_TIMEOUT)?;
+    let tools: Value = serde_json::from_slice(&tools.stdout).map_err(|error| error.to_string())?;
+    let tools = tools
+        .as_array()
+        .ok_or("reloaded local tool list is not an array")?;
+    if !["room.email.list", "room.secret.list"]
+        .iter()
+        .all(|name| tools.iter().any(|tool| tool["name"] == *name))
+    {
+        return Err("config hot reload hid an enabled incomplete Room tool".to_string());
+    }
+
+    expect_local_tool_error(
+        &binary,
+        &config_path,
+        "room.notebook.recent",
+        "{}",
+        "room_repository_root_must_be_separate",
+        "room_repository_root_must_be_separate",
+    )?;
+    let disabled = output_with_timeout(
+        command(&binary, root)
+            .args(["config", "--config"])
+            .arg(&config_path)
+            .args(["toolset", "disable", "room.notebook"]),
+        CLI_TIMEOUT,
+    )?;
+    ensure_success(&disabled, "disable invalid Room repository toolset")?;
+    wait_for_tool_presence(&binary, &config_path, "room.notebook.recent", false)?;
+    let enabled = output_with_timeout(
+        command(&binary, root)
+            .args(["config", "--config"])
+            .arg(&config_path)
+            .args(["toolset", "enable", "room.notebook"]),
+        CLI_TIMEOUT,
+    )?;
+    ensure_success(&enabled, "re-enable invalid Room repository toolset")?;
+    wait_for_tool_presence(&binary, &config_path, "room.notebook.recent", true)?;
+    expect_local_tool_error(
+        &binary,
+        &config_path,
+        "room.notebook.recent",
+        "{}",
+        "room_repository_root_must_be_separate",
+        "room_repository_root_must_be_separate",
+    )?;
+
+    let separate_repository = root.join("separate-repository");
+    fs::create_dir(&separate_repository).map_err(|error| error.to_string())?;
+    let separate_repository = separate_repository
+        .to_str()
+        .ok_or("non-UTF8 fixture path")?;
+    let updated = output_with_timeout(
+        command(&binary, root)
+            .args(["config", "--config"])
+            .arg(&config_path)
+            .args(["set", "room.repositoryRoot", separate_repository]),
+        CLI_TIMEOUT,
+    )?;
+    ensure_success(&updated, "set separate Room repository root")?;
+    expect_local_tool_success(&binary, &config_path, "room.notebook.recent")?;
+
+    let updated = output_with_timeout(
+        command(&binary, root)
+            .args(["config", "--config"])
+            .arg(&config_path)
+            .args(["set", "browser.runtime", "{}"]),
+        CLI_TIMEOUT,
+    )?;
+    ensure_success(&updated, "set incomplete explicit Browser runtime")?;
+    let enabled = output_with_timeout(
+        command(&binary, root)
+            .args(["config", "--config"])
+            .arg(&config_path)
+            .args(["toolset", "enable", "browser"]),
+        CLI_TIMEOUT,
+    )?;
+    ensure_success(&enabled, "enable Browser toolset without runtime")?;
+    wait_for_tool_presence(&binary, &config_path, "browser.list", true)?;
+    expect_browser_list_unavailable(&binary, &config_path)?;
+    expect_local_tool_error(
+        &binary,
+        &config_path,
+        "browser.manual",
+        r#"{"action":"search","query":"test"}"#,
+        "browser_runtime_unavailable",
+        "browser_runtime_unavailable",
+    )?;
+
+    signal_and_wait(cleanup.child, libc::SIGTERM, Duration::from_secs(5))?;
+    Ok(())
+}
+
+fn expect_local_tool_error(
+    binary: &Path,
+    config: &Path,
+    tool: &str,
+    arguments: &str,
+    code: &str,
+    message_part: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + RELOAD_TIMEOUT;
+    loop {
+        let tools = local_output_with_timeout(binary, config, ["list-tools"], CALL_TIMEOUT)?;
+        let tools: Value =
+            serde_json::from_slice(&tools.stdout).map_err(|error| error.to_string())?;
+        if !tools
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|entry| entry["name"] == tool))
+        {
+            return Err(format!("enabled tool {tool} was not discovered"));
+        }
+        let output = output_with_timeout(
+            command(binary, config.parent().expect("fixture config parent"))
+                .args(["local", "--config"])
+                .arg(config)
+                .args(["call", tool, "--arguments", arguments]),
+            CALL_TIMEOUT,
+        )?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains(code) && stderr.contains(message_part) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("{tool} did not report {code}: {stderr}"));
+            }
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        let result: Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        let error = &result["structuredContent"]["error"];
+        let actual_code = error["code"].as_str().unwrap_or_default();
+        let message = error["message"].as_str().unwrap_or_default();
+        if actual_code == code && message.contains(message_part) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{tool} did not report {code} after config reload; last response: code={actual_code}, message={message}"
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn expect_browser_list_unavailable(binary: &Path, config: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + RELOAD_TIMEOUT;
+    loop {
+        let output = local_output_with_timeout(
+            binary,
+            config,
+            ["call", "browser.list", "--arguments", "{}"],
+            CALL_TIMEOUT,
+        )?;
+        let result: Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        if result["structuredContent"]["runtimeAvailable"] == false {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "browser.list did not report runtimeAvailable=false: {}",
+                result["structuredContent"]
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_tool_presence(
+    binary: &Path,
+    config: &Path,
+    tool: &str,
+    expected: bool,
+) -> Result<(), String> {
+    let deadline = Instant::now() + RELOAD_TIMEOUT;
+    loop {
+        let output = local_output_with_timeout(binary, config, ["list-tools"], CALL_TIMEOUT)?;
+        let tools: Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        let present = tools
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|entry| entry["name"] == tool));
+        if present == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{tool} discovery did not become {expected} after config reload"
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn expect_local_tool_success(binary: &Path, config: &Path, tool: &str) -> Result<(), String> {
+    let deadline = Instant::now() + RELOAD_TIMEOUT;
+    loop {
+        let tools = local_output_with_timeout(binary, config, ["list-tools"], CALL_TIMEOUT)?;
+        let tools: Value =
+            serde_json::from_slice(&tools.stdout).map_err(|error| error.to_string())?;
+        if !tools
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|entry| entry["name"] == tool))
+        {
+            return Err(format!("enabled tool {tool} was not discovered"));
+        }
+        let output = match local_output_with_timeout(
+            binary,
+            config,
+            ["call", tool, "--arguments", "{}"],
+            CALL_TIMEOUT,
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(error);
+                }
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+        let result: Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        if result["structuredContent"].get("error").is_none()
+            && result["structuredContent"]["documents"].is_array()
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{tool} did not become usable after config reload: {}",
+                result["structuredContent"]
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn expect_missing_room_config(
+    binary: &Path,
+    config: &Path,
+    tool: &str,
+    code: &str,
+    missing_path: &str,
+) -> Result<(), String> {
+    expect_local_tool_error(binary, config, tool, "{}", code, missing_path)
+}
+
+fn local_output_with_timeout<const N: usize>(
+    binary: &Path,
+    config: &Path,
+    args: [&str; N],
+    timeout: Duration,
+) -> Result<Output, String> {
+    output_with_timeout(
+        command(binary, config.parent().expect("fixture config parent"))
+            .args(["local", "--config"])
+            .arg(config)
+            .args(args),
+        timeout,
+    )
+    .and_then(|output| {
+        ensure_success(&output, "local CLI")?;
+        Ok(output)
+    })
+}
+
+fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+    let capture_root = std::env::temp_dir().join(format!("agentic-cli-{}", Uuid::new_v4()));
+    fs::create_dir(&capture_root).map_err(|error| error.to_string())?;
+    let _capture_cleanup = RootCleanup(capture_root.clone());
+    let stdout_path = capture_root.join("stdout");
+    let stderr_path = capture_root.join("stderr");
+    let mut child = command
+        .stdout(Stdio::from(
+            fs::File::create(&stdout_path).map_err(|error| error.to_string())?,
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(&stderr_path).map_err(|error| error.to_string())?,
+        ))
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok(Output {
+                    status,
+                    stdout: fs::read(&stdout_path).map_err(|error| error.to_string())?,
+                    stderr: fs::read(&stderr_path).map_err(|error| error.to_string())?,
+                });
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                // Every fixture command starts its own process group; kill and
+                // reap the entire group if a local MCP call gets stuck.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("fixture command timed out".to_string());
+            }
+            Err(error) => {
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+        }
+    }
+}
+
 fn run_local_e2e(root: &Path) -> Result<(), String> {
     let binary = binary_path();
     let config_path = root.join("config.json");

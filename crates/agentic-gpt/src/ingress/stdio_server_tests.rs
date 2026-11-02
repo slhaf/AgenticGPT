@@ -952,6 +952,8 @@ async fn in_process_room_stdio_initialize_list_and_call() -> anyhow::Result<()> 
     let (client_read, client_write) = split(client_io);
     let (server_read, server_write) = split(server_io);
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
+    let _cleanup = TestStateCleanup::for_server(&server).await;
+    std::fs::create_dir_all(server.state.config.read().await.workspace_root.join("room"))?;
     let server_task = tokio::spawn(async move {
         let transport = AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
         let running = server
@@ -2649,6 +2651,8 @@ async fn wp2_hub_normal_direct_skills_require_capability() -> anyhow::Result<()>
 #[tokio::test]
 async fn room_profile_dispatches_room_memory_tools() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
+    let _cleanup = TestStateCleanup::for_server(&server).await;
+    std::fs::create_dir_all(server.state.config.read().await.workspace_root.join("room"))?;
     let bootstrap = server.dispatch("bootstrap", json!({})).await?;
     assert!(bootstrap.get("entrypoint").is_some());
     let skills = server.dispatch("skills.list", json!({})).await?;

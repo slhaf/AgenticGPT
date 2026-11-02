@@ -23,9 +23,11 @@ pub(crate) enum EmailTls {
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct EmailAccountConfig {
+    #[serde(default)]
     pub(crate) imap_host: String,
     #[serde(default = "default_imap_port")]
     pub(crate) imap_port: u16,
+    #[serde(default)]
     pub(crate) smtp_host: String,
     #[serde(default = "default_smtp_port")]
     pub(crate) smtp_port: u16,
@@ -33,8 +35,11 @@ pub(crate) struct EmailAccountConfig {
     pub(crate) imap_tls: EmailTls,
     #[serde(default)]
     pub(crate) smtp_tls: EmailTls,
+    #[serde(default)]
     pub(crate) username: String,
+    #[serde(default)]
     pub(crate) password: String,
+    #[serde(default)]
     pub(crate) from: String,
 }
 
@@ -89,14 +94,6 @@ impl Default for EmailConfig {
 
 impl EmailConfig {
     pub(crate) fn validate(&self) -> Result<()> {
-        self.validate_with_completeness(false)
-    }
-
-    pub(crate) fn validate_enabled(&self) -> Result<()> {
-        self.validate_with_completeness(true)
-    }
-
-    fn validate_with_completeness(&self, require_account: bool) -> Result<()> {
         if !(10..=86400).contains(&self.sync_interval_seconds) {
             return Err(anyhow!("email_sync_interval_seconds_invalid"));
         }
@@ -106,14 +103,10 @@ impl EmailConfig {
         if self.max_storage_bytes < 1024 * 1024 {
             return Err(anyhow!("email_max_storage_bytes_invalid"));
         }
-        if require_account && self.account.is_none() {
-            return Err(anyhow!("email_account_required"));
-        }
         if let Some(account) = &self.account {
             for host in [&account.imap_host, &account.smtp_host] {
-                if (require_account || !host.is_empty())
-                    && (host.is_empty()
-                        || host.chars().any(|c| c.is_whitespace() || c.is_control())
+                if !host.is_empty()
+                    && (host.chars().any(|c| c.is_whitespace() || c.is_control())
                         || host.contains(['/', '@', '?', '#']))
                 {
                     return Err(anyhow!("email_account_host_invalid"));
@@ -122,14 +115,14 @@ impl EmailConfig {
             if account.imap_port == 0 || account.smtp_port == 0 {
                 return Err(anyhow!("email_account_port_invalid"));
             }
-            if (require_account || !account.username.is_empty())
+            if !account.username.is_empty()
                 && (account.username.trim().is_empty()
                     || account.username.chars().any(char::is_control))
             {
                 return Err(anyhow!("email_account_username_invalid"));
             }
             let from = &account.from;
-            if (require_account || !from.is_empty())
+            if !from.is_empty()
                 && (from.trim() != from
                     || !from.contains('@')
                     || from.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -137,11 +130,33 @@ impl EmailConfig {
             {
                 return Err(anyhow!("email_account_from_invalid"));
             }
-            if require_account || !account.password.is_empty() {
+            if !account.password.is_empty() {
                 super::validate_secret_reference(&account.password)
                     .map_err(|_| anyhow!("email_account_password_reference_invalid"))?;
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn configured_account(
+        &self,
+    ) -> std::result::Result<&EmailAccountConfig, &'static str> {
+        let account = self.account.as_ref().ok_or("email.account")?;
+        if account.imap_host.is_empty() {
+            return Err("email.account.imapHost");
+        }
+        if account.smtp_host.is_empty() {
+            return Err("email.account.smtpHost");
+        }
+        if account.username.is_empty() {
+            return Err("email.account.username");
+        }
+        if account.from.is_empty() {
+            return Err("email.account.from");
+        }
+        if account.password.is_empty() {
+            return Err("email.account.password");
+        }
+        Ok(account)
     }
 }

@@ -60,7 +60,7 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     if old.email.account == next.email.account {
         errors.remove("email.account");
     }
-    if old.room.repository_root == next.room.repository_root {
+    if !next.toolsets.uses_room_repository() {
         errors.remove("room.repositoryRoot");
     }
     let mut old_connection = old.room.secret.clone();
@@ -154,7 +154,8 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
 
     let room_changed = next.toolsets.uses_room_repository()
         && (old.room.repository_root != next.room.repository_root
-            || !old.toolsets.uses_room_repository());
+            || !old.toolsets.uses_room_repository()
+            || errors.contains_key("room.repositoryRoot"));
     let _room = if room_changed {
         Some(state.room_repository_writes.lock().await)
     } else {
@@ -163,30 +164,6 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     if room_changed {
         errors.remove("room.repositoryRoot");
         if let Err(error) = crate::room_repository::ensure_repository(&next) {
-            next.room.repository_root = old.room.repository_root.clone();
-            let mut toolset_changed = false;
-            for namespace in crate::config::ToolNamespace::all()
-                .iter()
-                .copied()
-                .filter(|namespace| namespace.uses_room_repository())
-            {
-                let was_enabled = old.toolsets.is_enabled(namespace);
-                let is_enabled = next.toolsets.is_enabled(namespace);
-                if was_enabled != is_enabled {
-                    toolset_changed = true;
-                    if was_enabled {
-                        next.toolsets.enable(namespace);
-                    } else {
-                        next.toolsets.disable(namespace);
-                    }
-                }
-            }
-            if toolset_changed {
-                errors.insert(
-                    "toolsets.enabled".into(),
-                    "room_repository_unavailable".into(),
-                );
-            }
             errors.insert(
                 "room.repositoryRoot".into(),
                 crate::startup::error_code(&error.to_string()),
@@ -222,7 +199,9 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
             None
         };
         if enabled && prepared.is_none() {
-            next.browser = old.browser.clone();
+            if slot.is_some() {
+                next.browser = old.browser.clone();
+            }
             errors.insert("browser".into(), "browser_runtime_unavailable".into());
         } else {
             let stopped = if let Some(context) = slot.as_ref() {
@@ -244,7 +223,11 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
                 }
             }
         }
-        if let Some(error) = errors.get("browser").cloned() {
+        if let Some(error) = errors
+            .get("browser")
+            .filter(|error| error.as_str() != "browser_runtime_unavailable")
+            .cloned()
+        {
             if old
                 .toolsets
                 .is_enabled(crate::config::ToolNamespace::Browser)
@@ -374,8 +357,18 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
 }
 
 impl ConfigRuntime {
-    pub(crate) fn new(config: &Config, browser_available: bool) -> Self {
+    pub(crate) fn new(
+        config: &Config,
+        browser_available: bool,
+        room_error: Option<String>,
+    ) -> Self {
         let mut runtime = Self::default();
+        if let Some(error) = room_error {
+            runtime
+                .errors
+                .get_mut()
+                .insert("room.repositoryRoot".into(), error);
+        }
         if config
             .toolsets
             .is_enabled(crate::config::ToolNamespace::Browser)

@@ -161,12 +161,8 @@ pub(super) fn localized_error(code: &str, language: UiLanguage) -> String {
             "密钥策略仅允许 allow 或 confirm。",
         ),
         "room_secret_config_invalid" => (
-            "Check the Room Secret settings before enabling the service.",
-            "启用服务前请检查 Room Secret 配置。",
-        ),
-        "room_secret_config_required_when_enabled" => (
-            "Complete the Room Secret server, account, and credential references before enabling it.",
-            "启用 Room Secret 前请填写服务地址、账号和凭据引用。",
+            "Check the Room Secret settings.",
+            "请检查 Room Secret 配置。",
         ),
         "email_sync_interval_seconds_invalid" => (
             "Sync interval must be from 10 through 86400 seconds.",
@@ -208,14 +204,6 @@ pub(super) fn localized_error(code: &str, language: UiLanguage) -> String {
         "email_policy_invalid" => (
             "Choose allow, confirm, or deny for the email action policy.",
             "邮件操作策略请选择 allow、confirm 或 deny。",
-        ),
-        "email_account_required" => (
-            "Configure the email account before enabling email.",
-            "启用邮件前请先填写完整账户信息。",
-        ),
-        "email_config_required_when_enabled" => (
-            "Complete the email account settings before enabling email.",
-            "启用邮件前请先填写完整账户信息。",
         ),
         "config_init_room_maintenance_mode_invalid" => (
             "Maintenance mode must be local or workflow.",
@@ -3590,6 +3578,7 @@ fn optional_center_inspector_body(
                 OptionalSection::Email => &[
                     "Configure IMAP/SMTP, synchronization, local storage, and sending/trash permissions.",
                     "Enable or disable room.email in Toolsets; this page only edits service settings.",
+                    "Email calls require a complete account; settings can be filled in later.",
                     "Account connection changes apply after active requests drain; other changes apply immediately.",
                     "Password: env:NAME or file:/absolute/path. TLS: implicit or starttls. Policies: allow, confirm, deny.",
                 ],
@@ -3599,7 +3588,7 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::RoomSecret => &[
                     "Configure the Room Secret API here; enable or disable room.secret in Toolsets.",
-                    "Enabling the Room Secret toolset requires a complete server URL, account, and credential references.",
+                    "Secret calls require a complete server URL, account, and credential references.",
                     "Credentials use env:NAME or file:/absolute/path references.",
                 ],
                 OptionalSection::TunnelClient => &[
@@ -3690,6 +3679,7 @@ fn optional_center_inspector_body(
                 OptionalSection::Email => &[
                     "配置 IMAP/SMTP、同步、本地保存及发送和移入垃圾箱权限。",
                     "启停在 Toolsets 中设置 room.email；本页只编辑服务参数。",
+                    "邮件调用需要完整账户信息；可以开启工具集后再填写。",
                     "账户连接修改排空在途请求后生效；其他修改立即生效。",
                     "密码使用 env:NAME 或 file:/绝对路径。加密方式：implicit 或 starttls；策略：allow、confirm、deny。",
                 ],
@@ -3699,7 +3689,7 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::RoomSecret => &[
                     "本页只编辑密钥服务参数；启停在 Toolsets 中设置 room.secret。",
-                    "启用 Room Secret 工具集前，必须配置完整服务地址、账号和凭据引用。",
+                    "密钥调用需要完整服务地址、账号和凭据引用；可以开启工具集后再填写。",
                     "凭据使用 env:NAME 或 file:/绝对路径引用。",
                 ],
                 OptionalSection::TunnelClient => &[
@@ -3859,7 +3849,7 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::EmailUsername => &[
                     "Enter the account username used to authenticate with the mail server.",
-                    "It must be non-empty when an account is configured.",
+                    "Email calls require a non-empty username.",
                 ],
                 SetupField::EmailPassword => &[
                     "Enter a secret reference, not the password itself: env:NAME or file:/absolute/path.",
@@ -4100,7 +4090,7 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::EmailUsername => &[
                     "填写登录邮件服务器时使用的账户名。",
-                    "配置账户时此项不能为空。",
+                    "调用邮件 API 时此项不能为空。",
                 ],
                 SetupField::EmailPassword => &[
                     "填写密钥引用，不要填写密码明文：env:NAME 或 file:/绝对路径。",

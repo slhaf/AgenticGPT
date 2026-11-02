@@ -380,6 +380,10 @@ pub(crate) fn inspect_repository(config: &Config) -> Result<RepositoryStatus> {
         reject_unresolved_path_components(&candidate)?;
     }
     let root = normalized_existing_or_missing(&repository_root(config))?;
+    let workspace = normalized_existing_or_missing(&config.workspace_root)?;
+    if root == workspace {
+        return Err(anyhow!("room_repository_root_must_be_separate"));
+    }
     let root_exists = fs::symlink_metadata(&root)
         .map(|metadata| !metadata.file_type().is_symlink() && metadata.is_dir())
         .unwrap_or(false);

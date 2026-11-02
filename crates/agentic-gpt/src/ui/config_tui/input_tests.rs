@@ -438,24 +438,13 @@ fn room_service_preconfiguration_and_review_share_toolset_state() {
         .any(|value| value == "room.secret"));
 }
 
-// Review confirmation must focus the missing service setting even when its
-// settings page has never been opened or saved.
+// Toolsets can be enabled through the form and reach the final Review preview
+// even when their separate service settings have not been filled in yet.
 #[test]
-fn enabling_unconfigured_services_focuses_review_on_missing_settings() {
+fn enabling_unconfigured_services_can_reach_review_confirmation() {
     use crate::config::ToolNamespace;
 
-    for (namespace, section, field) in [
-        (
-            ToolNamespace::RoomEmail,
-            OptionalSection::Email,
-            SetupField::EmailImapHost,
-        ),
-        (
-            ToolNamespace::RoomSecret,
-            OptionalSection::RoomSecret,
-            SetupField::RoomSecretServerUrl,
-        ),
-    ] {
+    for namespace in [ToolNamespace::RoomEmail, ToolNamespace::RoomSecret] {
         let mut app = app();
         app.session_mut().set_profile(WorkerProfile::Normal);
         app.handle_action(TuiAction::Next).unwrap();
@@ -489,10 +478,13 @@ fn enabling_unconfigured_services_focuses_review_on_missing_settings() {
         assert_eq!(app.page(), ConfigPage::Review);
         app.state.focus = app.review_row_count();
         key(&mut app, KeyCode::Enter);
-        assert!(!app.review_preview_active());
-        let (group, item) = app.review_model().unwrap().row(app.state.focus).unwrap();
-        assert_eq!(group.target, ReviewTarget::OptionalSection(section));
-        assert_eq!(item.field, Some(field));
-        assert!(app.field_errors.contains_key(&field));
+        assert!(app.review_preview_active());
+        let preview: serde_json::Value =
+            serde_json::from_str(app.state.review_preview_json.as_ref().unwrap()).unwrap();
+        assert!(preview["toolsets"]["enabled"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == namespace.as_str()));
     }
 }
