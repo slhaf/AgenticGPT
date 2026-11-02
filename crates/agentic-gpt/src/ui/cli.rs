@@ -5,15 +5,16 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
+use std::time::Instant;
 use tokio::time::{sleep, Duration};
 
 use crate::{
-    cli_i18n::{self, LanguageChoice},
+    cli_i18n::{self, LanguageChoice, UiLanguage},
     config::{Config, WorkerProfile},
     config_cli::{self, ConfigCommand},
     local_control, operation, startup,
     state::RuntimeModel,
-    tmux, tui,
+    tmux, tui, tunnel_distribution,
     utils::config_path,
 };
 pub(crate) async fn run() -> Result<()> {
@@ -46,6 +47,11 @@ pub(crate) async fn run() -> Result<()> {
         }
         Commands::Tui { config } => handle_tui(config_path(config), language).await,
         Commands::Tmux { config, command } => handle_tmux(config_path(config), command).await,
+        Commands::TunnelClient { command } => match command {
+            TunnelClientCommand::Download { config } => {
+                handle_tunnel_client_download(config_path(config), language).await
+            }
+        },
         Commands::Email { config, command } => {
             let path = config_path(config);
             let _lock = crate::instance_lock::InstanceLock::acquire(&path, ".run.lock", "agent")?;
@@ -119,6 +125,96 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: TmuxCommand,
     },
+    TunnelClient {
+        #[command(subcommand)]
+        command: TunnelClientCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum TunnelClientCommand {
+    Download {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+}
+
+async fn handle_tunnel_client_download(config_path: PathBuf, language: UiLanguage) -> Result<()> {
+    let config = Config::load_or_default(&config_path)?;
+    let client = config
+        .tunnel
+        .as_ref()
+        .map(|tunnel| tunnel.client.clone())
+        .unwrap_or_default();
+    let mut stderr = std::io::stderr();
+    let is_terminal = stderr.is_terminal();
+    let mut last_report = Instant::now();
+    let mut last_progress = (0u64, None);
+    let mut progress_started = false;
+    let outcome = tunnel_distribution::download_managed(&client, |downloaded, total| {
+        progress_started = true;
+        last_progress = (downloaded, total);
+        if last_report.elapsed() < Duration::from_secs(1) && downloaded != 0 {
+            return;
+        }
+        last_report = Instant::now();
+        let message = format_download_progress(downloaded, total, language);
+        if is_terminal {
+            eprint!("\r{message}");
+            let _ = std::io::Write::flush(&mut stderr);
+        } else {
+            eprintln!("{message}");
+        }
+    })
+    .await;
+    if last_progress.0 != 0 {
+        let message = format_download_progress(last_progress.0, last_progress.1, language);
+        if is_terminal {
+            eprint!("\r{message}");
+        } else {
+            eprintln!("{message}");
+        }
+    }
+    if is_terminal && progress_started {
+        eprintln!();
+    }
+    let outcome = outcome?;
+    use tunnel_distribution::ManagedClientOutcome::{AlreadyAvailable, Downloaded, Repaired};
+    let version = tunnel_distribution::PINNED_VERSION;
+    let message = match (language, outcome) {
+        (UiLanguage::En, AlreadyAvailable) => {
+            format!("tunnel-client v{version} is already available")
+        }
+        (UiLanguage::En, Repaired) => {
+            format!("repaired tunnel-client v{version} from the verified archive")
+        }
+        (UiLanguage::En, Downloaded) => format!("downloaded tunnel-client v{version}"),
+        (UiLanguage::ZhCn, AlreadyAvailable) => format!("tunnel-client v{version} 已可用"),
+        (UiLanguage::ZhCn, Repaired) => {
+            format!("已使用验证通过的归档修复 tunnel-client v{version}")
+        }
+        (UiLanguage::ZhCn, Downloaded) => format!("已下载 tunnel-client v{version}"),
+    };
+    println!("{message}");
+    Ok(())
+}
+
+fn format_download_progress(downloaded: u64, total: Option<u64>, language: UiLanguage) -> String {
+    let prefix = match language {
+        UiLanguage::En => "tunnel-client download",
+        UiLanguage::ZhCn => "正在下载 tunnel-client",
+    };
+    let bytes = match language {
+        UiLanguage::En => "bytes",
+        UiLanguage::ZhCn => "字节",
+    };
+    match total {
+        Some(total) if total > 0 => format!(
+            "{prefix}: {downloaded} / {total} {bytes} ({:.1}%)",
+            downloaded as f64 * 100.0 / total as f64
+        ),
+        _ => format!("{prefix}: {downloaded} {bytes}"),
+    }
 }
 
 #[derive(Subcommand)]

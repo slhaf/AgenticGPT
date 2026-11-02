@@ -1107,18 +1107,10 @@ pub(crate) struct TunnelConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TunnelClientConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) version: Option<String>,
     #[serde(default = "default_tunnel_cache_dir")]
     pub(crate) cache_dir: PathBuf,
-    #[serde(default = "default_true")]
-    pub(crate) auto_download: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) executable: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) download_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1150,12 +1142,8 @@ impl std::fmt::Display for ReportingDetail {
 impl Default for TunnelClientConfig {
     fn default() -> Self {
         Self {
-            version: None,
             cache_dir: default_tunnel_cache_dir(),
-            auto_download: true,
             executable: None,
-            download_url: None,
-            sha256: None,
         }
     }
 }
@@ -1619,8 +1607,6 @@ impl Config {
                 api_key_source: secret_reference_kind(&tunnel.api_key),
                 client_source: if tunnel.client.executable.is_some() {
                     "executable".to_string()
-                } else if tunnel.client.download_url.is_some() {
-                    "custom-url".to_string()
                 } else {
                     "managed".to_string()
                 },
@@ -1723,19 +1709,6 @@ impl Config {
             return Err(anyhow!("tunnel_id_required"));
         }
         validate_secret_reference(&tunnel.api_key)?;
-        if let Some(url) = tunnel.client.download_url.as_deref() {
-            if !url.starts_with("https://") {
-                return Err(anyhow!("tunnel_download_url_must_use_https"));
-            }
-            if tunnel.client.sha256.is_none() {
-                return Err(anyhow!("tunnel_download_sha256_required"));
-            }
-        }
-        if let Some(sha256) = tunnel.client.sha256.as_deref() {
-            if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(anyhow!("tunnel_sha256_invalid"));
-            }
-        }
         match tunnel.hub_reporting.detail {
             ReportingDetail::Metadata | ReportingDetail::Full => {}
         }
@@ -2074,10 +2047,6 @@ fn default_skill_max_attempts() -> u32 {
 }
 fn default_skill_total_deadline_secs() -> u64 {
     600
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_tunnel_cache_dir() -> PathBuf {

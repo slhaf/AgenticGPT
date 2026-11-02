@@ -13,17 +13,16 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Result};
 use chrono::DateTime;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::config::{validate_secret_reference, Config, RuntimeMode};
 use crate::instance_lock::InstanceLock;
 use crate::state::CapabilityProfile;
-use crate::tunnel_distribution::ResolvedTunnelClient;
 use crate::utils::{agentic_home, ensure_parent, log_error, log_info, log_warn};
 
 pub(crate) const WORKER_AUTH_ENV: &str = "AGENTIC_GPT_SUPERVISOR_TOKEN";
@@ -55,6 +54,7 @@ pub(crate) async fn run(config_path: PathBuf) -> Result<()> {
     if config.mode != RuntimeMode::Standalone {
         return Err(anyhow!("runtime_mode_not_standalone"));
     }
+    let mut signals = ShutdownSignals::new()?;
     let profile = config.profile.capability_profile();
     config.validate_standalone()?;
     config.ensure_workspace()?;
@@ -76,7 +76,10 @@ pub(crate) async fn run(config_path: PathBuf) -> Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow!("tunnel_config_required"))?;
         let secret = resolve_secret(&tunnel.api_key)?;
-        let resolved = crate::tunnel_distribution::resolve(&config).await?;
+        let resolved = tokio::select! {
+            resolved = crate::tunnel_distribution::resolve(&config) => resolved?,
+            _ = signals.next() => return Ok(()),
+        };
         let invocation = Invocation::new(
             config_path.clone(),
             profile,
@@ -85,12 +88,14 @@ pub(crate) async fn run(config_path: PathBuf) -> Result<()> {
             resolved,
             runtime_paths.clone(),
         )?;
-        run_doctor(&invocation).await?;
+        if !run_doctor(&invocation, &mut signals).await? {
+            return Ok(());
+        }
         let watcher = tokio::spawn(watch_startup_identity(
             config_path.clone(),
             runtime_identity,
         ));
-        let result = run_loop(&invocation, &runtime_paths).await;
+        let result = run_loop(&config, &invocation, &runtime_paths, &mut signals).await;
         watcher.abort();
         result
     }
@@ -106,6 +111,30 @@ pub(crate) fn authorize_worker(token: Option<&str>) -> Result<()> {
     if std::env::var(WORKER_AUTH_ENV).ok().as_deref() != Some(token) {
         return Err(anyhow!("stdio_worker_unauthorized"));
     }
+    Ok(())
+}
+
+/// The pinned client launches its stdio worker directly in its own process group.
+/// If that client dies, the worker must not keep the local socket or its siblings alive.
+#[cfg(target_os = "linux")]
+pub(crate) fn watch_tunnel_parent() -> Result<()> {
+    let group = unsafe { libc::getpgrp() };
+    let parent = unsafe { libc::getppid() };
+    if parent != group || group == unsafe { libc::getpid() } {
+        return Err(anyhow!("tunnel_parent_unavailable"));
+    }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if unsafe { libc::getppid() } != group {
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+            std::process::exit(1);
+        }
+    });
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn watch_tunnel_parent() -> Result<()> {
     Ok(())
 }
 
@@ -262,12 +291,8 @@ struct StartupIdentity {
     workspace_root: PathBuf,
     tunnel_id: String,
     api_key_reference: String,
-    version: Option<String>,
     cache_dir: PathBuf,
-    auto_download: bool,
     executable: Option<PathBuf>,
-    download_url: Option<String>,
-    sha256: Option<String>,
     profile: CapabilityProfile,
 }
 
@@ -282,12 +307,8 @@ impl StartupIdentity {
             workspace_root: config.workspace_root.clone(),
             tunnel_id: tunnel.tunnel_id.clone(),
             api_key_reference: tunnel.api_key.clone(),
-            version: tunnel.client.version.clone(),
             cache_dir: tunnel.client.cache_dir.clone(),
-            auto_download: tunnel.client.auto_download,
             executable: tunnel.client.executable.clone(),
-            download_url: tunnel.client.download_url.clone(),
-            sha256: tunnel.client.sha256.clone(),
             profile,
         })
     }
@@ -419,7 +440,7 @@ impl Invocation {
         profile: CapabilityProfile,
         tunnel_id: String,
         secret: String,
-        resolved: ResolvedTunnelClient,
+        resolved: PathBuf,
         paths: RuntimePaths,
     ) -> Result<Self> {
         let worker =
@@ -439,7 +460,7 @@ impl Invocation {
         Ok(Self {
             tunnel_id,
             secret,
-            executable: resolved.path,
+            executable: resolved,
             worker_command,
             worker_token,
             paths,
@@ -475,6 +496,8 @@ impl Invocation {
     fn run_args(&self) -> Vec<String> {
         let mut args = self.common_args("run");
         args.extend([
+            "--mcp.stdio-failure-policy".to_owned(),
+            "exit".to_owned(),
             "--log.format".to_owned(),
             "json".to_owned(),
             "--log.file".to_owned(),
@@ -517,23 +540,49 @@ impl Default for SupervisorPolicy {
     }
 }
 
-async fn run_loop(invocation: &Invocation, paths: &RuntimePaths) -> Result<()> {
+async fn run_loop(
+    config: &Config,
+    invocation: &Invocation,
+    paths: &RuntimePaths,
+    signals: &mut ShutdownSignals,
+) -> Result<()> {
     let policy = SupervisorPolicy::default();
-    let mut signals = ShutdownSignals::new()?;
+    let mut invocation = invocation.clone();
     let mut failures = 0usize;
     loop {
-        let mut process = spawn_tunnel(invocation)?;
-        let readiness = wait_until_ready(&mut process.child, paths, &policy, &mut signals).await?;
+        let resolved = tokio::select! {
+            resolved = crate::tunnel_distribution::resolve(config) => resolved?,
+            _ = signals.next() => return Ok(()),
+        };
+        invocation.executable = resolved;
+        paths.remove_stale_files();
+        let mut process = spawn_tunnel(&invocation)?;
+        let readiness = match wait_until_ready(&mut process.child, paths, &policy, signals).await {
+            Ok(readiness) => readiness,
+            Err(error) => {
+                let cleanup = terminate(&mut process.child, process.group_id, Duration::ZERO).await;
+                process.stop_log_tasks();
+                cleanup?;
+                return Err(error);
+            }
+        };
         match readiness {
             Readiness::Shutdown => {
-                terminate(&mut process.child, policy.graceful_shutdown_timeout).await;
+                let cleanup = terminate(
+                    &mut process.child,
+                    process.group_id,
+                    policy.graceful_shutdown_timeout,
+                )
+                .await;
                 process.stop_log_tasks();
+                cleanup?;
                 return Ok(());
             }
             Readiness::Ready => {}
             failure @ (Readiness::Exited(_) | Readiness::Timeout) => {
-                kill_after_failure(&mut process.child).await;
+                let cleanup = terminate(&mut process.child, process.group_id, Duration::ZERO).await;
                 process.stop_log_tasks();
+                cleanup?;
                 failures += 1;
                 let code = match failure {
                     Readiness::Exited(code) => code,
@@ -548,7 +597,7 @@ async fn run_loop(invocation: &Invocation, paths: &RuntimePaths) -> Result<()> {
                         return Err(anyhow!("standalone_restart_budget_exhausted"));
                     }
                     RestartDecision::Retry(delay) => {
-                        if sleep_or_shutdown(delay, &mut signals).await {
+                        if sleep_or_shutdown(delay, signals).await {
                             return Ok(());
                         }
                     }
@@ -557,14 +606,20 @@ async fn run_loop(invocation: &Invocation, paths: &RuntimePaths) -> Result<()> {
             }
         }
 
-        match wait_running(&mut process.child, &policy, &mut signals, &mut failures).await? {
+        let result = wait_running(&mut process.child, &policy, signals, &mut failures).await;
+        let cleanup = terminate(
+            &mut process.child,
+            process.group_id,
+            policy.graceful_shutdown_timeout,
+        )
+        .await;
+        process.stop_log_tasks();
+        cleanup?;
+        match result? {
             RunResult::Shutdown => {
-                terminate(&mut process.child, policy.graceful_shutdown_timeout).await;
-                process.stop_log_tasks();
                 return Ok(());
             }
             RunResult::Exited(code) => {
-                process.stop_log_tasks();
                 failures += 1;
                 match restart_decision(failures, code, &policy.backoffs) {
                     RestartDecision::Permanent => {
@@ -574,7 +629,7 @@ async fn run_loop(invocation: &Invocation, paths: &RuntimePaths) -> Result<()> {
                         return Err(anyhow!("standalone_restart_budget_exhausted"));
                     }
                     RestartDecision::Retry(delay) => {
-                        if sleep_or_shutdown(delay, &mut signals).await {
+                        if sleep_or_shutdown(delay, signals).await {
                             return Ok(());
                         }
                     }
@@ -586,6 +641,7 @@ async fn run_loop(invocation: &Invocation, paths: &RuntimePaths) -> Result<()> {
 
 struct RunningProcess {
     child: Child,
+    group_id: u32,
     log_tasks: Vec<JoinHandle<()>>,
 }
 
@@ -603,7 +659,8 @@ fn spawn_tunnel(invocation: &Invocation) -> Result<RunningProcess> {
         .args(invocation.run_args())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     invocation.command_env(&mut command);
     configure_process_group(&mut command);
     let mut child = command
@@ -626,35 +683,92 @@ fn spawn_tunnel(invocation: &Invocation) -> Result<RunningProcess> {
             invocation.worker_token.clone(),
         )));
     }
-    Ok(RunningProcess { child, log_tasks })
+    let group_id = child
+        .id()
+        .ok_or_else(|| anyhow!("tunnel_client_pid_unavailable"))?;
+    Ok(RunningProcess {
+        child,
+        group_id,
+        log_tasks,
+    })
 }
 
-async fn run_doctor(invocation: &Invocation) -> Result<()> {
+async fn run_doctor(invocation: &Invocation, signals: &mut ShutdownSignals) -> Result<bool> {
     let mut command = Command::new(&invocation.executable);
     command
         .args(invocation.doctor_args())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     invocation.command_env(&mut command);
-    let output = command
-        .output()
-        .await
+    configure_process_group(&mut command);
+    let mut child = command
+        .spawn()
         .map_err(|error| spawn_error("tunnel_doctor_spawn_failed", error))?;
-    if !output.status.success() {
-        let exit_code = output
-            .status
+    let group_id = child
+        .id()
+        .ok_or_else(|| anyhow!("tunnel_doctor_pid_unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("tunnel_doctor_output_failed"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("tunnel_doctor_output_failed"))?;
+    let stdout_task = tokio::spawn(async move {
+        let mut output = Vec::new();
+        let mut stdout = stdout;
+        stdout.read_to_end(&mut output).await.map(|_| output)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut output = Vec::new();
+        let mut stderr = stderr;
+        stderr.read_to_end(&mut output).await.map(|_| output)
+    });
+    let status = tokio::select! {
+        status = child.wait() => Some(status),
+        _ = signals.next() => None,
+    };
+    let cleanup = terminate(&mut child, group_id, GRACEFUL_SHUTDOWN_TIMEOUT).await;
+    let status = match status {
+        Some(Ok(status)) => status,
+        None => {
+            stdout_task.abort();
+            stderr_task.abort();
+            cleanup?;
+            return Ok(false);
+        }
+        Some(Err(_)) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            cleanup?;
+            return Err(anyhow!("tunnel_doctor_wait_failed"));
+        }
+    };
+    cleanup?;
+    let stdout = stdout_task
+        .await
+        .map_err(|_| anyhow!("tunnel_doctor_output_failed"))?
+        .map_err(|_| anyhow!("tunnel_doctor_output_failed"))?;
+    let stderr = stderr_task
+        .await
+        .map_err(|_| anyhow!("tunnel_doctor_output_failed"))?
+        .map_err(|_| anyhow!("tunnel_doctor_output_failed"))?;
+    if !status.success() {
+        let exit_code = status
             .code()
             .map(|code| code.to_string())
             .unwrap_or_else(|| "signal".to_owned());
         let redactions = [invocation.secret.as_str(), invocation.worker_token.as_str()];
-        let stdout = bounded_redacted_output(&output.stdout, &redactions);
-        let stderr = bounded_redacted_output(&output.stderr, &redactions);
+        let stdout = bounded_redacted_output(&stdout, &redactions);
+        let stderr = bounded_redacted_output(&stderr, &redactions);
         return Err(anyhow!(
             "tunnel_doctor_failed: exit_code={exit_code}; stdout={stdout:?}; stderr={stderr:?}"
         ));
     }
-    Ok(())
+    Ok(true)
 }
 
 fn spawn_error(operation: &str, error: io::Error) -> anyhow::Error {
@@ -938,19 +1052,42 @@ async fn health_ready_with_client(client: &reqwest::Client, base_url: &str) -> b
         && matches!(client.get(ready).send().await, Ok(response) if response.status().is_success())
 }
 
-async fn terminate(child: &mut Child, grace: Duration) {
-    send_process_signal(child.id(), signal_term());
-    if timeout(grace, child.wait()).await.is_err() {
-        send_process_signal(child.id(), signal_kill());
-        let _ = child.kill().await;
-        let _ = timeout(Duration::from_secs(1), child.wait()).await;
+async fn terminate(child: &mut Child, group_id: u32, grace: Duration) -> Result<()> {
+    send_process_signal(group_id, signal_term())?;
+    let deadline = Instant::now() + grace;
+    loop {
+        child
+            .try_wait()
+            .map_err(|_| anyhow!("tunnel_client_wait_failed"))?;
+        if !process_group_exists(group_id)? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
     }
-}
 
-async fn kill_after_failure(child: &mut Child) {
-    send_process_signal(child.id(), signal_kill());
-    let _ = child.kill().await;
-    let _ = timeout(Duration::from_secs(1), child.wait()).await;
+    send_process_signal(group_id, signal_kill())?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        child
+            .try_wait()
+            .map_err(|_| anyhow!("tunnel_client_wait_failed"))?;
+        if !process_group_exists(group_id)? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            // A container's PID 1 may leave exited descendants as zombies. They
+            // cannot retain sockets, even though kill(-pgid, 0) still sees them.
+            #[cfg(target_os = "linux")]
+            if matches!(process_group_has_live_members(group_id), Ok(false)) {
+                return Ok(());
+            }
+            return Err(anyhow!("tunnel_process_group_termination_unverified"));
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
 }
 
 fn quote_arg(value: impl AsRef<str>) -> String {
@@ -986,10 +1123,20 @@ fn set_private_file(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn configure_process_group(command: &mut Command) {
+    let parent = std::process::id() as libc::pid_t;
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             if libc::setpgid(0, 0) != 0 {
                 return Err(io::Error::last_os_error());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
             }
             Ok(())
         });
@@ -1000,16 +1147,73 @@ fn configure_process_group(command: &mut Command) {
 fn configure_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
-fn send_process_signal(pid: Option<u32>, signal: i32) {
-    if let Some(pid) = pid {
-        unsafe {
-            let _ = libc::kill(-(pid as libc::pid_t), signal);
-        }
+fn send_process_signal(group_id: u32, signal: i32) -> io::Result<()> {
+    if unsafe { libc::kill(-(group_id as libc::pid_t), signal) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
     }
 }
 
 #[cfg(not(unix))]
-fn send_process_signal(_pid: Option<u32>, _signal: i32) {}
+fn send_process_signal(_group_id: u32, _signal: i32) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn process_group_exists(group_id: u32) -> io::Result<bool> {
+    if unsafe { libc::kill(-(group_id as libc::pid_t), 0) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(not(unix))]
+fn process_group_exists(_group_id: u32) -> io::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn process_group_has_live_members(group_id: u32) -> io::Result<bool> {
+    let expected_group = group_id.to_string();
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        let stat = match fs::read(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let end = stat
+            .iter()
+            .rposition(|byte| *byte == b')')
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid process stat"))?;
+        let mut fields = stat[end + 1..]
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty());
+        let state = fields
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid process stat"))?;
+        let group = fields
+            .nth(1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid process stat"))?;
+        if group == expected_group.as_bytes() && state != b"Z" && state != b"X" && state != b"x" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 #[cfg(unix)]
 fn signal_term() -> i32 {
@@ -1151,7 +1355,11 @@ mod tests {
             },
         };
 
-        let error = run_doctor(&invocation).await.unwrap_err().to_string();
+        let mut signals = ShutdownSignals::new().unwrap();
+        let error = run_doctor(&invocation, &mut signals)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("tunnel_doctor_failed"));
         assert!(error.contains("exit_code=7"));
         assert!(error.contains("public stdout [REDACTED]"));
@@ -1178,7 +1386,11 @@ mod tests {
             },
         };
 
-        let error = run_doctor(&invocation).await.unwrap_err().to_string();
+        let mut signals = ShutdownSignals::new().unwrap();
+        let error = run_doctor(&invocation, &mut signals)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(error.starts_with("tunnel_doctor_spawn_failed:"));
         assert!(error.contains("kind=NotFound"));
         assert!(error.contains("raw_os_error="));
@@ -1228,9 +1440,9 @@ mod tests {
             paths: paths.clone(),
         };
 
-        run_doctor(&invocation).await.unwrap();
-        let mut process = spawn_tunnel(&invocation).unwrap();
         let mut signals = ShutdownSignals::new().unwrap();
+        run_doctor(&invocation, &mut signals).await.unwrap();
+        let mut process = spawn_tunnel(&invocation).unwrap();
         let policy = SupervisorPolicy {
             startup_timeout: Duration::from_secs(2),
             graceful_shutdown_timeout: Duration::from_secs(1),
@@ -1249,9 +1461,234 @@ mod tests {
         assert!(args.contains("stdio-worker"));
         assert!(!argv.contains("runtime-secret"));
         assert!(args.contains("SECRET=runtime-secret"));
-        terminate(&mut process.child, policy.graceful_shutdown_timeout).await;
+        terminate(
+            &mut process.child,
+            process.group_id,
+            policy.graceful_shutdown_timeout,
+        )
+        .await
+        .unwrap();
         process.stop_log_tasks();
         health_task.abort();
+    }
+
+    #[tokio::test]
+    async fn exited_client_does_not_leave_its_process_group_running() {
+        let root = std::env::temp_dir().join(format!("agentic-group-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let script = root.join("client.sh");
+        let ready = root.join("child-ready");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n( trap '' TERM; printf ready > '{}'; exec sleep 60 ) &\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nexit 0\n",
+                ready.display(),
+                ready.display(),
+            ),
+        )
+        .unwrap();
+        set_executable(&script);
+        let mut command = Command::new(&script);
+        command.kill_on_drop(true);
+        configure_process_group(&mut command);
+        let mut child = command.spawn().unwrap();
+        let group_id = child.id().unwrap();
+        let result: Result<()> = async {
+            let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await??;
+            anyhow::ensure!(status.success(), "client fixture failed");
+            anyhow::ensure!(process_group_exists(group_id)?, "child exited too early");
+            terminate(&mut child, group_id, Duration::from_millis(50)).await?;
+            #[cfg(target_os = "linux")]
+            anyhow::ensure!(
+                !process_group_has_live_members(group_id)?,
+                "client process group survived cleanup"
+            );
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = send_process_signal(group_id, signal_kill());
+            let _ = child.kill().await;
+        }
+        let _ = child.wait().await;
+        fs::remove_dir_all(root).unwrap();
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_reaps_blocked_doctor_and_its_process_group() {
+        const CHILD_ENV: &str = "AGENTIC_SUPERVISOR_DOCTOR_FIXTURE";
+        if let Some(root) = std::env::var_os(CHILD_ENV) {
+            let root = PathBuf::from(root);
+            let invocation = Invocation {
+                tunnel_id: "tunnel_test".to_owned(),
+                secret: "runtime-secret".to_owned(),
+                executable: root.join("doctor.sh"),
+                worker_command: "worker".to_owned(),
+                worker_token: "worker-token".to_owned(),
+                paths: RuntimePaths {
+                    health_url: root.join("health.url"),
+                    log: root.join("tunnel.log"),
+                    pid: root.join("tunnel.pid"),
+                    startup_config: root.join("startup-config.json"),
+                },
+            };
+            let mut signals = ShutdownSignals::new().unwrap();
+            assert!(!run_doctor(&invocation, &mut signals).await.unwrap());
+            return;
+        }
+
+        let root = std::env::temp_dir().join(format!("agentic-doctor-stop-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let script = root.join("doctor.sh");
+        let pid_file = root.join("doctor.pid");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntrap '' TERM\nsleep 60 &\nprintf '%s\\n' \"$$\" > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        set_executable(&script);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "supervisor::tests::shutdown_reaps_blocked_doctor_and_its_process_group",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, &root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let result: Result<()> = async {
+            let group_id = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(value) = fs::read_to_string(&pid_file) {
+                        if let Ok(group_id) = value.trim().parse::<u32>() {
+                            break group_id;
+                        }
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await?;
+            let child_id = child
+                .id()
+                .ok_or_else(|| anyhow!("fixture_pid_unavailable"))?;
+            anyhow::ensure!(
+                unsafe { libc::kill(child_id as libc::pid_t, libc::SIGTERM) } == 0,
+                "could not signal supervisor fixture"
+            );
+            let status = tokio::time::timeout(Duration::from_secs(15), child.wait()).await??;
+            anyhow::ensure!(status.success(), "supervisor fixture failed: {status}");
+            #[cfg(target_os = "linux")]
+            anyhow::ensure!(
+                !process_group_has_live_members(group_id)?,
+                "doctor process group survived shutdown"
+            );
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            if let Ok(group_id) = fs::read_to_string(&pid_file)
+                .unwrap_or_default()
+                .trim()
+                .parse()
+            {
+                let _ = send_process_signal(group_id, signal_kill());
+            }
+            let _ = child.kill().await;
+        }
+        let _ = child.wait().await;
+        fs::remove_dir_all(root).unwrap();
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervisor_forwards_client_output_with_levels_and_redaction() {
+        const CHILD_ENV: &str = "AGENTIC_SUPERVISOR_LOG_FIXTURE";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let root = std::env::temp_dir().join(format!("agentic-logs-{}", Uuid::new_v4()));
+            fs::create_dir_all(&root).unwrap();
+            let script = root.join("client.sh");
+            fs::write(
+                &script,
+                "#!/bin/sh\nprintf '2026-07-25T16:00:00+00:00 INFO child-info\\n'\nprintf '2026-07-25T16:00:00+00:00 WARN child-warning\\n'\nprintf '2026-07-25T16:00:00+00:00 ERROR child-error secret-value\\n' >&2\nprintf 'unknown-stdout\\n'\nprintf 'unknown-stderr\\n' >&2\n",
+            )
+            .unwrap();
+            set_executable(&script);
+            let invocation = Invocation {
+                tunnel_id: "tunnel_test".to_owned(),
+                secret: "secret-value".to_owned(),
+                executable: script,
+                worker_command: "worker".to_owned(),
+                worker_token: "worker-token".to_owned(),
+                paths: RuntimePaths {
+                    health_url: root.join("health.url"),
+                    log: root.join("tunnel.log"),
+                    pid: root.join("tunnel.pid"),
+                    startup_config: root.join("startup-config.json"),
+                },
+            };
+            let mut process = spawn_tunnel(&invocation).unwrap();
+            assert!(process.child.wait().await.unwrap().success());
+            for task in process.log_tasks {
+                task.await.unwrap();
+            }
+            let config_path = root.join("config.json");
+            fs::write(&config_path, "{}").unwrap();
+            let watcher = tokio::spawn(watch_startup_identity(
+                config_path.clone(),
+                StartupIdentity {
+                    agent_id: "agent".to_owned(),
+                    workspace_root: root.clone(),
+                    tunnel_id: "tunnel".to_owned(),
+                    api_key_reference: "env:KEY".to_owned(),
+                    cache_dir: root.clone(),
+                    executable: None,
+                    profile: CapabilityProfile::Normal,
+                },
+            ));
+            sleep(Duration::from_millis(100)).await;
+            fs::write(&config_path, "{ invalid json").unwrap();
+            sleep(Duration::from_millis(4200)).await;
+            watcher.abort();
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "supervisor::tests::supervisor_forwards_client_output_with_levels_and_redaction",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .env("JOURNAL_STREAM", "9:9")
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for expected in [
+            "INFO tunnel.stdout: child-info",
+            "WARN tunnel.stdout: child-warning",
+            "ERROR tunnel.stderr: child-error [REDACTED]",
+            "INFO tunnel.stdout: unknown-stdout",
+            "WARN tunnel.stderr: unknown-stderr",
+        ] {
+            assert!(stderr.lines().any(|line| line == expected), "{stderr}");
+        }
+        assert!(!stderr.contains("secret-value"));
+        assert_eq!(
+            stderr.matches("standalone config reload failed;").count(),
+            1,
+            "{stderr}"
+        );
     }
 
     fn set_executable(path: &Path) {

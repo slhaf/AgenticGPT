@@ -1778,37 +1778,7 @@ fn render_optional_form(
             }
         }
         OptionalSection::TunnelClient => {
-            for field in [SetupField::TunnelClientVersion, SetupField::TunnelCacheDir] {
-                push_long_form_field(
-                    &mut lines,
-                    &mut focused_line,
-                    session,
-                    section,
-                    draft,
-                    state,
-                    field,
-                    language,
-                    theme,
-                    errors,
-                    left.width,
-                );
-            }
-            push_boolean_field(
-                &mut lines,
-                &mut focused_line,
-                section,
-                draft,
-                state,
-                SetupField::TunnelAutoDownload,
-                language,
-                theme,
-                errors,
-            );
-            for field in [
-                SetupField::TunnelExecutable,
-                SetupField::TunnelDownloadUrl,
-                SetupField::TunnelSha256,
-            ] {
+            for field in [SetupField::TunnelCacheDir, SetupField::TunnelExecutable] {
                 push_long_form_field(
                     &mut lines,
                     &mut focused_line,
@@ -2043,9 +2013,6 @@ fn push_long_form_field(
                     .join("room")
                     .to_string_lossy()
                     .into_owned()
-            }
-            SetupField::TunnelClientVersion => {
-                crate::tunnel_distribution::PINNED_VERSION.to_string()
             }
             _ => current.to_string(),
         }
@@ -3206,12 +3173,8 @@ pub(super) fn optional_focus_items(
             },
         ],
         OptionalSection::TunnelClient => vec![
-            OptionalFocusItem::Field(SetupField::TunnelClientVersion),
             OptionalFocusItem::Field(SetupField::TunnelCacheDir),
-            OptionalFocusItem::Field(SetupField::TunnelAutoDownload),
             OptionalFocusItem::Field(SetupField::TunnelExecutable),
-            OptionalFocusItem::Field(SetupField::TunnelDownloadUrl),
-            OptionalFocusItem::Field(SetupField::TunnelSha256),
         ],
         OptionalSection::HubReporting => vec![
             OptionalFocusItem::Field(SetupField::HubReportingEnabled),
@@ -3616,8 +3579,8 @@ fn optional_center_inspector_body(
                     "Credentials use env:NAME or file:/absolute/path references.",
                 ],
                 OptionalSection::TunnelClient => &[
-                    "Configure how Standalone locates or downloads the Tunnel client.",
-                    "Default: managed version 0.0.10 with auto-download enabled.",
+                    "Configure the managed Tunnel client cache or select an executable override.",
+                    "Agentic manages the pinned client version and downloads it when needed.",
                 ],
                 OptionalSection::HubReporting => &[
                     "Control optional run and Process reporting from Standalone to the Hub.",
@@ -3714,8 +3677,8 @@ fn optional_center_inspector_body(
                     "凭据使用 env:NAME 或 file:/绝对路径引用。",
                 ],
                 OptionalSection::TunnelClient => &[
-                    "设置 Standalone 如何查找或下载 Tunnel client。",
-                    "默认使用托管版本 0.0.10，并开启自动下载。",
+                    "配置 Tunnel client 托管缓存目录或指定可执行文件。",
+                    "Agentic 内部固定客户端版本，并在需要时自动下载。",
                 ],
                 OptionalSection::HubReporting => &[
                     "控制 Standalone 向 Hub 上报运行和 Process 信息。",
@@ -3947,37 +3910,15 @@ fn optional_form_inspector_body(
                     "Push successful local Room maintenance when a usable remote is available.",
                     "Default: off. This does not change workflow mode behavior.",
                 ],
-                SetupField::TunnelClientVersion => &[
-                    "Managed Tunnel client version.",
-                    "Leave blank to use the built-in pinned version 0.0.10.",
-                ],
                 SetupField::TunnelCacheDir => &[
                     "Cache directory for managed Tunnel client artifacts.",
                     "Default: ~/.agentic_gpt/cache/tunnel-client.",
                 ],
-                SetupField::TunnelAutoDownload => &[
-                    "Allow AgenticGPT to download the managed Tunnel client when the cache is missing or invalid.",
-                    "Default: on.",
-                    "",
-                    "When off, a valid cached client or executable override must already be available.",
-                ],
                 SetupField::TunnelExecutable => &[
                     "Optional custom Tunnel client executable.",
-                    "When set, it takes precedence over the managed cache and download path.",
+                    "When set, Agentic validates its SHA-256 before starting it.",
                     "",
                     "Leave blank to use the managed client.",
-                ],
-                SetupField::TunnelDownloadUrl => &[
-                    "Override the managed Tunnel client download source.",
-                    "Usually leave this blank.",
-                    "",
-                    "A custom source must use HTTPS and requires a SHA-256 value.",
-                ],
-                SetupField::TunnelSha256 => &[
-                    "Expected SHA-256 for a custom download or executable.",
-                    "It must contain exactly 64 hexadecimal characters.",
-                    "",
-                    "A custom download URL requires this value.",
                 ],
                 SetupField::HubReportingEnabled => &[
                     "Enable reporting of Standalone Tunnel runs and processes to the Hub.",
@@ -4209,36 +4150,15 @@ fn optional_form_inspector_body(
                     "本地 Room 维护成功且存在可用远端时，是否推送。",
                     "默认关闭；此设置不改变 workflow 模式。",
                 ],
-                SetupField::TunnelClientVersion => &[
-                    "Tunnel client 的托管版本。",
-                    "留空时使用内置固定版本 0.0.10。",
-                ],
                 SetupField::TunnelCacheDir => &[
                     "托管 Tunnel client 文件的缓存目录。",
                     "默认 ~/.agentic_gpt/cache/tunnel-client。",
                 ],
-                SetupField::TunnelAutoDownload => &[
-                    "缓存缺失或无效时，是否允许 AgenticGPT 自动下载托管 Tunnel client。",
-                    "默认开启。",
-                    "",
-                    "关闭后，必须已有有效缓存或提供 executable override。",
-                ],
                 SetupField::TunnelExecutable => &[
                     "可选的自定义 Tunnel client 可执行文件。",
-                    "设置后优先于托管缓存和下载流程。",
+                    "启动前，Agentic 会校验该文件的 SHA-256。",
                     "",
                     "留空时使用托管 client。",
-                ],
-                SetupField::TunnelDownloadUrl => &[
-                    "覆盖 Tunnel client 的默认下载来源。",
-                    "通常无需设置。",
-                    "",
-                    "自定义来源必须使用 HTTPS，并同时提供 SHA-256。",
-                ],
-                SetupField::TunnelSha256 => &[
-                    "自定义下载包或可执行文件的预期 SHA-256。",
-                    "必须正好是 64 个十六进制字符。",
-                    "",
                 ],
                 SetupField::EventsLowTtlSeconds => {
                     &["低等级事件的保留秒数。", "请输入非负整数；0 表示立即过期。"]
@@ -4376,12 +4296,8 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::McpServerBearerToken => t(language, "Bearer token", "Bearer 令牌"),
         SetupField::RoomTimezone => t(language, "Timezone", "时区"),
         SetupField::DiaryBoundaryHour => t(language, "Diary boundary hour", "日记边界小时"),
-        SetupField::TunnelClientVersion => t(language, "Client version", "客户端版本"),
         SetupField::TunnelCacheDir => t(language, "Cache directory", "缓存目录"),
-        SetupField::TunnelAutoDownload => t(language, "Auto-download", "自动下载"),
         SetupField::TunnelExecutable => t(language, "Executable", "可执行文件"),
-        SetupField::TunnelDownloadUrl => t(language, "Download URL", "下载地址"),
-        SetupField::TunnelSha256 => t(language, "SHA-256", "SHA-256"),
         SetupField::HubReportingEnabled => t(language, "Reporting enabled", "启用报告"),
         SetupField::HubReportingDetail => t(language, "Reporting detail", "报告详细程度"),
         SetupField::EventsLowTtlSeconds => t(
@@ -4427,7 +4343,6 @@ pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
     matches!(
         field,
         SetupField::Bubblewrap
-            | SetupField::TunnelAutoDownload
             | SetupField::HubReportingEnabled
             | SetupField::RoomMaintenanceAutoPush
     )
@@ -4488,12 +4403,8 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
         },
         OptionalSectionDraft::RoomSecret(value) => value.value(field),
         OptionalSectionDraft::TunnelClient(value) => match field {
-            SetupField::TunnelClientVersion => value.version.clone(),
             SetupField::TunnelCacheDir => value.cache_dir.clone(),
-            SetupField::TunnelAutoDownload => value.auto_download.to_string(),
             SetupField::TunnelExecutable => value.executable.clone(),
-            SetupField::TunnelDownloadUrl => value.download_url.clone(),
-            SetupField::TunnelSha256 => value.sha256.clone(),
             _ => String::new(),
         },
         OptionalSectionDraft::HubReporting(value) => match field {
@@ -4573,12 +4484,8 @@ pub(super) fn set_optional_field(
             draft.values.insert(field, value);
         }
         OptionalSectionDraft::TunnelClient(draft) => match field {
-            SetupField::TunnelClientVersion => draft.version = value,
             SetupField::TunnelCacheDir => draft.cache_dir = value,
-            SetupField::TunnelAutoDownload => draft.auto_download = value == "true",
             SetupField::TunnelExecutable => draft.executable = value,
-            SetupField::TunnelDownloadUrl => draft.download_url = value,
-            SetupField::TunnelSha256 => draft.sha256 = value,
             _ => {}
         },
         OptionalSectionDraft::HubReporting(draft) => match field {
@@ -4623,9 +4530,6 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
     match draft {
         OptionalSectionDraft::Sandbox(draft) if field == SetupField::Bubblewrap => {
             draft.enabled = !draft.enabled
-        }
-        OptionalSectionDraft::TunnelClient(draft) if field == SetupField::TunnelAutoDownload => {
-            draft.auto_download = !draft.auto_download
         }
         OptionalSectionDraft::HubReporting(draft) if field == SetupField::HubReportingEnabled => {
             draft.enabled = !draft.enabled
@@ -5144,10 +5048,6 @@ fn review_display_value(session: &SetupSession, group: &ReviewGroup, item: &Revi
                 .to_string_lossy()
                 .into_owned()
         }
-        (
-            ReviewTarget::OptionalSection(OptionalSection::TunnelClient),
-            Some(SetupField::TunnelClientVersion),
-        ) => crate::tunnel_distribution::PINNED_VERSION.to_string(),
         _ => item.value.clone(),
     }
 }
@@ -5533,12 +5433,8 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "repository_root" => t(language, "Repository root", "仓库根目录"),
         "room_maintenance_mode" => t(language, "Maintenance mode", "维护模式"),
         "room_maintenance_auto_push" => t(language, "Auto-push", "自动推送"),
-        "tunnel_client_version" => t(language, "Client version", "客户端版本"),
         "tunnel_cache_dir" => t(language, "Cache directory", "缓存目录"),
-        "tunnel_auto_download" => t(language, "Auto-download", "自动下载"),
         "tunnel_executable" => t(language, "Executable", "可执行文件"),
-        "tunnel_download_url" => t(language, "Download URL", "下载地址"),
-        "tunnel_sha256" => t(language, "SHA-256", "SHA-256"),
         "hub_reporting_enabled" => t(language, "Reporting enabled", "启用报告"),
         "hub_reporting_detail" => t(language, "Reporting detail", "报告详细程度"),
         "events_low_ttl_seconds" => t(

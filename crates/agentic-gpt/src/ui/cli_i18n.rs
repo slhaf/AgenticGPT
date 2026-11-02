@@ -350,6 +350,16 @@ const COMMAND_CATALOG: &[CatalogEntry] = &[
     CatalogEntry::new("tmux.create", "Create a tmux session", "创建 tmux 会话"),
     CatalogEntry::new("tmux.close", "Close a tmux session", "关闭 tmux 会话"),
     CatalogEntry::new(
+        "tunnel-client",
+        "Manage the pinned tunnel client",
+        "管理固定版本的 Tunnel 客户端",
+    ),
+    CatalogEntry::new(
+        "tunnel-client.download",
+        "Download or repair the pinned tunnel client",
+        "下载或修复固定版本的 Tunnel 客户端",
+    ),
+    CatalogEntry::new(
         "help",
         "Print this message or the help of the given subcommand(s)",
         "显示此消息或指定子命令的帮助",
@@ -362,6 +372,11 @@ const ARG_CATALOG: &[CatalogEntry] = &[
     CatalogEntry::new(".language", "Select the interface language", "选择界面语言"),
     CatalogEntry::new(".config", "Configuration file to use", "要使用的配置文件"),
     CatalogEntry::new("run.config", "Configuration file to use", "要使用的配置文件"),
+    CatalogEntry::new(
+        "tunnel-client.download.config",
+        "Configuration file to use",
+        "要使用的配置文件",
+    ),
     CatalogEntry::new("local.config", "Configuration file to use", "要使用的配置文件"),
     CatalogEntry::new("local.call.tool", "Name of the tool to call", "要调用的工具名称"),
     CatalogEntry::new("local.call.arguments", "JSON arguments for the tool", "工具的 JSON 参数"),

@@ -82,6 +82,8 @@ fn every_visible_command_has_help() {
         &["tmux", "attach", "--help"],
         &["tmux", "create", "--help"],
         &["tmux", "close", "--help"],
+        &["tunnel-client", "--help"],
+        &["tunnel-client", "download", "--help"],
     ];
 
     for path in command_paths {

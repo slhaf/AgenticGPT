@@ -2615,7 +2615,6 @@ def start_event_agent(
     data["tunnel"] = {
         "tunnelId": "contract-parity-events",
         "apiKey": "env:CONTRACT_PARITY_EVENTS_TUNNEL_KEY",
-        "client": {"autoDownload": False},
         "hubReporting": {"enabled": False, "detail": "metadata"},
     }
     config.write_text(json.dumps(data, indent=2) + "\n")
@@ -2769,7 +2768,6 @@ def start_reporting_agent(
         data["tunnel"] = {
             "tunnelId": f"contract-parity-reporting-{agent_id}",
             "apiKey": "env:CONTRACT_PARITY_REPORTING_TUNNEL_KEY",
-            "client": {"autoDownload": False},
             "hubReporting": {"enabled": True, "detail": "metadata"},
         }
         config.write_text(json.dumps(data, indent=2) + "\n")

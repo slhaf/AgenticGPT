@@ -88,6 +88,9 @@ pub(crate) async fn run_stdio_worker(
     startup_config: Option<PathBuf>,
 ) -> Result<()> {
     supervisor::authorize_worker(supervisor_token.as_deref())?;
+    if startup_config.is_some() {
+        supervisor::watch_tunnel_parent()?;
+    }
     let supervised = supervisor_token.is_some();
     let mut config = Config::load(&config_path)?;
     if let Some(path) = startup_config {

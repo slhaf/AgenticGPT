@@ -1,15 +1,11 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -37,7 +33,7 @@ fn hidden_worker_reloads_policy_path_limit_and_mcp_without_restart() {
 }
 
 #[test]
-fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
+fn hidden_worker_completes_local_mcp_call() {
     let root =
         PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
@@ -48,7 +44,7 @@ fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
 }
 
 #[test]
-fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
+fn hidden_room_worker_completes_local_mcp_call() {
     let root =
         PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
@@ -59,7 +55,7 @@ fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
 }
 
 #[test]
-fn supervised_journal_mode_omits_agentic_inner_timestamp() {
+fn hidden_worker_completes_local_mcp_call_with_journal_logging_enabled() {
     let root =
         PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
@@ -70,7 +66,7 @@ fn supervised_journal_mode_omits_agentic_inner_timestamp() {
 }
 
 #[test]
-fn supervised_invalid_config_warning_is_supervisor_owned() {
+fn hidden_worker_keeps_serving_during_invalid_config_reload() {
     let root =
         PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
     fs::create_dir_all(&root).unwrap();
@@ -78,6 +74,130 @@ fn supervised_invalid_config_warning_is_supervisor_owned() {
     let result = run_smoke(&root, "normal", true, true);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
+}
+
+#[test]
+fn killing_tunnel_client_exits_its_worker_and_releases_the_local_socket() {
+    let root =
+        PathBuf::from("/tmp").join(format!("as-{}", &Uuid::new_v4().simple().to_string()[..16]));
+    fs::create_dir_all(&root).unwrap();
+    let _root_cleanup = RootCleanup(root.clone());
+    let result = run_orphaned_worker_cleanup(&root);
+    let _ = fs::remove_dir_all(&root);
+    result.unwrap();
+}
+
+fn run_orphaned_worker_cleanup(root: &Path) -> Result<(), String> {
+    let binary = std::env::var("CARGO_BIN_EXE_agentic-gpt")
+        .or_else(|_| std::env::var("CARGO_BIN_EXE_agentic_gpt"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/agentic-gpt")
+        });
+    if !binary.exists() {
+        return Err(format!("agentic binary not found: {}", binary.display()));
+    }
+
+    let config_path = root.join("config.json");
+    let startup_config_path = root.join("startup-config.json");
+    let workspace = root.join("h/.agentic_gpt/workspace");
+    let pid_path = root.join("worker.pid");
+    let init = fixture_command(&binary, root)
+        .args([
+            "config",
+            "--config",
+            config_path.to_str().unwrap(),
+            "init",
+            "--non-interactive",
+        ])
+        .output()
+        .map_err(|error| format!("config init failed to spawn: {error}"))?;
+    if !init.status.success() {
+        return Err(format!(
+            "config init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ));
+    }
+
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let mut config: Value =
+        serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let agent_id = short_agent_id(root);
+    config["mode"] = Value::String("standalone".to_string());
+    config["profile"] = Value::String("normal".to_string());
+    config["agentId"] = Value::String(agent_id.clone());
+    config["workspaceRoot"] = Value::String("~/.agentic_gpt/workspace".to_string());
+    set_fixture_path_policy(&mut config, &[&workspace]);
+    config["tunnel"] = json!({
+        "tunnelId": "tunnel_orphan_worker_test",
+        "apiKey": "env:AGENTIC_TEST_TUNNEL_KEY",
+        "hubReporting": { "enabled": false, "detail": "metadata" }
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        &startup_config_path,
+        serde_json::to_vec(&config).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::set_permissions(&startup_config_path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| error.to_string())?;
+
+    let token = "orphan-worker-test-token";
+    let script = concat!(
+        "exec 3<&0\n",
+        "\"$1\" stdio-worker --config \"$2\" --profile normal --supervisor-token \"$3\" --startup-config \"$4\" <&3 &\n",
+        "worker_pid=$!\n",
+        "printf '%s\\n' \"$worker_pid\" > \"$5\"\n",
+        "wait \"$worker_pid\"\n"
+    );
+    let mut client = GuardChild(Some(
+        fixture_command(Path::new("/bin/sh"), root)
+            .args([
+                "-c",
+                script,
+                "tunnel-client-fixture",
+                binary.to_str().unwrap(),
+                config_path.to_str().unwrap(),
+                token,
+                startup_config_path.to_str().unwrap(),
+                pid_path.to_str().unwrap(),
+            ])
+            .env("AGENTIC_GPT_SUPERVISOR_TOKEN", token)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("fake tunnel client failed to spawn: {error}"))?,
+    ));
+    struct GroupCleanup(Option<u32>);
+    impl Drop for GroupCleanup {
+        fn drop(&mut self) {
+            if let Some(group) = self.0 {
+                unsafe { libc::kill(-(group as i32), libc::SIGKILL) };
+            }
+        }
+    }
+    let mut group_cleanup = GroupCleanup(Some(client.id()));
+    let socket_path = local_socket_path(root, &agent_id)?;
+    wait_for_unix_socket(&socket_path, Duration::from_secs(10))?;
+    let worker_pid = wait_for_pid_file(&pid_path, Duration::from_secs(5))?;
+
+    if unsafe { libc::kill(client.id() as i32, libc::SIGKILL) } != 0 {
+        return Err(format!(
+            "failed to kill fake tunnel client: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let _ = client.wait();
+    wait_for_process_stopped(worker_pid, Duration::from_secs(5))?;
+    wait_for_socket_released(&socket_path, Duration::from_secs(5))?;
+    group_cleanup.0 = None;
+    Ok(())
 }
 
 fn run_smoke(
@@ -99,10 +219,6 @@ fn run_smoke(
     let config_path = root.join("config.json");
     let workspace = root.join("h/.agentic_gpt/workspace");
     let key_path = root.join("h/tunnel-api-key");
-    let fake_tunnel = root.join("fake-tunnel.sh");
-    let response_path = root.join("worker-response.jsonl");
-    let worker_stderr_path = root.join("worker.stderr");
-    let marker_path = root.join("tool-complete");
     let agent_id = short_agent_id(root);
 
     let init = fixture_command(&binary, root)
@@ -153,14 +269,6 @@ fn run_smoke(
     config["tunnel"] = json!({
         "tunnelId": "tunnel_local_integration",
         "apiKey": "file:~/tunnel-api-key",
-        "client": {
-            "version": null,
-            "cacheDir": root.join("cache").to_string_lossy(),
-            "autoDownload": false,
-            "executable": fake_tunnel,
-            "downloadUrl": null,
-            "sha256": null
-        },
         "hubReporting": { "enabled": false, "detail": "metadata" }
     });
     fs::write(
@@ -169,34 +277,57 @@ fn run_smoke(
     )
     .map_err(|error| error.to_string())?;
 
-    let (health_port, stop_health, health_thread) = start_health_server()?;
-    let mut health_cleanup = HealthCleanup {
-        stop: stop_health,
-        thread: Some(health_thread),
-    };
-    let script = fake_tunnel_script(
-        health_port,
-        &response_path,
-        &worker_stderr_path,
-        &marker_path,
-    );
-    fs::write(&fake_tunnel, script).map_err(|error| error.to_string())?;
-    fs::set_permissions(&fake_tunnel, fs::Permissions::from_mode(0o755))
-        .map_err(|error| error.to_string())?;
-
-    let mut supervisor_command = fixture_command(&binary, root);
-    supervisor_command
-        .args(["run", "--config", config_path.to_str().unwrap()])
-        .stdout(Stdio::null())
+    let token = "standalone-smoke-token";
+    let mut worker_command = fixture_command(&binary, root);
+    worker_command
+        .args([
+            "stdio-worker",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--profile",
+            profile,
+            "--supervisor-token",
+            token,
+        ])
+        .env("AGENTIC_GPT_SUPERVISOR_TOKEN", token)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if journal_mode {
-        supervisor_command.env("JOURNAL_STREAM", "9:9");
+        worker_command.env("JOURNAL_STREAM", "9:9");
     }
-    let mut supervisor = GuardChild(Some(
-        supervisor_command
+    let mut worker = GuardChild(Some(
+        worker_command
             .spawn()
-            .map_err(|error| format!("supervisor failed to spawn: {error}"))?,
+            .map_err(|error| format!("worker failed to spawn: {error}"))?,
     ));
+    let mut stdin = worker.stdin.take().ok_or("worker stdin unavailable")?;
+    let stdout = worker.stdout.take().ok_or("worker stdout unavailable")?;
+    let mut stdout = BufReader::new(stdout);
+    let mut stderr = worker.stderr.take().ok_or("worker stderr unavailable")?;
+
+    send_line(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "standalone-smoke-test", "version": "1" }
+            }
+        }),
+    )?;
+    let _ = response_for(&mut stdout, 1)?;
+    send_line(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    )?;
 
     if invalid_config_probe {
         thread::sleep(Duration::from_millis(300));
@@ -204,83 +335,54 @@ fn run_smoke(
         thread::sleep(Duration::from_millis(2600));
     }
 
-    let completed = wait_for_marker(&mut supervisor, &marker_path);
-    stop_supervisor(&mut supervisor);
-    health_cleanup.stop();
-    let supervisor_stderr = supervisor
-        .stderr
-        .take()
-        .map(|mut stream| {
-            let mut value = String::new();
-            let _ = stream.read_to_string(&mut value);
-            value
-        })
-        .unwrap_or_default();
-
-    if let Err(error) = completed {
-        let response = read_optional(&response_path);
-        let worker_stderr = read_optional(&worker_stderr_path);
+    send_line(
+        &mut stdin,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+    )?;
+    let listed = response_for(&mut stdout, 2)?;
+    let response = call_tool(
+        &mut stdin,
+        &mut stdout,
+        3,
+        "process.exec",
+        json!({ "command": "/usr/bin/printf 'standalone-e2e-ok'" }),
+    )?;
+    let response_text = response.to_string();
+    if !response_text.contains("standalone-e2e-ok") {
         return Err(format!(
-            "{error}; response={response}; worker_stderr={worker_stderr}; supervisor_stderr={supervisor_stderr}"
-        ));
-    }
-    let response = fs::read_to_string(&response_path).map_err(|error| error.to_string())?;
-    if !response.contains("standalone-e2e-ok") {
-        return Err(format!(
-            "worker response did not contain tool output: {response}"
+            "worker response did not contain tool output: {response_text}"
         ));
     }
     let room_tool = "room.diary.active";
-    if profile == "room" && !response.contains(room_tool) {
+    if profile == "room" && !listed.to_string().contains(room_tool) {
         return Err(format!(
-            "room worker response did not advertise Room tools: {response}"
+            "room worker response did not advertise Room tools: {listed}"
         ));
     }
-    if profile == "normal" && response.contains(room_tool) {
+    if profile == "normal" && listed.to_string().contains(room_tool) {
         return Err(format!(
-            "Normal worker response advertised a Room tool: {response}"
+            "Normal worker response advertised a Room tool: {listed}"
         ));
     }
-    for expected in [
-        "INFO tunnel.stdout: child-info",
-        "WARN tunnel.stdout: child-warning",
-        "ERROR tunnel.stderr: child-error",
-        "INFO tunnel.stdout: unknown-stdout",
-        "WARN tunnel.stderr: unknown-stderr",
-    ] {
-        if !supervisor_stderr.contains(expected) {
-            return Err(format!(
-                "supervisor log missing `{expected}`: {supervisor_stderr}"
-            ));
+    drop(stdin);
+    stop_child_gracefully(&mut worker, Duration::from_secs(5));
+    let mut worker_stderr = String::new();
+    stderr
+        .read_to_string(&mut worker_stderr)
+        .map_err(|error| error.to_string())?;
+    if journal_mode {
+        let line = worker_stderr
+            .lines()
+            .find(|line| line.contains("mcp_tool; ingress=tunnel:stdio;"))
+            .ok_or("journal worker INFO line missing")?;
+        if !line.starts_with("INFO mcp_tool;") {
+            return Err(format!("unexpected journal worker log: {line}"));
         }
     }
-    if supervisor_stderr.contains("tunnel.stdout: 2026-07-25T16:00:00") {
+    if invalid_config_probe && worker_stderr.contains("standalone live config reload rejected;") {
         return Err(format!(
-            "forwarded child timestamp was not stripped: {supervisor_stderr}"
+            "supervised worker duplicated config warning: {worker_stderr}"
         ));
-    }
-    if journal_mode {
-        let info_line = supervisor_stderr
-            .lines()
-            .find(|line| line.contains("INFO tunnel.stdout: child-info"))
-            .ok_or("journal child info line missing")?;
-        assert!(info_line.starts_with("INFO tunnel.stdout: child-info"));
-        let worker_info = supervisor_stderr
-            .lines()
-            .find(|line| line.contains("INFO tunnel.stderr: mcp_tool; ingress=tunnel:stdio;"))
-            .ok_or("journal hidden-worker INFO line missing")?;
-        assert!(worker_info.starts_with("INFO tunnel.stderr: mcp_tool; ingress=tunnel:stdio;"));
-        assert!(!supervisor_stderr.contains("WARN tunnel.stderr: INFO mcp_tool;"));
-    }
-    if invalid_config_probe {
-        assert_eq!(
-            supervisor_stderr
-                .matches("standalone config reload failed;")
-                .count(),
-            1,
-            "expected one supervisor-owned invalid-config warning: {supervisor_stderr}"
-        );
-        assert!(!supervisor_stderr.contains("standalone live config reload rejected;"));
     }
     Ok(())
 }
@@ -873,109 +975,8 @@ fn call_tool(
     response_for(reader, id)
 }
 
-fn read_optional(path: &Path) -> String {
-    fs::read_to_string(path).unwrap_or_else(|error| format!("<unavailable: {error}>"))
-}
-
-fn fake_tunnel_script(
-    health_port: u16,
-    response_path: &Path,
-    worker_stderr_path: &Path,
-    marker_path: &Path,
-) -> String {
-    let initialize = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "local-tunnel-test", "version": "1"}
-        }
-    });
-    let initialized = json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized",
-        "params": {}
-    });
-    let list = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-        "params": {}
-    });
-    let call = json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "tools/call",
-        "params": {
-            "name": "process.exec",
-            "arguments": {
-                "command": "/usr/bin/printf 'standalone-e2e-ok'"
-            }
-        }
-    });
-    let requests = format!("{}\n{}", list, call);
-    let script = format!(
-        "#!/bin/sh\nset -eu\nmode=\"$1\"\nhealth_url_file=\"\"\nmcp_binding=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--health.url-file\" ]; then shift; health_url_file=\"$1\"; fi\n  if [ \"$1\" = \"--mcp.command\" ]; then shift; mcp_binding=\"$1\"; fi\n  shift\ndone\nworker=\"${{mcp_binding#*command=}}\"\nfirst=\"$(printf '%.1s' \"$worker\")\"\nif [ \"$first\" = '\"' ] || [ \"$first\" = \"'\" ]; then printf 'invalid whole-command quoting\\n' >&2; exit 23; fi\nif [ \"$mode\" = \"doctor\" ]; then exit 0; fi\nprintf 'http://127.0.0.1:{health_port}\\n' > \"$health_url_file\"\nrequest_initialize={initialize}\nrequest_initialized={initialized}\nrequest_call={call}\nprintf '%s\\n%s\\n%s\\n' \"$request_initialize\" \"$request_initialized\" \"$request_call\" | sh -c \"$worker\" > {response} 2> {worker_stderr} || true\nif grep -q 'standalone-e2e-ok' {response}; then touch {marker}; fi\nsleep 60\n",
-        health_port = health_port,
-        initialize = sh_quote(&initialize.to_string()),
-        initialized = sh_quote(&initialized.to_string()),
-        call = sh_quote(&requests),
-        response = sh_quote(&response_path.to_string_lossy()),
-        worker_stderr = sh_quote(&worker_stderr_path.to_string_lossy()),
-        marker = sh_quote(&marker_path.to_string_lossy()),
-    );
-    let script = script.replace(
-        "|| true\nif grep -q 'standalone-e2e-ok'",
-        &format!(
-            "|| true\nif [ -n \"${{JOURNAL_STREAM:-}}\" ]; then cat {} >&2; fi\nif grep -q 'standalone-e2e-ok'",
-            sh_quote(&worker_stderr_path.to_string_lossy())
-        ),
-    );
-    let child_prefix = format!("printf 'http://127.0.0.1:{health_port}\\n' > \"$health_url_file\"");
-    let child_logs = format!(
-        "{child_prefix}\nprintf '2026-07-25T16:00:00+00:00 INFO child-info\\n'\nprintf '2026-07-25T16:00:00+00:00 WARN child-warning\\n'\nprintf '2026-07-25T16:00:00+00:00 ERROR child-error\\n' >&2\nprintf 'unknown-stdout\\n'\nprintf 'unknown-stderr\\n' >&2"
-    );
-    script.replace(&child_prefix, &child_logs)
-}
-
 fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn start_health_server() -> Result<(u16, Arc<AtomicBool>, thread::JoinHandle<()>), String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| error.to_string())?;
-    let port = listener
-        .local_addr()
-        .map_err(|error| error.to_string())?
-        .port();
-    let stop = Arc::new(AtomicBool::new(false));
-    let thread_stop = stop.clone();
-    let thread = thread::spawn(move || {
-        while !thread_stop.load(Ordering::Acquire) {
-            match listener.accept() {
-                Ok((mut stream, _)) => respond_health(&mut stream),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => break,
-            }
-        }
-    });
-    Ok((port, stop, thread))
-}
-
-fn respond_health(stream: &mut TcpStream) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-    let mut request = [0u8; 1024];
-    let _ = stream.read(&mut request);
-    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
-    let _ = stream.write_all(response);
 }
 
 fn short_agent_id(root: &Path) -> String {
@@ -1020,6 +1021,62 @@ fn wait_for_unix_socket(path: &Path, duration: Duration) -> Result<(), String> {
     ))
 }
 
+fn wait_for_pid_file(path: &Path, duration: Duration) -> Result<u32, String> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        if let Ok(value) = fs::read_to_string(path) {
+            if let Ok(pid) = value.trim().parse() {
+                return Ok(pid);
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!(
+        "timed out waiting for worker PID: {}",
+        path.display()
+    ))
+}
+
+fn wait_for_process_stopped(pid: u32, duration: Duration) -> Result<(), String> {
+    let process_status = PathBuf::from(format!("/proc/{pid}/stat"));
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        let status = match fs::read_to_string(&process_status) {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("could not inspect worker process: {error}")),
+        };
+        let state = status
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next());
+        if state == Some("Z") {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!("worker process {pid} survived tunnel client exit"))
+}
+
+fn wait_for_socket_released(path: &Path, duration: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        match UnixStream::connect(path) {
+            Ok(stream) => drop(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                return Ok(())
+            }
+            Err(error) => return Err(format!("could not probe worker socket: {error}")),
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!("worker socket remained active: {}", path.display()))
+}
+
 fn wait_for_path_absent(path: &Path, duration: Duration) -> Result<(), String> {
     let deadline = Instant::now() + duration;
     while Instant::now() < deadline {
@@ -1050,47 +1107,6 @@ fn stop_child_gracefully(child: &mut Child, duration: Duration) {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
     let _ = child.wait();
-}
-
-fn wait_for_marker(supervisor: &mut Child, marker: &Path) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if marker.exists() {
-            return Ok(());
-        }
-        if let Some(status) = supervisor.try_wait().map_err(|error| error.to_string())? {
-            return Err(format!("supervisor exited before tool call: {status}"));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    Err("timed out waiting for supervised MCP tool call".to_string())
-}
-
-fn stop_supervisor(supervisor: &mut Child) {
-    if supervisor.try_wait().ok().flatten().is_none() {
-        unsafe {
-            libc::kill(-(supervisor.id() as i32), libc::SIGINT);
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if supervisor.try_wait().ok().flatten().is_some() {
-                unsafe {
-                    libc::kill(-(supervisor.id() as i32), libc::SIGKILL);
-                }
-                let _ = supervisor.wait();
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        unsafe {
-            libc::kill(-(supervisor.id() as i32), libc::SIGKILL);
-        }
-        let _ = supervisor.kill();
-    }
-    unsafe {
-        libc::kill(-(supervisor.id() as i32), libc::SIGKILL);
-    }
-    let _ = supervisor.wait();
 }
 
 fn set_fixture_path_policy(config: &mut Value, roots: &[&Path]) {
@@ -1165,23 +1181,5 @@ impl Drop for GuardChild {
         if let Some(child) = &mut self.0 {
             stop_child_gracefully(child, Duration::from_secs(2));
         }
-    }
-}
-
-struct HealthCleanup {
-    stop: Arc<AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-impl HealthCleanup {
-    fn stop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-impl Drop for HealthCleanup {
-    fn drop(&mut self) {
-        self.stop();
     }
 }

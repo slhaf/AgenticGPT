@@ -1,8 +1,7 @@
 //! Trusted resolution and installation of the Tunnel client executable.
 //!
-//! The resolver deliberately treats a downloaded archive as the trusted unit:
-//! the pinned SHA-256 is for the archive, and every cache lookup re-hashes that
-//! archive before deriving the executable bytes that will be launched.
+//! Each cache lookup verifies the pinned archive and executable hashes. A
+//! damaged executable can be restored from its verified archive.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
@@ -20,30 +19,15 @@ use zip::ZipArchive;
 
 use crate::config::{Config, TunnelClientConfig};
 
-pub(crate) const PINNED_VERSION: &str = "0.0.10";
+pub(crate) const PINNED_VERSION: &str = "0.0.19";
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 32;
 const MAX_REDIRECTS: usize = 5;
+const DOWNLOAD_ATTEMPTS: usize = 3;
 const LOCK_ATTEMPTS: usize = 400;
 const LOCK_WAIT: Duration = Duration::from_millis(25);
 const LOCK_STALE_AFTER: StdDuration = StdDuration::from_secs(5 * 60);
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TunnelClientSource {
-    ExecutableOverride,
-    ManagedCache,
-    CustomDownload,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedTunnelClient {
-    pub(crate) path: PathBuf,
-    pub(crate) version: String,
-    pub(crate) platform: String,
-    pub(crate) sha256: String,
-    pub(crate) source: TunnelClientSource,
-}
 
 #[derive(Clone, Debug)]
 struct ArtifactSpec {
@@ -51,7 +35,14 @@ struct ArtifactSpec {
     platform: String,
     url: String,
     archive_sha256: String,
-    source: TunnelClientSource,
+    executable_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ManagedClientOutcome {
+    AlreadyAvailable,
+    Repaired,
+    Downloaded,
 }
 
 #[derive(Clone, Debug)]
@@ -74,80 +65,97 @@ enum CacheState {
     Valid(PathBuf),
 }
 
-const MANIFEST: &[(&str, &str, &str, &str)] = &[
+const MANIFEST: &[(&str, &str, &str, &str, &str)] = &[
     (
-        "0.0.10",
+        "0.0.19",
         "linux-amd64",
-        "https://github.com/openai/tunnel-client/releases/download/v0.0.10/tunnel-client-v0.0.10-linux-amd64.zip",
-        "b9e0388a343f2d7adeff3992f411a0bd3d916a64bc56534aac5fd15ac1b20cd5",
+        "https://github.com/openai/tunnel-client/releases/download/v0.0.19/tunnel-client-v0.0.19-linux-amd64.zip",
+        "9ee9448592345a9dd1517fb79791ab54d24f051142eb92bcbe8cd355effc9142",
+        "56d0120886ce91bfe31e7a5600f6a6594199a02e9b3eac671d5da0d7480c97a3",
     ),
     (
-        "0.0.10",
+        "0.0.19",
         "linux-arm64",
-        "https://github.com/openai/tunnel-client/releases/download/v0.0.10/tunnel-client-v0.0.10-linux-arm64.zip",
-        "b842a9b2352eebd80514cf01a1fbb1c0d400a7d24a4015e85a7ea5f1aeaa5b30",
+        "https://github.com/openai/tunnel-client/releases/download/v0.0.19/tunnel-client-v0.0.19-linux-arm64.zip",
+        "5a19e556c4a8736ab7a6fde6f0568f6e7411fa2dff21186fc15bc30e9b98a603",
+        "8a50b25d6055bc6e3e3a5c18c098637ab2be63f6e453b8ebebd02433deadba04",
     ),
 ];
 
 /// Resolve a configured executable without launching or otherwise trusting it.
-pub(crate) async fn resolve(config: &Config) -> Result<ResolvedTunnelClient> {
+pub(crate) async fn resolve(config: &Config) -> Result<PathBuf> {
     let tunnel = config
         .tunnel
         .as_ref()
         .ok_or_else(|| anyhow!("tunnel_config_missing"))?;
 
     if let Some(executable) = &tunnel.client.executable {
-        return resolve_executable(executable, tunnel.client.sha256.as_deref());
+        return resolve_executable(executable);
     }
 
     let platform = current_platform().ok_or_else(|| anyhow!("unsupported_platform"))?;
-    let spec = artifact_spec(&tunnel.client, platform)?;
+    let spec = artifact_spec(platform)?;
     resolve_managed(&tunnel.client, &spec).await
 }
 
-fn resolve_executable(path: &Path, expected_sha256: Option<&str>) -> Result<ResolvedTunnelClient> {
+fn resolve_executable(path: &Path) -> Result<PathBuf> {
     let configured_path = expand_path(path)?;
-    let actual_sha256 = verify_executable(&configured_path, expected_sha256)?;
-    let path = fs::canonicalize(&configured_path)
-        .map_err(|error| executable_path_error(error, "executable_resolve_failed"))?;
-    Ok(ResolvedTunnelClient {
-        path,
-        version: "override".to_owned(),
-        platform: current_platform().unwrap_or("unknown").to_owned(),
-        sha256: actual_sha256,
-        source: TunnelClientSource::ExecutableOverride,
-    })
+    let platform = current_platform().ok_or_else(|| anyhow!("unsupported_platform"))?;
+    let spec = artifact_spec(platform)?;
+    verify_executable(&configured_path, &spec.executable_sha256)?;
+    fs::canonicalize(&configured_path)
+        .map_err(|error| executable_path_error(error, "executable_resolve_failed"))
 }
 
-async fn resolve_managed(
+async fn resolve_managed(client: &TunnelClientConfig, spec: &ArtifactSpec) -> Result<PathBuf> {
+    resolve_managed_with_progress(client, spec, |_, _| {})
+        .await
+        .map(|(resolved, _)| resolved)
+}
+
+pub(crate) async fn download_managed<F>(
+    client: &TunnelClientConfig,
+    mut progress: F,
+) -> Result<ManagedClientOutcome>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    let platform = current_platform().ok_or_else(|| anyhow!("unsupported_platform"))?;
+    let spec = artifact_spec(platform)?;
+    let (_, outcome) = resolve_managed_with_progress(client, &spec, &mut progress).await?;
+    Ok(outcome)
+}
+
+async fn resolve_managed_with_progress<F>(
     client: &TunnelClientConfig,
     spec: &ArtifactSpec,
-) -> Result<ResolvedTunnelClient> {
+    mut progress: F,
+) -> Result<(PathBuf, ManagedClientOutcome)>
+where
+    F: FnMut(u64, Option<u64>),
+{
     let cache_root = expand_path(&client.cache_dir)?;
     fs::create_dir_all(&cache_root).map_err(|_| anyhow!("cache_directory_unavailable"))?;
     let paths = cache_paths(&cache_root, spec)?;
 
-    let initial_state = cache_state(&paths, &spec.archive_sha256);
+    let initial_state = cache_state(&paths, spec);
     if let CacheState::Unavailable(error) = &initial_state {
         return Err(anyhow!("{error}"));
     }
     if let CacheState::Valid(path) = &initial_state {
-        return resolved(spec, path.clone());
-    }
-    if !client.auto_download && matches!(initial_state, CacheState::Missing | CacheState::Invalid) {
-        return Err(anyhow!("cached_artifact_missing_or_invalid"));
+        return Ok((path.clone(), ManagedClientOutcome::AlreadyAvailable));
     }
 
     let _lock = ArtifactLock::acquire(&paths.lock).await?;
 
-    match cache_state(&paths, &spec.archive_sha256) {
-        CacheState::Valid(path) => return resolved(spec, path),
+    match cache_state(&paths, spec) {
+        CacheState::Valid(path) => return Ok((path, ManagedClientOutcome::AlreadyAvailable)),
         CacheState::Repair {
             archive,
             executable,
         } => {
             let path = install_cache(&cache_root, &paths.final_dir, &archive, &executable)?;
-            return resolved(spec, path);
+            return Ok((path, ManagedClientOutcome::Repaired));
         }
         CacheState::Missing | CacheState::Invalid => {}
         CacheState::Unavailable(error) => return Err(anyhow!("{error}")),
@@ -156,84 +164,31 @@ async fn resolve_managed(
     let download_dir = cache_root.join(".downloads");
     fs::create_dir_all(&download_dir).map_err(|_| anyhow!("cache_directory_unavailable"))?;
     let temporary_archive = download_dir.join(format!("{}.part", Uuid::new_v4()));
-    let download_result = download_archive(&spec.url, &temporary_archive, false).await;
-    if let Err(error) = download_result {
-        let _ = fs::remove_file(&temporary_archive);
-        return Err(error);
-    }
-
-    let archive = match read_bounded_file(&temporary_archive, MAX_ARCHIVE_BYTES) {
-        Ok(archive) => archive,
-        Err(error) => {
-            let _ = fs::remove_file(&temporary_archive);
-            return Err(error);
-        }
-    };
-    let _ = fs::remove_file(&temporary_archive);
+    let _temporary_archive = TemporaryFile::new(temporary_archive.clone());
+    progress(0, None);
+    download_archive_with_retries(&spec.url, &temporary_archive, &mut progress).await?;
+    let archive = read_bounded_file(&temporary_archive, MAX_ARCHIVE_BYTES)?;
 
     verify_archive_hash(&archive, &spec.archive_sha256)?;
     let executable = extract_executable(&archive)?;
+    verify_executable_bytes(&executable, &spec.executable_sha256)?;
     let path = install_cache(&cache_root, &paths.final_dir, &archive, &executable)?;
-    resolved(spec, path)
+    Ok((path, ManagedClientOutcome::Downloaded))
 }
 
-fn resolved(spec: &ArtifactSpec, path: PathBuf) -> Result<ResolvedTunnelClient> {
-    let executable_sha256 = sha256_file(&path)?;
-    Ok(ResolvedTunnelClient {
-        path,
-        version: spec.version.clone(),
-        platform: spec.platform.clone(),
-        sha256: executable_sha256,
-        source: spec.source.clone(),
-    })
-}
-
-fn artifact_spec(client: &TunnelClientConfig, platform: &str) -> Result<ArtifactSpec> {
-    if let Some(url) = client.download_url.as_deref() {
-        let url = validate_download_url(url, false)?.to_string();
-        let archive_sha256 = normalize_sha256(
-            client
-                .sha256
-                .as_deref()
-                .ok_or_else(|| anyhow!("custom_download_sha256_missing"))?,
-        )?;
-        let version = client
-            .version
-            .as_deref()
-            .map(normalize_version)
-            .transpose()?
-            .unwrap_or_else(|| "custom".to_owned());
-        return Ok(ArtifactSpec {
-            version,
-            platform: platform.to_owned(),
-            url,
-            archive_sha256,
-            source: TunnelClientSource::CustomDownload,
-        });
-    }
-
-    if client.sha256.is_some() {
-        return Err(anyhow!("sha256_requires_custom_download"));
-    }
-
-    let version = client
-        .version
-        .as_deref()
-        .map(normalize_version)
-        .transpose()?
-        .unwrap_or_else(|| PINNED_VERSION.to_owned());
+fn artifact_spec(platform: &str) -> Result<ArtifactSpec> {
     let entry = MANIFEST
         .iter()
-        .find(|(entry_version, entry_platform, _, _)| {
-            *entry_version == version && *entry_platform == platform
+        .find(|(entry_version, entry_platform, _, _, _)| {
+            *entry_version == PINNED_VERSION && *entry_platform == platform
         })
-        .ok_or_else(|| anyhow!("unsupported_tunnel_client_version"))?;
+        .ok_or_else(|| anyhow!("unsupported_platform"))?;
     Ok(ArtifactSpec {
-        version: version.clone(),
+        version: PINNED_VERSION.to_owned(),
         platform: platform.to_owned(),
         url: entry.2.to_owned(),
         archive_sha256: entry.3.to_owned(),
-        source: TunnelClientSource::ManagedCache,
+        executable_sha256: entry.4.to_owned(),
     })
 }
 
@@ -257,7 +212,7 @@ fn cache_paths(cache_root: &Path, spec: &ArtifactSpec) -> Result<CachePaths> {
     })
 }
 
-fn cache_state(paths: &CachePaths, expected_archive_sha256: &str) -> CacheState {
+fn cache_state(paths: &CachePaths, spec: &ArtifactSpec) -> CacheState {
     let final_meta = match fs::symlink_metadata(&paths.final_dir) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return CacheState::Missing,
@@ -283,53 +238,40 @@ fn cache_state(paths: &CachePaths, expected_archive_sha256: &str) -> CacheState 
             };
         }
     };
-    if sha256_bytes(&archive) != expected_archive_sha256 {
+    if sha256_bytes(&archive) != spec.archive_sha256 {
         return CacheState::Invalid;
     }
-    let Ok(executable) = extract_executable(&archive) else {
-        return CacheState::Invalid;
-    };
-
     let executable_meta = match fs::symlink_metadata(&paths.executable) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return CacheState::Repair {
-                archive,
-                executable,
-            };
-        }
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return CacheState::Unavailable(format!("cache_artifact_metadata_failed: {error}"));
         }
     };
-    if executable_meta.file_type().is_symlink()
-        || !executable_meta.is_file()
-        || !is_executable(&executable_meta)
-    {
-        return CacheState::Repair {
-            archive,
-            executable,
-        };
+    if executable_meta.is_some_and(|meta| {
+        !meta.file_type().is_symlink() && meta.is_file() && is_executable(&meta)
+    }) {
+        match fs::read(&paths.executable) {
+            Ok(bytes) if sha256_bytes(&bytes) == spec.executable_sha256 => {
+                return CacheState::Valid(paths.executable.clone());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return CacheState::Unavailable(format!("cache_artifact_read_failed: {error}"));
+            }
+        }
     }
-    let cached_executable = match fs::read(&paths.executable) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return CacheState::Repair {
-                archive,
-                executable,
-            };
-        }
-        Err(error) => {
-            return CacheState::Unavailable(format!("cache_artifact_read_failed: {error}"));
-        }
+    let Ok(executable) = extract_executable(&archive) else {
+        return CacheState::Invalid;
     };
-    if cached_executable != executable {
-        return CacheState::Repair {
-            archive,
-            executable,
-        };
+    if verify_executable_bytes(&executable, &spec.executable_sha256).is_err() {
+        return CacheState::Invalid;
     }
-    CacheState::Valid(paths.executable.clone())
+    CacheState::Repair {
+        archive,
+        executable,
+    }
 }
 
 fn install_cache(
@@ -409,10 +351,9 @@ fn extract_executable(archive_bytes: &[u8]) -> Result<Vec<u8>> {
         return Err(anyhow!("archive_entry_limit"));
     }
 
-    let mut extracted_bytes = 0u64;
     let mut candidate = None;
     for index in 0..archive.len() {
-        let mut entry = archive
+        let entry = archive
             .by_index(index)
             .map_err(|_| anyhow!("archive_invalid"))?;
         let name = entry.name().to_owned();
@@ -434,42 +375,47 @@ fn extract_executable(archive_bytes: &[u8]) -> Result<Vec<u8>> {
         if !entry.is_file() {
             return Err(anyhow!("archive_file_type_rejected"));
         }
-        if entry.size() > MAX_EXTRACTED_BYTES
-            || extracted_bytes.saturating_add(entry.size()) > MAX_EXTRACTED_BYTES
-        {
+        if entry.size() > MAX_EXTRACTED_BYTES {
             return Err(anyhow!("extracted_size_limit"));
         }
-        extracted_bytes += entry.size();
-
         let is_candidate = entry
             .enclosed_name()
             .and_then(|path| path.file_name().map(|name| name == "tunnel-client"))
             .unwrap_or(false);
-        if !is_candidate {
-            return Err(anyhow!("archive_layout_rejected"));
+        if is_candidate {
+            if candidate.is_some() {
+                return Err(anyhow!("archive_duplicate_candidate"));
+            }
+            let mut contents = Vec::with_capacity(entry.size().min(MAX_EXTRACTED_BYTES) as usize);
+            entry
+                .take(MAX_EXTRACTED_BYTES + 1)
+                .read_to_end(&mut contents)
+                .map_err(|_| anyhow!("archive_invalid"))?;
+            if contents.len() as u64 > MAX_EXTRACTED_BYTES {
+                return Err(anyhow!("extracted_size_limit"));
+            }
+            candidate = Some(contents);
         }
-        if candidate.is_some() {
-            return Err(anyhow!("archive_duplicate_candidate"));
-        }
-        let mut contents = Vec::with_capacity(entry.size().min(MAX_EXTRACTED_BYTES) as usize);
-        entry
-            .read_to_end(&mut contents)
-            .map_err(|_| anyhow!("archive_invalid"))?;
-        candidate = Some(contents);
     }
     candidate.ok_or_else(|| anyhow!("archive_candidate_missing"))
 }
 
-async fn download_archive(url: &str, destination: &Path, allow_http: bool) -> Result<()> {
+async fn download_archive<F>(
+    url: &str,
+    destination: &Path,
+    allow_http: bool,
+    mut progress: F,
+) -> Result<()>
+where
+    F: FnMut(u64, Option<u64>),
+{
     let mut current = validate_download_url(url, allow_http)?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(30))
         .build()
         .map_err(|_| anyhow!("download_client_init"))?;
-    let mut file = tokio::fs::File::create(destination)
-        .await
-        .map_err(|_| anyhow!("download_destination_unavailable"))?;
 
     for redirect_count in 0..=MAX_REDIRECTS {
         let response = client
@@ -495,7 +441,10 @@ async fn download_archive(url: &str, destination: &Path, allow_http: bool) -> Re
             continue;
         }
         if !response.status().is_success() {
-            return Err(anyhow!("download_http_error"));
+            return Err(anyhow!(
+                "download_http_status_{}",
+                response.status().as_u16()
+            ));
         }
         if response
             .content_length()
@@ -504,6 +453,11 @@ async fn download_archive(url: &str, destination: &Path, allow_http: bool) -> Re
             return Err(anyhow!("archive_size_limit"));
         }
 
+        let total_length = response.content_length();
+        progress(0, total_length);
+        let mut file = tokio::fs::File::create(destination)
+            .await
+            .map_err(|_| anyhow!("download_destination_unavailable"))?;
         let mut total = 0u64;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -517,6 +471,7 @@ async fn download_archive(url: &str, destination: &Path, allow_http: bool) -> Re
             file.write_all(&chunk)
                 .await
                 .map_err(|_| anyhow!("download_write_failed"))?;
+            progress(total, total_length);
         }
         file.sync_all()
             .await
@@ -524,6 +479,50 @@ async fn download_archive(url: &str, destination: &Path, allow_http: bool) -> Re
         return Ok(());
     }
     Err(anyhow!("download_redirect_limit"))
+}
+
+async fn download_archive_with_retries<F>(
+    url: &str,
+    destination: &Path,
+    mut progress: F,
+) -> Result<()>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    for attempt in 0..DOWNLOAD_ATTEMPTS {
+        match download_archive(url, destination, false, &mut progress).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let message = error.to_string();
+                let retryable = message == "download_failed"
+                    || message
+                        .strip_prefix("download_http_status_")
+                        .and_then(|status| status.parse::<u16>().ok())
+                        .is_some_and(|status| status >= 500);
+                if !retryable || attempt + 1 == DOWNLOAD_ATTEMPTS {
+                    return Err(error);
+                }
+                let _ = fs::remove_file(destination);
+                progress(0, None);
+                tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+            }
+        }
+    }
+    unreachable!("download attempts are non-zero")
+}
+
+struct TemporaryFile(PathBuf);
+
+impl TemporaryFile {
+    fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+}
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 struct ArtifactLock {
@@ -591,7 +590,7 @@ fn url_scheme_allowed(url: &reqwest::Url, allow_http: bool) -> bool {
     url.scheme() == "https" || (allow_http && url.scheme() == "http")
 }
 
-fn verify_executable(path: &Path, expected_sha256: Option<&str>) -> Result<String> {
+fn verify_executable(path: &Path, expected_sha256: &str) -> Result<()> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| executable_path_error(error, "executable_metadata_failed"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -600,14 +599,19 @@ fn verify_executable(path: &Path, expected_sha256: Option<&str>) -> Result<Strin
     if !is_executable(&metadata) {
         return Err(anyhow!("executable_not_executable"));
     }
-    let actual_sha256 = sha256_file(path)?;
-    if let Some(expected) = expected_sha256 {
-        let expected = normalize_sha256(expected)?;
-        if expected != actual_sha256 {
-            return Err(anyhow!("executable_hash_mismatch"));
-        }
+    let bytes = fs::read(path).map_err(|_| anyhow!("executable_read_failed"))?;
+    let actual_sha256 = sha256_bytes(&bytes);
+    if actual_sha256 != expected_sha256 {
+        return Err(anyhow!("executable_hash_mismatch"));
     }
-    Ok(actual_sha256)
+    Ok(())
+}
+
+fn verify_executable_bytes(bytes: &[u8], expected_sha256: &str) -> Result<()> {
+    if sha256_bytes(bytes) != expected_sha256 {
+        return Err(anyhow!("executable_hash_mismatch"));
+    }
+    Ok(())
 }
 
 fn executable_path_error(error: std::io::Error, fallback: &str) -> anyhow::Error {
@@ -616,11 +620,6 @@ fn executable_path_error(error: std::io::Error, fallback: &str) -> anyhow::Error
     } else {
         anyhow!("{fallback}: {error}")
     }
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).map_err(|_| anyhow!("executable_read_failed"))?;
-    Ok(sha256_bytes(&bytes))
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
@@ -651,25 +650,6 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
         return Err(anyhow!("archive_size_limit"));
     }
     fs::read(path).map_err(|error| anyhow!("cache_artifact_read_failed: {error}"))
-}
-
-fn normalize_sha256(value: &str) -> Result<String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(anyhow!("sha256_invalid"));
-    }
-    Ok(value.to_ascii_lowercase())
-}
-
-fn normalize_version(value: &str) -> Result<String> {
-    let value = value.strip_prefix('v').unwrap_or(value);
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-    {
-        return Err(anyhow!("tunnel_client_version_invalid"));
-    }
-    Ok(value.to_owned())
 }
 
 fn cache_component(value: &str) -> Result<&str> {
@@ -758,32 +738,6 @@ mod tests {
     }
 
     #[test]
-    fn executable_override_checks_permissions_and_optional_hash() {
-        let root = tempfile_dir();
-        let path = root.join("tunnel-client");
-        fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
-        assert_eq!(
-            verify_executable(&path, None).unwrap_err().to_string(),
-            "executable_not_executable"
-        );
-        set_executable(&path).unwrap();
-        let digest = sha256_file(&path).unwrap();
-        assert_eq!(verify_executable(&path, Some(&digest)).unwrap(), digest);
-        assert_eq!(
-            verify_executable(&path, Some(&"0".repeat(64)))
-                .unwrap_err()
-                .to_string(),
-            "executable_hash_mismatch"
-        );
-        let link = root.join("link");
-        std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert_eq!(
-            verify_executable(&link, None).unwrap_err().to_string(),
-            "executable_not_regular"
-        );
-    }
-
-    #[test]
     fn cache_revalidates_archive_and_repairs_binary() {
         let root = tempfile_dir();
         let bytes = archive(&[("tunnel-client", b"good", Some(0o100755))]);
@@ -792,68 +746,24 @@ mod tests {
             platform: "linux-amd64".to_owned(),
             url: "https://example.invalid/client.zip".to_owned(),
             archive_sha256: sha256_bytes(&bytes),
-            source: TunnelClientSource::ManagedCache,
+            executable_sha256: sha256_bytes(b"good"),
         };
         let paths = cache_paths(&root, &spec).unwrap();
         let installed = install_cache(&root, &paths.final_dir, &bytes, b"good").unwrap();
         assert_eq!(
-            cache_state(&paths, &spec.archive_sha256),
+            cache_state(&paths, &spec),
             CacheState::Valid(installed.clone())
         );
         fs::write(&installed, b"bad").unwrap();
-        assert!(matches!(
-            cache_state(&paths, &spec.archive_sha256),
-            CacheState::Repair { .. }
-        ));
-        let replacement = archive(&[("tunnel-client", b"replacement", Some(0o100755))]);
-        let replacement_executable = extract_executable(&replacement).unwrap();
-        let installed = install_cache(
-            &root,
-            &paths.final_dir,
-            &replacement,
-            &replacement_executable,
-        )
-        .unwrap();
-        assert_eq!(fs::read(installed).unwrap(), b"replacement");
-    }
-
-    #[tokio::test]
-    async fn offline_cache_and_auto_download_false_are_deterministic() {
-        let root = tempfile_dir();
-        let archive = archive(&[("tunnel-client", b"offline", Some(0o100755))]);
-        let spec = ArtifactSpec {
-            version: "offline".to_owned(),
-            platform: "linux-amd64".to_owned(),
-            url: "https://example.invalid/client.zip".to_owned(),
-            archive_sha256: sha256_bytes(&archive),
-            source: TunnelClientSource::CustomDownload,
+        let CacheState::Repair {
+            archive,
+            executable,
+        } = cache_state(&paths, &spec)
+        else {
+            panic!("expected damaged cached executable to be repairable");
         };
-        let paths = cache_paths(&root, &spec).unwrap();
-        let executable = extract_executable(&archive).unwrap();
-        install_cache(&root, &paths.final_dir, &archive, &executable).unwrap();
-        let client = TunnelClientConfig {
-            cache_dir: root.clone(),
-            auto_download: false,
-            ..TunnelClientConfig::default()
-        };
-        assert_eq!(
-            resolve_managed(&client, &spec).await.unwrap().path,
-            paths.executable
-        );
-
-        let empty_root = tempfile_dir();
-        let absent_client = TunnelClientConfig {
-            cache_dir: empty_root,
-            auto_download: false,
-            ..TunnelClientConfig::default()
-        };
-        assert_eq!(
-            resolve_managed(&absent_client, &spec)
-                .await
-                .unwrap_err()
-                .to_string(),
-            "cached_artifact_missing_or_invalid"
-        );
+        let repaired = install_cache(&root, &paths.final_dir, &archive, &executable).unwrap();
+        assert_eq!(fs::read(repaired).unwrap(), b"good");
     }
 
     #[tokio::test]
@@ -874,7 +784,7 @@ mod tests {
         let (target_url, target_task) = response_server(200, &body, None).await;
         let (redirect_url, redirect_task) = response_server(302, b"", Some(&target_url)).await;
         let destination = tempfile_dir().join("download.zip");
-        download_archive(&redirect_url, &destination, true)
+        download_archive(&redirect_url, &destination, true, |_, _| {})
             .await
             .unwrap();
         assert_eq!(fs::read(&destination).unwrap(), body);
@@ -883,15 +793,25 @@ mod tests {
 
         let oversized = vec![b'x'; (MAX_ARCHIVE_BYTES + 1) as usize];
         let (oversized_url, oversized_task) = response_server(200, &oversized, None).await;
-        let result =
-            download_archive(&oversized_url, &tempfile_dir().join("too-large.zip"), true).await;
+        let result = download_archive(
+            &oversized_url,
+            &tempfile_dir().join("too-large.zip"),
+            true,
+            |_, _| {},
+        )
+        .await;
         assert_eq!(result.unwrap_err().to_string(), "archive_size_limit");
         oversized_task.abort();
 
         let (partial_url, partial_task) =
             response_server_with_length(200, b"partial", None, Some(100)).await;
-        let result =
-            download_archive(&partial_url, &tempfile_dir().join("partial.zip"), true).await;
+        let result = download_archive(
+            &partial_url,
+            &tempfile_dir().join("partial.zip"),
+            true,
+            |_, _| {},
+        )
+        .await;
         assert_eq!(result.unwrap_err().to_string(), "download_failed");
         partial_task.abort();
     }

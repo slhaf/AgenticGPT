@@ -912,16 +912,6 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_tunnel_api_key
     ),
     config_key!(
-        "tunnel.client.version",
-        Tunnel,
-        NullableString,
-        true,
-        "Managed tunnel client version, or null for the default.",
-        "托管隧道客户端版本；使用 null 可恢复默认值。",
-        "null",
-        set_tunnel_client_version
-    ),
-    config_key!(
         "tunnel.client.cacheDir",
         Tunnel,
         Path,
@@ -932,16 +922,6 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_tunnel_client_cache_dir
     ),
     config_key!(
-        "tunnel.client.autoDownload",
-        Tunnel,
-        Boolean,
-        false,
-        "Allow automatic tunnel client downloads.",
-        "允许自动下载隧道客户端。",
-        "true",
-        set_tunnel_client_auto_download
-    ),
-    config_key!(
         "tunnel.client.executable",
         Tunnel,
         NullablePath,
@@ -950,26 +930,6 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "显式隧道客户端可执行文件；使用 null 可恢复托管模式。",
         "null",
         set_tunnel_client_executable
-    ),
-    config_key!(
-        "tunnel.client.downloadUrl",
-        Tunnel,
-        NullableString,
-        true,
-        "Custom tunnel client download URL, or null.",
-        "自定义隧道客户端下载 URL；也可使用 null。",
-        "null",
-        set_tunnel_client_download_url
-    ),
-    config_key!(
-        "tunnel.client.sha256",
-        Tunnel,
-        NullableString,
-        true,
-        "SHA-256 for a custom tunnel client, or null.",
-        "自定义隧道客户端的 SHA-256；也可使用 null。",
-        "null",
-        set_tunnel_client_sha256
     ),
     config_key!(
         "tunnel.hubReporting.enabled",

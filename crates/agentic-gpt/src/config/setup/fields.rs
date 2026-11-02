@@ -22,7 +22,6 @@ impl SetupField {
             | Self::HttpMcpEnabled
             | Self::HubEnabled
             | Self::Bubblewrap
-            | Self::TunnelAutoDownload
             | Self::HubReportingEnabled
             | Self::RoomMaintenanceAutoPush => &["false", "true"],
             Self::HubReportingDetail => &["metadata", "full"],
@@ -109,9 +108,5 @@ impl SetupField {
                 | Self::RoomSecretClientSecret
                 | Self::RoomSecretMasterPassword
         )
-    }
-
-    pub(crate) fn is_hex(self) -> bool {
-        matches!(self, Self::TunnelSha256)
     }
 }

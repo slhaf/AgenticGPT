@@ -315,10 +315,11 @@ impl ConfigTuiApp {
                 }
             }
             TuiAction::Text(character) => {
-                let accepts_character = self.state.editing.as_ref().is_none_or(|edit| {
-                    (!edit.field.is_numeric() || character.is_ascii_digit())
-                        && (!edit.field.is_hex() || character.is_ascii_hexdigit())
-                });
+                let accepts_character = self
+                    .state
+                    .editing
+                    .as_ref()
+                    .is_none_or(|edit| !edit.field.is_numeric() || character.is_ascii_digit());
                 if accepts_character {
                     self.with_edit(|edit| apply_text_key(edit, KeyCode::Char(character)));
                 }
@@ -2826,12 +2827,9 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         | SetupField::RepositoryRoot
         | SetupField::RoomMaintenanceMode
         | SetupField::RoomMaintenanceAutoPush => crate::config_templates::OptionalSection::Room,
-        SetupField::TunnelClientVersion
-        | SetupField::TunnelCacheDir
-        | SetupField::TunnelAutoDownload
-        | SetupField::TunnelExecutable
-        | SetupField::TunnelDownloadUrl
-        | SetupField::TunnelSha256 => crate::config_templates::OptionalSection::TunnelClient,
+        SetupField::TunnelCacheDir | SetupField::TunnelExecutable => {
+            crate::config_templates::OptionalSection::TunnelClient
+        }
         SetupField::HubReportingEnabled | SetupField::HubReportingDetail => {
             crate::config_templates::OptionalSection::HubReporting
         }

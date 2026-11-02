@@ -860,19 +860,9 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
             items
         }
         OptionalSectionDraft::TunnelClient(TunnelClientDraft {
-            version,
             cache_dir,
-            auto_download,
             executable,
-            download_url,
-            sha256,
         }) => vec![
-            ReviewItem::field(
-                SetupField::TunnelClientVersion,
-                "tunnel_client_version",
-                version,
-                ReviewEditorKind::Text,
-            ),
             ReviewItem::field(
                 SetupField::TunnelCacheDir,
                 "tunnel_cache_dir",
@@ -880,27 +870,9 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::Text,
             ),
             ReviewItem::field(
-                SetupField::TunnelAutoDownload,
-                "tunnel_auto_download",
-                auto_download.to_string(),
-                ReviewEditorKind::Choice,
-            ),
-            ReviewItem::field(
                 SetupField::TunnelExecutable,
                 "tunnel_executable",
                 executable,
-                ReviewEditorKind::Text,
-            ),
-            ReviewItem::field(
-                SetupField::TunnelDownloadUrl,
-                "tunnel_download_url",
-                download_url,
-                ReviewEditorKind::Text,
-            ),
-            ReviewItem::field(
-                SetupField::TunnelSha256,
-                "tunnel_sha256",
-                sha256,
                 ReviewEditorKind::Text,
             ),
         ],

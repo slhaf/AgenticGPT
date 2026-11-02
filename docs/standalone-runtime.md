@@ -378,12 +378,8 @@ Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `boot
     "tunnelId": "tunnel_<assigned-id>",
     "apiKey": "file:/home/me/.agentic_gpt/secrets/tunnel-api-key",
     "client": {
-      "version": null,
       "cacheDir": "~/.agentic_gpt/cache/tunnel-client",
-      "autoDownload": true,
-      "executable": null,
-      "downloadUrl": null,
-      "sha256": null
+      "executable": null
     },
     "hubReporting": {
       "enabled": false,
@@ -452,7 +448,6 @@ unset AGENTIC_TUNNEL_API_KEY
 
 agentic-gpt config set tunnel.tunnelId 'tunnel_<assigned-id>'
 agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
-agentic-gpt config set tunnel.client.autoDownload true
 ```
 
 `env:NAME` 形式适用于 service manager 的受保护环境或注入的 secret，例如 `env:AGENTIC_TUNNEL_API_KEY`；不要在 shell transcript 中使用
@@ -461,36 +456,41 @@ agentic-gpt config set tunnel.client.autoDownload true
 受支持的 `config set` 键包括：
 
 - `tunnel.tunnelId`, `tunnel.apiKey`.
-- `tunnel.client.version`, `tunnel.client.cacheDir`,
-  `tunnel.client.autoDownload`, `tunnel.client.executable`,
-  `tunnel.client.downloadUrl`, `tunnel.client.sha256`.
+- `tunnel.client.cacheDir`, `tunnel.client.executable`.
 - `hub.enabled`, `hub.url`, `hub.transport`, `hub.agentSecret`：辅助连接设置，由 Hub 所有者局部重连。
 - `tunnel.hubReporting.enabled`, `tunnel.hubReporting.detail`.
 - `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.publicUrl`,
   `httpMcp.bearerToken`, `httpMcp.allowHosts`.
 
-Tunnel 身份、secret reference、client 来源／版本／hash／cache 及 profile 属于启动契约；修改后保留当前子进程树并报告待重启，诊断不打印 secret 值。Browser 配置、Hub 连接和工具集启停通过局部协调应用，不能与 Tunnel 启动身份合并判断。
+Tunnel 身份、secret reference、client 路径／cache 及 profile 属于启动契约；修改后保留当前子进程树并报告待重启，诊断不打印 secret 值。Browser 配置、Hub 连接和工具集启停通过局部协调应用，不能与 Tunnel 启动身份合并判断。
 
-## 隧道客户端的信任与来源选择
+## 隧道客户端版本与下载
 
-未设置 executable override 时，release manifest 会为受支持的 Linux 目标固定 OpenAI tunnel-client `v0.0.10`：
+Agentic 内部固定 OpenAI 官方 tunnel-client `v0.0.19`，并为 Linux amd64 与 arm64 固定发布包和可执行文件
+的 SHA-256。Agentic 只接受这两个平台；其他平台会在下载或启动前报告不支持。下载时先校验官方 ZIP 摘要，
+再从归档中安全提取 tunnel-client，并校验可执行文件摘要。官方 ZIP 可包含其他文件，Agentic 只提取唯一的
+`tunnel-client` 普通文件。
 
-| 平台 | 资源文件 | Archive SHA-256 |
-| --- | --- | --- |
-| `linux-amd64` | `tunnel-client-v0.0.10-linux-amd64.zip` | `b9e0388a343f2d7adeff3992f411a0bd3d916a64bc56534aac5fd15ac1b20cd5` |
-| `linux-arm64` | `tunnel-client-v0.0.10-linux-arm64.zip` | `b842a9b2352eebd80514cf01a1fbb1c0d400a7d24a4015e85a7ea5f1aeaa5b30` |
+| 平台 | 官方发布包 | Archive SHA-256 | `tunnel-client` SHA-256 |
+| --- | --- | --- | --- |
+| Linux amd64 | `tunnel-client-v0.0.19-linux-amd64.zip` | `9ee9448592345a9dd1517fb79791ab54d24f051142eb92bcbe8cd355effc9142` | `56d0120886ce91bfe31e7a5600f6a6594199a02e9b3eac671d5da0d7480c97a3` |
+| Linux arm64 | `tunnel-client-v0.0.19-linux-arm64.zip` | `5a19e556c4a8736ab7a6fde6f0568f6e7411fa2dff21186fc15bc30e9b98a603` | `8a50b25d6055bc6e3e3a5c18c098637ab2be63f6e453b8ebebd02433deadba04` |
 
-`version: null` 表示使用内嵌 pin。显式指定的版本必须存在于 manifest 中。不支持的平台会在访问网络前失败。Agentic 会在解压前验证 archive，
-只接受一个名为 `tunnel-client` 的普通文件；会拒绝路径穿越、符号链接、设备文件和重复布局，并通过私有 cache 与原子替换完成安装。
+默认缓存位于 `~/.agentic_gpt/cache/tunnel-client`，可通过 `tunnel.client.cacheDir` 更改。启动时发现托管
+缓存归档缺失或损坏会自动下载；归档有效但提取出的客户端缺失或损坏时，会从归档修复。指定
+`tunnel.client.executable` 后，Agentic 会在每次启动时校验其摘要是否与内置该平台官方可执行文件一致；缺失
+或摘要不匹配会报错，不会回退到托管缓存。此路径只能指向与内置 pin 完全相同的官方二进制。
 
-来源优先级如下：
+可在不配置 Tunnel ID 或 API key 的情况下预下载或修复托管缓存：
 
-1. `client.executable`：使用本地可信 executable；若提供可选的 `sha256`，每次启动都会校验。
-2. `client.downloadUrl` 加 `client.sha256`：使用精确的 HTTPS archive URL，必须提供 archive digest，HTTPS 重定向次数受限。
-3. 托管 manifest/cache：使用固定的 URL 和 digest。`autoDownload: false` 时，必须已有经过验证的 cache artifact。
+```bash
+agentic-gpt tunnel-client download
+agentic-gpt tunnel-client download --config /path/to/config.json
+```
 
-托管资源身份包含版本、平台和 archive digest，因此自定义与官方 artifact 不会冲突。默认 cache 位于
-`~/.agentic_gpt/cache/tunnel-client`。
+命令读取配置中的 `tunnel.client.cacheDir`，若未指定 `--config` 则读取默认配置路径；即使配置了
+`tunnel.client.executable`，该命令也会下载托管副本。CLI 在 stderr 定期显示进度，并在开始、重试和结束时更新；有总大小时显示
+已下载字节数和百分比，未知时显示已下载字节数。终端使用单行刷新，非终端逐行输出。有效缓存会直接报告并成功退出。
 
 ## 辅助 Hub 连接与可选上报
 
@@ -541,8 +541,10 @@ supervisor 会在启动第一个子进程前运行 `doctor --json`，等待 loop
 `tunnel_doctor_spawn_failed` 或 `tunnel_client_spawn_failed` 表示无法启动子进程；错误附带 OS 错误种类、原始错误码和错误消息。排查时保留这些细节，以区分文件不存在、权限或其他启动错误，不应仅凭错误前缀判断原因。
 
 子进程意外退出或就绪失败时，最多重试 5 次，间隔依次为 1/2/4/8/16 秒。连续就绪 60 秒会重置失败计数。配置/reference 错误、不支持的平台、
-缺少本地 executable、checksum 失败，以及 tunnel authentication/authorization 失败，都会作为永久启动失败处理。收到 SIGINT/SIGTERM 时会停止
-tunnel 进程组和 worker，随后使用有界的 kill fallback。
+缺少本地 executable、SHA-256 失败，以及 tunnel authentication/authorization 失败，都会作为永久启动失败处理。doctor 和常驻 tunnel-client
+分别在独立进程组中运行。收到 SIGINT/SIGTERM、进程退出或准备重拉时，supervisor 向对应进程组发送 SIGTERM，等待退出；超时后发送 SIGKILL，
+并检查进程组是否还有运行中的进程。Linux 上，supervisor 被强制终止时，直接启动的 doctor/tunnel-client 会收到父进程退出信号；受管理的 stdio worker
+发现 tunnel-client 退出时也会终止所属进程组，以释放本地 socket。已经脱离该进程组的后代不受此机制约束；升级旧版本时仍应检查遗留进程。
 
 tunnel control-plane 的逻辑连接可能比重启后的 stdio 子进程存活更久。新的 worker 在新的 MCP `initialize` 之前收到非 ping 请求时，只有
 tunnel stdio transport 会通过私有 handshake 恢复 rmcp 的本地初始化状态；它会抑制该私有响应，然后以原 request id 重放原请求。来自旧逻辑连接的
@@ -555,8 +557,8 @@ initialize 前通知会被忽略。
 
 1. 阅读 Agentic stderr 诊断和保留的 `tunnel-client.log`；检查日志时绝不要打印 API key。
 2. 查看 `agentic-gpt config show` 输出中的 reference 和非 secret 来源摘要，不要读取解析后的值。
-3. 使用托管 client 时，检查 cache 路径；除非有意进行离线配置，否则保留 `autoDownload: true`。
-4. 使用 override 时，确认文件是普通 executable，并核对配置的可选 digest 是否对应预期二进制文件。
+3. 使用托管 client 时，运行 `agentic-gpt tunnel-client download` 检查并修复缓存。
+4. 使用 override 时，确认路径指向与本机平台内置 SHA-256 相符的官方 executable。
 5. 向服务提供方检查 tunnel/control-plane 状态。身份、profile 或 client 分发设置变更后应重启。
 6. 若只有 reporting 失败，可暂时禁用 `tunnel.hubReporting.enabled`；本地 Tunnel 执行不受影响。
 
@@ -592,14 +594,12 @@ secret 仍可能出现在本地进程检查中。请只在可信机器上执行�
 
 ## 验证范围
 
-自动化检查覆盖配置/reference 验证、worker 工具列表精确性、secret 的 argv/environment 隔离、可信资源/cache 行为、supervisor 重启与进程树清理、
+自动化检查覆盖配置/reference 验证、worker 工具列表精确性、secret 的 argv/environment 隔离、可信资源/cache 行为、supervisor 恢复策略与进程组清理、
 reporting 隐私/幂等性，以及 Full/Coordinator MCP 工具表面。仓库的多目标 release 脚本为
 [`scripts/dist-linux.sh`](../scripts/dist-linux.sh)；安装了 `cross` 和对应工具链时，该脚本会构建 `x86_64` 和 `aarch64` 的 GNU 与 musl 四个 Linux 目标。
 
-`crates/agentic-gpt/tests/standalone_supervisor.rs` 会启动实际的 Agentic supervisor 和隐藏 stdio worker，对 Normal profile 执行
-initialize/list/call smoke。它还会启动隐藏 worker，并将旧的 initialized notification 和一个工具调用作为首个请求，以证明重启恢复可以让 worker 保持运行、
-隐藏私有 handshake，并接受后续调用。
-
-对应的 Room profile 由进程内测试覆盖。两者共同验证 stdout 仅包含 MCP framing，且精简后的 Normal/Room 工具表面可调用。
+`crates/agentic-gpt/tests/standalone_supervisor.rs` 启动真实的隐藏 stdio worker，对 Normal 和 Room profile 执行
+initialize/list/call smoke，并检查客户端被强制结束后 worker 的退出和本地 socket 释放。该文件还验证旧连接的 initialized notification
+和工具调用可以触发私有握手恢复，并接受后续调用。supervisor 模块中的进程测试另外覆盖子进程组清理及日志转发。
 这些检查仍不等同于调用真实 Secure MCP Tunnel control plane：真实调用必须启动外部 connector 并返回本地 Agentic 工具结果，而不只是通过 `/healthz`、
 `doctor` 或本地伪造的交接。外部凭据/环境前置条件应与仓库测试分别记录。

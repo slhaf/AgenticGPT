@@ -93,12 +93,8 @@ pub(crate) enum SetupField {
     RepositoryRoot,
     RoomMaintenanceMode,
     RoomMaintenanceAutoPush,
-    TunnelClientVersion,
     TunnelCacheDir,
-    TunnelAutoDownload,
     TunnelExecutable,
-    TunnelDownloadUrl,
-    TunnelSha256,
     HubReportingEnabled,
     HubReportingDetail,
     EventsLowTtlSeconds,
@@ -671,12 +667,8 @@ pub(crate) struct RoomDraft {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TunnelClientDraft {
-    pub(crate) version: String,
     pub(crate) cache_dir: String,
-    pub(crate) auto_download: bool,
     pub(crate) executable: String,
-    pub(crate) download_url: String,
-    pub(crate) sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1345,12 +1337,8 @@ pub(crate) fn default_optional_draft_for_profile(
         }),
         OptionalSection::RoomSecret => OptionalSectionDraft::RoomSecret(RoomSecretDraft::default()),
         OptionalSection::TunnelClient => OptionalSectionDraft::TunnelClient(TunnelClientDraft {
-            version: String::new(),
             cache_dir: DEFAULT_TUNNEL_CACHE_DIR.to_string(),
-            auto_download: true,
             executable: String::new(),
-            download_url: String::new(),
-            sha256: String::new(),
         }),
         OptionalSection::HubReporting => OptionalSectionDraft::HubReporting(HubReportingDraft {
             enabled: false,
@@ -1444,17 +1432,13 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
         }),
         room_secret: Some(RoomSecretDraft::from_config(&config.room.secret)),
         tunnel_client: tunnel.map(|tunnel| TunnelClientDraft {
-            version: tunnel.client.version.clone().unwrap_or_default(),
             cache_dir: tunnel.client.cache_dir.to_string_lossy().into_owned(),
-            auto_download: tunnel.client.auto_download,
             executable: tunnel
                 .client
                 .executable
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            download_url: tunnel.client.download_url.clone().unwrap_or_default(),
-            sha256: tunnel.client.sha256.clone().unwrap_or_default(),
         }),
         hub_reporting: tunnel.map(|tunnel| HubReportingDraft {
             enabled: tunnel.hub_reporting.enabled,

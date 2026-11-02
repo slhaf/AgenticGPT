@@ -673,12 +673,7 @@ pub(super) fn validate_field(
             OptionalSection::Room,
             &session.optional_draft(OptionalSection::Room),
         ),
-        SetupField::TunnelClientVersion
-        | SetupField::TunnelCacheDir
-        | SetupField::TunnelAutoDownload
-        | SetupField::TunnelExecutable
-        | SetupField::TunnelDownloadUrl
-        | SetupField::TunnelSha256 => validate_optional(
+        SetupField::TunnelCacheDir | SetupField::TunnelExecutable => validate_optional(
             session,
             OptionalSection::TunnelClient,
             &session.optional_draft(OptionalSection::TunnelClient),
@@ -920,27 +915,7 @@ fn validate_optional(
                 Err((field, code)) => errors.push(error(field, code)),
             }
         }
-        (OptionalSection::TunnelClient, OptionalSectionDraft::TunnelClient(value)) => {
-            if let Some(url) = optional_text(&value.download_url) {
-                if !url.starts_with("https://") {
-                    errors.push(error(
-                        SetupField::TunnelDownloadUrl,
-                        "tunnel_download_url_must_use_https",
-                    ));
-                }
-                if value.sha256.trim().is_empty() {
-                    errors.push(error(
-                        SetupField::TunnelSha256,
-                        "tunnel_download_sha256_required",
-                    ));
-                }
-            }
-            if let Some(sha256) = optional_text(&value.sha256) {
-                if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    errors.push(error(SetupField::TunnelSha256, "tunnel_sha256_invalid"));
-                }
-            }
-        }
+        (OptionalSection::TunnelClient, OptionalSectionDraft::TunnelClient(_)) => {}
         (OptionalSection::HubReporting, OptionalSectionDraft::HubReporting(value)) => {
             if !matches!(value.detail.trim(), "metadata" | "full") {
                 errors.push(error(
@@ -1540,16 +1515,12 @@ fn apply_optional_draft(
         }
         (OptionalSection::TunnelClient, OptionalSectionDraft::TunnelClient(value)) => {
             input.tunnel_client = Some(TunnelClientConfig {
-                version: optional_string(&value.version),
                 cache_dir: if value.cache_dir.trim().is_empty() {
                     PathBuf::from("~/.agentic_gpt/cache/tunnel-client")
                 } else {
                     PathBuf::from(value.cache_dir.trim())
                 },
-                auto_download: value.auto_download,
                 executable: optional_path(&value.executable),
-                download_url: optional_string(&value.download_url),
-                sha256: optional_string(&value.sha256),
             });
         }
         (OptionalSection::HubReporting, OptionalSectionDraft::HubReporting(value)) => {
@@ -1672,14 +1643,6 @@ fn map_build_error(session: &SetupSession, code: String) -> ValidationError {
         "hub_transport_invalid" => (SetupField::HubTransport, "hub_transport_invalid"),
         "agent_id_required" => (SetupField::AgentId, "agent_id_required"),
         "agent_secret_required" => (SetupField::AgentSecret, "agent_secret_required"),
-        "tunnel_download_url_must_use_https" => (
-            SetupField::TunnelDownloadUrl,
-            "tunnel_download_url_must_use_https",
-        ),
-        "tunnel_download_sha256_required" => {
-            (SetupField::TunnelSha256, "tunnel_download_sha256_required")
-        }
-        "tunnel_sha256_invalid" => (SetupField::TunnelSha256, "tunnel_sha256_invalid"),
         _ => (
             match session.selected_mode() {
                 RuntimeMode::Standalone => SetupField::TunnelId,
@@ -1709,7 +1672,7 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::Room => SetupField::RoomTimezone,
         OptionalSection::RoomSecret => SetupField::RoomSecretServerUrl,
         OptionalSection::Email => SetupField::EmailImapHost,
-        OptionalSection::TunnelClient => SetupField::TunnelClientVersion,
+        OptionalSection::TunnelClient => SetupField::TunnelCacheDir,
         OptionalSection::HubReporting => SetupField::HubReportingDetail,
         OptionalSection::Events => SetupField::EventsLowTtlSeconds,
     }

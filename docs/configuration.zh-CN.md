@@ -124,7 +124,7 @@ Browser、Skills、安全策略和配置管理，不再有“其他配置”兜�
 - Toolsets 从配置档 preset 开始；一旦显式编辑，其 namespace selection 具有权威性。
   Room 通用、Email、Secret 配置在工具集关闭时仍可进入和预配置；启停状态来自相应子工具集，
   Email、Secret 页面和 Review 的对应分组只编辑服务参数，启停统一在 Toolsets 分组操作。启用时要求完整配置，关闭时允许保留部分设置。
-- 只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会
+- 只有 Standalone 模式会出现 tunnel-client 路径和 Hub reporting。Hub 与 Local 模式不会
   显示这些 tunnel 部分。
 - Standalone 和 Local 的 Connection 页默认关闭 Hub 辅助连接。打开后可配置 Hub URL、传输方式、
   Agent ID 和密钥；这条连接可为 `ntfy` 确认提供响应，但不会接受 Hub 执行命令。连接仍会发送
@@ -208,7 +208,6 @@ unset AGENTIC_TUNNEL_API_KEY
 
 agentic-gpt config set tunnel.tunnelId 'tunnel_<assigned-id>'
 agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
-agentic-gpt config set tunnel.client.autoDownload true
 agentic-gpt run
 ```
 
@@ -237,7 +236,7 @@ agentic-gpt run
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 仓库根目录、时区、日记日界线、维护策略及可选 Vaultwarden 密钥服务。 |
 | `email` | 单账户 IMAP/SMTP、同步间隔、本地内容保存限制和发送/垃圾箱策略；见[邮件使用指南](email.zh-CN.md)。 |
-| `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
+| `tunnel` | Standalone tunnel-client 路径、secret 引用与可选 reporting。 |
 | `browser` | 可选的高级 Browser runtime 覆盖；Browser runtime 自动 discovery 受 Browser 工具集开关控制；managed runtime 自动 provisioning 需显式启用 `browser.managed.autoProvision`，默认 `false`。 |
 | `hub` | `enabled` 在 Standalone/Local 启用确认用的 Hub 辅助连接，默认 `false`；Hub 模式仍始终使用命令连接。Standalone 的上报由 `tunnel.hubReporting.enabled` 独立控制。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
@@ -534,12 +533,8 @@ Local/Standalone 的 Unix MCP 路径位于 `~/.agentic_gpt/runtime/agent/<agentI
     "tunnelId": "tunnel_<assigned-id>",
     "apiKey": "file:/home/me/.agentic_gpt/secrets/tunnel-api-key",
     "client": {
-      "version": null,
       "cacheDir": "~/.agentic_gpt/cache/tunnel-client",
-      "autoDownload": true,
-      "executable": null,
-      "downloadUrl": null,
-      "sha256": null
+      "executable": null
     },
     "hubReporting": {
       "enabled": false,
@@ -556,13 +551,14 @@ Local/Standalone 的 Unix MCP 路径位于 `~/.agentic_gpt/runtime/agent/<agentI
 
 明文值会被拒绝。引用文件末尾允许一个 LF 或 CRLF，并会被去除；空值和控制字符会导致启动失败。
 
-Tunnel client 来源优先级：
+Agentic 固定使用内置的官方 tunnel-client 版本和平台摘要。未设置 `client.executable` 时，Agentic
+从官方发布包下载并验证客户端；缓存缺失或损坏时会自动下载或修复。`client.cacheDir` 可更改缓存目录。
+指定 `client.executable` 时，Agentic 会校验它是否与内置的该平台官方可执行文件摘要一致；文件缺失或
+摘要不符会导致启动失败，不会回退到托管缓存。该路径用于选择同一官方二进制的本地副本，不用于替换版本。
 
-1. `client.executable`：受信任的本地可执行文件，可选 `sha256` 每次启动校验。
-2. `client.downloadUrl` + 必需的 `sha256`：精确自定义 HTTPS archive。
-3. Managed manifest/cache：当前平台内置固定版本的官方 tunnel-client。
-
-`version: null` 使用内置 pin。`autoDownload: false` 要求 verified cache 已存在。
+也可在启动前运行 `agentic-gpt tunnel-client download [--config PATH]` 下载并验证托管客户端；该命令
+不需要 Tunnel ID 或 API key。CLI 在 stderr 定期显示进度，并在开始、重试和结束时更新；有总大小时显示字节数和百分比，未知时显示
+已下载字节数。终端使用单行刷新，非终端逐行输出。
 
 `hubReporting.enabled` 默认 false。启用后 Hub 连接是 reporting-only，绝不会接收执行命令。`detail` 可为 `metadata` 或 `full`；隐私边界见 [`standalone-runtime.md`](standalone-runtime.md)。
 
@@ -948,7 +944,7 @@ Standalone、Local 和连接 Hub 的 Agent 共用串行配置应用协调。目�
 | 配置 | 当前实例如何应用 |
 | --- | --- |
 | `mode`、`profile`、`agentId`、`workspaceRoot` | 保留当前启动值，保存的目标值需显式重启实例；不自动迁移工作空间或重启用户进程。 |
-| `tunnel.tunnelId`、`tunnel.apiKey`、`tunnel.client.*` | 保留 supervisor 捕获的身份、凭据和客户端启动参数；下次显式启动采用新值。 |
+| `tunnel.tunnelId`、`tunnel.apiKey`、`tunnel.client.cacheDir`、`tunnel.client.executable` | 保留 supervisor 捕获的身份、凭据和客户端启动参数；下次显式启动采用新值。 |
 | `tunnel.hubReporting.detail` | 更新后续报告策略，不重建 Tunnel。 |
 | `tunnel.hubReporting.enabled`、`hub.*` | 由 Hub 连接所有者局部协调，可能处于连接中或失败；旧目标的结果不会作为新目标的调用结果重放。 |
 | `httpMcp.*` | Standalone listener/auth 所有者协调监听、认证与 session；endpoint identity 改变后客户端需重新 initialize。Local/Hub 模式不因此新增 TCP listener。 |
