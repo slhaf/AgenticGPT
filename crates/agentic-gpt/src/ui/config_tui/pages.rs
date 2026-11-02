@@ -4618,49 +4618,9 @@ fn render_review(
     let mut mcp_create_line = None;
     let mut row_index = 0usize;
     for group in groups {
-        let visible_status = match (group.target, section_draft) {
-            (ReviewTarget::OptionalSection(section), Some(draft)) if draft.section() == section => {
-                match draft {
-                    OptionalSectionDraft::Email(value) => {
-                        let configured = value
-                            .to_config()
-                            .is_ok_and(|config| config.validate_enabled().is_ok());
-                        match (
-                            session
-                                .effective_toolsets()
-                                .is_enabled(ToolNamespace::RoomEmail),
-                            configured,
-                        ) {
-                            (true, true) => SectionStatus::Enabled,
-                            (true, false) => SectionStatus::Incomplete,
-                            (false, true) => SectionStatus::Disabled,
-                            (false, false) => SectionStatus::DisabledIncomplete,
-                        }
-                    }
-                    OptionalSectionDraft::RoomSecret(value) => {
-                        let configured = value
-                            .to_config()
-                            .is_ok_and(|config| config.validate_enabled().is_ok());
-                        match (
-                            session
-                                .effective_toolsets()
-                                .is_enabled(ToolNamespace::RoomSecret),
-                            configured,
-                        ) {
-                            (true, true) => SectionStatus::Enabled,
-                            (true, false) => SectionStatus::Incomplete,
-                            (false, true) => SectionStatus::Disabled,
-                            (false, false) => SectionStatus::DisabledIncomplete,
-                        }
-                    }
-                    _ if *draft == session.optional_draft(section) => {
-                        session.section_status(section)
-                    }
-                    _ if *draft == default_optional_draft(language, section) => {
-                        SectionStatus::Default
-                    }
-                    _ => SectionStatus::Configured,
-                }
+        let visible_status = match group.target {
+            ReviewTarget::OptionalSection(section) => {
+                session.section_status_with_override(section, section_draft)
             }
             _ => group.status,
         };
@@ -5326,17 +5286,10 @@ fn review_target_label(target: ReviewTarget, language: UiLanguage) -> &'static s
 
 fn section_status_label(status: SectionStatus, language: UiLanguage) -> &'static str {
     match status {
-        SectionStatus::Default => t(language, "Default", "默认"),
+        SectionStatus::Default => t(language, "Not modified", "未修改"),
         SectionStatus::Configured => t(language, "Configured", "已配置"),
         SectionStatus::Disabled => t(language, "Disabled", "已关闭"),
-        SectionStatus::DisabledIncomplete => t(
-            language,
-            "Disabled · needs configuration",
-            "已关闭 · 缺配置",
-        ),
-        SectionStatus::Incomplete => t(language, "Needs configuration", "缺配置"),
-        SectionStatus::Enabled => t(language, "Enabled", "已启用"),
-        SectionStatus::NotApplicable => t(language, "Not applicable", "不适用"),
+        SectionStatus::NotApplicable => t(language, "Not modified", "未修改"),
     }
 }
 

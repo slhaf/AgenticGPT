@@ -179,9 +179,6 @@ pub(crate) enum SectionStatus {
     Default,
     Configured,
     Disabled,
-    DisabledIncomplete,
-    Incomplete,
-    Enabled,
     NotApplicable,
 }
 
@@ -970,48 +967,230 @@ impl SetupSession {
     }
 
     pub(crate) fn section_status(&self, section: OptionalSection) -> SectionStatus {
-        let toolsets = self.effective_toolsets();
+        self.section_status_with_override(section, None)
+    }
+
+    pub(crate) fn section_status_with_override(
+        &self,
+        section: OptionalSection,
+        override_draft: Option<&OptionalSectionDraft>,
+    ) -> SectionStatus {
+        let draft = override_draft
+            .filter(|draft| draft.section() == section)
+            .cloned()
+            .unwrap_or_else(|| self.optional_draft(section));
+        let toolsets = match override_draft {
+            Some(OptionalSectionDraft::Toolsets(value)) => value
+                .to_config()
+                .unwrap_or_else(|_| self.effective_toolsets()),
+            _ => self.effective_toolsets(),
+        };
+        let policy_enabled = match override_draft {
+            Some(OptionalSectionDraft::Catalog(value))
+                if value.section == OptionalSection::SecurityPolicy =>
+            {
+                catalog_bool_value(value, &["policy", "enabled"])
+                    .unwrap_or_else(|| self.policy_enabled())
+            }
+            _ => self.policy_enabled(),
+        };
         if !validation::section_is_legal(section, self.selected_mode, &toolsets) {
             return SectionStatus::NotApplicable;
         }
-        let enabled_namespace = match section {
-            OptionalSection::Email => Some(ToolNamespace::RoomEmail),
-            OptionalSection::RoomSecret => Some(ToolNamespace::RoomSecret),
-            _ => None,
-        };
-        if let Some(namespace) = enabled_namespace {
-            let configured = match section {
-                OptionalSection::Email => self
-                    .optional
-                    .email
-                    .as_ref()
-                    .and_then(|draft| draft.to_config().ok())
-                    .is_some_and(|config| config.validate_enabled().is_ok()),
-                OptionalSection::RoomSecret => self
-                    .optional
-                    .room_secret
-                    .as_ref()
-                    .and_then(|draft| draft.to_config().ok())
-                    .is_some_and(|config| config.validate_enabled().is_ok()),
-                _ => false,
-            };
-            if !toolsets.is_enabled(namespace) {
-                return if configured {
-                    SectionStatus::Disabled
-                } else {
-                    SectionStatus::DisabledIncomplete
-                };
-            }
-            return if configured {
-                SectionStatus::Enabled
-            } else {
-                SectionStatus::Incomplete
-            };
+
+        if self.section_is_closed(section, &draft, &toolsets, policy_enabled) {
+            return SectionStatus::Disabled;
         }
-        if self.optional.has(section) {
+
+        let changed_toolset = match section {
+            OptionalSection::Browser => {
+                self.toolset_differs_from_default(ToolNamespace::Browser, &toolsets)
+            }
+            OptionalSection::Skills => {
+                self.toolset_differs_from_default(ToolNamespace::Skills, &toolsets)
+            }
+            OptionalSection::ConfigManagement => {
+                self.toolset_differs_from_default(ToolNamespace::Config, &toolsets)
+            }
+            OptionalSection::McpServers => {
+                self.toolset_differs_from_default(ToolNamespace::Mcp, &toolsets)
+            }
+            OptionalSection::Email => {
+                self.toolset_differs_from_default(ToolNamespace::RoomEmail, &toolsets)
+            }
+            OptionalSection::RoomSecret => {
+                self.toolset_differs_from_default(ToolNamespace::RoomSecret, &toolsets)
+            }
+            OptionalSection::Room => ToolNamespace::all()
+                .iter()
+                .copied()
+                .filter(|namespace| namespace.uses_room_repository())
+                .any(|namespace| self.toolset_differs_from_default(namespace, &toolsets)),
+            OptionalSection::Toolsets => {
+                toolsets != ToolsetConfig::for_profile(self.selected_profile)
+            }
+            _ => false,
+        };
+        if changed_toolset || !self.draft_matches_default(section, &draft, override_draft) {
             SectionStatus::Configured
         } else {
             SectionStatus::Default
+        }
+    }
+
+    fn policy_enabled(&self) -> bool {
+        self.optional
+            .catalog
+            .get(&OptionalSection::SecurityPolicy)
+            .and_then(|draft| catalog_bool_value(draft, &["policy", "enabled"]))
+            .unwrap_or(true)
+    }
+
+    fn toolset_differs_from_default(
+        &self,
+        namespace: ToolNamespace,
+        toolsets: &ToolsetConfig,
+    ) -> bool {
+        toolsets.is_enabled(namespace)
+            != ToolsetConfig::for_profile(self.selected_profile).is_enabled(namespace)
+    }
+
+    fn section_is_closed(
+        &self,
+        section: OptionalSection,
+        draft: &OptionalSectionDraft,
+        toolsets: &ToolsetConfig,
+        policy_enabled: bool,
+    ) -> bool {
+        match section {
+            OptionalSection::Browser => !toolsets.is_enabled(ToolNamespace::Browser),
+            OptionalSection::Skills => !toolsets.is_enabled(ToolNamespace::Skills),
+            OptionalSection::ConfigManagement => !toolsets.is_enabled(ToolNamespace::Config),
+            OptionalSection::McpServers => {
+                !toolsets.is_enabled(ToolNamespace::Mcp)
+                    || matches!(draft, OptionalSectionDraft::McpServers(value)
+                        if !value.servers.is_empty() && value.servers.iter().all(|server| !server.enabled))
+            }
+            OptionalSection::Email => !toolsets.is_enabled(ToolNamespace::RoomEmail),
+            OptionalSection::RoomSecret => !toolsets.is_enabled(ToolNamespace::RoomSecret),
+            OptionalSection::Room => !ToolNamespace::all()
+                .iter()
+                .copied()
+                .filter(|namespace| namespace.uses_room_repository())
+                .any(|namespace| toolsets.is_enabled(namespace)),
+            OptionalSection::Toolsets => toolsets.enabled.is_empty(),
+            OptionalSection::SecurityPolicy => !policy_enabled,
+            OptionalSection::Sandbox => {
+                !policy_enabled
+                    || matches!(draft, OptionalSectionDraft::Sandbox(value) if !value.enabled)
+            }
+            OptionalSection::HubReporting => {
+                matches!(draft, OptionalSectionDraft::HubReporting(value) if !value.enabled)
+            }
+            _ => false,
+        }
+    }
+
+    fn draft_matches_default(
+        &self,
+        section: OptionalSection,
+        draft: &OptionalSectionDraft,
+        override_draft: Option<&OptionalSectionDraft>,
+    ) -> bool {
+        let mut default =
+            default_optional_draft_for_profile(self.language, section, self.selected_profile);
+        if let OptionalSectionDraft::Confirmation(value) = &mut default {
+            let reporting_enabled = match override_draft {
+                Some(OptionalSectionDraft::HubReporting(value)) => value.enabled,
+                _ => self
+                    .optional
+                    .hub_reporting
+                    .as_ref()
+                    .is_some_and(|value| value.enabled),
+            };
+            let auxiliary_enabled = self.hub.enabled
+                || (self.selected_mode == RuntimeMode::Standalone && reporting_enabled);
+            if self.selected_mode != RuntimeMode::Hub && !auxiliary_enabled {
+                value.channels = r#"["freedesktop"]"#.to_string();
+            }
+        }
+        if let OptionalSectionDraft::Identity(current) = draft {
+            let ui_default = default_optional_draft_for_profile(
+                self.language,
+                OptionalSection::Identity,
+                self.selected_profile,
+            );
+            let persisted_default = Config::default_config()
+                .expect("default config")
+                .display_name;
+            if self.imported_base.is_none() && self.optional.get(section).is_none() {
+                return current.display_name.trim() == persisted_default
+                    || matches!(ui_default, OptionalSectionDraft::Identity(value)
+                        if current.display_name.trim() == value.display_name);
+            }
+            return current.display_name.trim() == persisted_default;
+        }
+        if section == OptionalSection::SecurityPolicy {
+            let mut config = Config::default_config().expect("default config");
+            config.profile = self.selected_profile;
+            config.policy.command = crate::config::seed_command_policy(self.selected_profile);
+            let default = CatalogDraft::from_config(section, &config);
+            if let OptionalSectionDraft::Catalog(current) = draft {
+                let mut effective = self
+                    .imported_base
+                    .as_ref()
+                    .map(|config| CatalogDraft::from_config(section, config))
+                    .unwrap_or_else(|| default.clone());
+                for (index, value) in &current.values {
+                    if current.initial.get(index) != Some(value) {
+                        effective.values.insert(*index, value.clone());
+                    }
+                }
+                return catalog_values_match(&effective, &default);
+            }
+        }
+        match (draft, &default) {
+            (
+                OptionalSectionDraft::Workspace(current),
+                OptionalSectionDraft::Workspace(default),
+            ) => {
+                current.default_action == default.default_action
+                    && paths_match(&current.read_only_paths, &default.read_only_paths)
+                    && paths_match(&current.write_paths, &default.write_paths)
+                    && paths_match(&current.deny_paths, &default.deny_paths)
+                    && paths_match_one(&current.workspace_root, &default.workspace_root)
+            }
+            (OptionalSectionDraft::Limits(current), OptionalSectionDraft::Limits(default)) => {
+                limits_match(current, default)
+            }
+            (OptionalSectionDraft::Room(current), OptionalSectionDraft::Room(default)) => {
+                current.timezone == default.timezone
+                    && numeric_text_matches(
+                        &current.diary_boundary_hour,
+                        &default.diary_boundary_hour,
+                    )
+                    && paths_match_one(&current.repository_root, &default.repository_root)
+                    && current.maintenance_mode == default.maintenance_mode
+                    && current.maintenance_auto_push == default.maintenance_auto_push
+            }
+            (OptionalSectionDraft::Events(current), OptionalSectionDraft::Events(default)) => {
+                numeric_text_matches(&current.low_ttl_seconds, &default.low_ttl_seconds)
+                    && current.internal_overrides == default.internal_overrides
+            }
+            (OptionalSectionDraft::Toolsets(current), OptionalSectionDraft::Toolsets(default)) => {
+                current.to_config().ok() == default.to_config().ok()
+            }
+            (OptionalSectionDraft::Catalog(current), OptionalSectionDraft::Catalog(default)) => {
+                catalog_values_match(current, default)
+            }
+            (
+                OptionalSectionDraft::TunnelClient(current),
+                OptionalSectionDraft::TunnelClient(default),
+            ) => {
+                paths_match_one(&current.cache_dir, &default.cache_dir)
+                    && optional_path_matches(&current.executable, &default.executable)
+            }
+            _ => *draft == default,
         }
     }
 
@@ -1180,29 +1359,6 @@ impl StandaloneDraft {
 }
 
 impl OptionalDrafts {
-    fn has(&self, section: OptionalSection) -> bool {
-        match section {
-            OptionalSection::Identity => self.identity.is_some(),
-            OptionalSection::Workspace => self.workspace.is_some(),
-            OptionalSection::Confirmation => self.confirmation.is_some(),
-            OptionalSection::Limits => self.limits.is_some(),
-            OptionalSection::Sandbox => self.sandbox.is_some(),
-            OptionalSection::Shell => self.shell.is_some(),
-            OptionalSection::Toolsets => self.toolsets.is_some(),
-            OptionalSection::McpServers => self.mcp_servers.is_some(),
-            OptionalSection::Room => self.room.is_some(),
-            OptionalSection::RoomSecret => self.room_secret.is_some(),
-            OptionalSection::Email => self.email.is_some(),
-            OptionalSection::TunnelClient => self.tunnel_client.is_some(),
-            OptionalSection::HubReporting => self.hub_reporting.is_some(),
-            OptionalSection::Events => self.events.is_some(),
-            OptionalSection::Browser
-            | OptionalSection::Skills
-            | OptionalSection::SecurityPolicy
-            | OptionalSection::ConfigManagement => self.catalog.contains_key(&section),
-        }
-    }
-
     fn get(&self, section: OptionalSection) -> Option<OptionalSectionDraft> {
         match section {
             OptionalSection::Identity => self.identity.clone().map(OptionalSectionDraft::Identity),
@@ -1625,6 +1781,97 @@ fn catalog_section(entry: &crate::config_catalog::ConfigEntry) -> OptionalSectio
     } else {
         OptionalSection::ConfigManagement
     }
+}
+
+fn catalog_bool_value(draft: &CatalogDraft, path: &[&str]) -> Option<bool> {
+    let index = catalog_entries().iter().position(|entry| {
+        entry
+            .path
+            .iter()
+            .map(|part| part.as_str())
+            .eq(path.iter().copied())
+    })?;
+    serde_json::from_str(draft.values.get(&index)?).ok()
+}
+
+fn catalog_values_match(current: &CatalogDraft, default: &CatalogDraft) -> bool {
+    if current.values.keys().ne(default.values.keys()) {
+        return false;
+    }
+    let entries = catalog_entries();
+    current.values.iter().all(|(index, current)| {
+        let Some(default) = default.values.get(index) else {
+            return false;
+        };
+        match entries.get(*index).map(|entry| entry.kind.as_str()) {
+            Some("port" | "non-negative-integer") => numeric_text_matches(current, default),
+            Some("auto-or-non-negative-integer") => auto_numeric_text_matches(current, default),
+            _ => current == default,
+        }
+    })
+}
+
+fn limits_match(current: &LimitsDraft, default: &LimitsDraft) -> bool {
+    numeric_text_matches(&current.max_concurrent_tasks, &default.max_concurrent_tasks)
+        && auto_numeric_text_matches(&current.max_active_processes, &default.max_active_processes)
+        && numeric_text_matches(
+            &current.max_file_search_context_lines,
+            &default.max_file_search_context_lines,
+        )
+        && numeric_text_matches(
+            &current.process_response_bytes,
+            &default.process_response_bytes,
+        )
+}
+
+fn numeric_text_matches(current: &str, default: &str) -> bool {
+    match (
+        current.trim().parse::<u128>(),
+        default.trim().parse::<u128>(),
+    ) {
+        (Ok(current), Ok(default)) => current == default,
+        _ => current == default,
+    }
+}
+
+fn auto_numeric_text_matches(current: &str, default: &str) -> bool {
+    let current = current.trim();
+    let default = default.trim();
+    match (current, default) {
+        ("auto", "auto") => true,
+        ("auto", _) | (_, "auto") => false,
+        _ => numeric_text_matches(current, default),
+    }
+}
+
+fn paths_match(current: &str, default: &str) -> bool {
+    match (
+        serde_json::from_str::<Vec<PathBuf>>(current),
+        serde_json::from_str::<Vec<PathBuf>>(default),
+    ) {
+        (Ok(current), Ok(default)) => normalize_paths(current) == normalize_paths(default),
+        _ => current == default,
+    }
+}
+
+fn paths_match_one(current: &str, default: &str) -> bool {
+    normalize_path(PathBuf::from(current)) == normalize_path(PathBuf::from(default))
+}
+
+fn optional_path_matches(current: &str, default: &str) -> bool {
+    if current.is_empty() || default.is_empty() {
+        current == default
+    } else {
+        paths_match_one(current, default)
+    }
+}
+
+fn normalize_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.into_iter().map(normalize_path).collect()
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    crate::exec::expand_pathbuf(&path).unwrap_or(path)
 }
 
 pub(crate) fn catalog_section_at(index: usize) -> OptionalSection {

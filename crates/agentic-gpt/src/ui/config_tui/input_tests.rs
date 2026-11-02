@@ -1,8 +1,13 @@
 use super::*;
 use crate::config_setup::SetupSeed;
 use crate::config_templates::OptionalSection;
+use unicode_width::UnicodeWidthStr;
 
 fn app() -> ConfigTuiApp {
+    app_with_language(UiLanguage::En)
+}
+
+fn app_with_language(language: UiLanguage) -> ConfigTuiApp {
     ConfigTuiApp::new(SetupSession::new(
         SetupSeed {
             mode: Some(RuntimeMode::Standalone),
@@ -13,7 +18,7 @@ fn app() -> ConfigTuiApp {
             http_mcp_allow_hosts: Some("null".into()),
             ..SetupSeed::default()
         },
-        UiLanguage::En,
+        language,
         std::env::temp_dir().join(format!("config-input-{}.json", uuid::Uuid::new_v4())),
     ))
 }
@@ -248,6 +253,47 @@ fn reference_editor_switches_sources_clears_and_keeps_secrets_out_of_preview() {
 // the earlier field-input tests do not exercise cross-page toolset changes.
 #[test]
 fn room_service_preconfiguration_and_review_share_toolset_state() {
+    fn assert_status(app: &ConfigTuiApp, section_label: &str, expected: &str) {
+        let width = 160;
+        let height = 80;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| app.render(frame, &Theme::from_env()))
+            .unwrap();
+        let line = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(width as usize)
+            .map(|row| {
+                let mut line = String::new();
+                let mut skip = 0;
+                for cell in row {
+                    if skip > 0 {
+                        skip -= 1;
+                        continue;
+                    }
+                    let symbol = cell.symbol();
+                    line.push_str(symbol);
+                    skip = UnicodeWidthStr::width(symbol).saturating_sub(1);
+                }
+                line
+            })
+            .find(|line| {
+                line.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '❯' || ch == '◆')
+                    .starts_with(section_label)
+                    && ["未修改", "已配置", "已关闭"]
+                        .iter()
+                        .any(|status| line.contains(&format!("[{status}]")))
+            })
+            .unwrap_or_else(|| panic!("status row for {section_label} was not rendered"));
+        let actual = ["未修改", "已配置", "已关闭"]
+            .into_iter()
+            .find(|status| line.contains(&format!("[{status}]")));
+        assert_eq!(actual, Some(expected), "unexpected status row: {line}");
+    }
+
     fn open_section(app: &mut ConfigTuiApp, section: OptionalSection) {
         assert_eq!(app.page(), ConfigPage::OptionalCenter);
         app.state.focus = app
@@ -278,7 +324,7 @@ fn room_service_preconfiguration_and_review_share_toolset_state() {
         assert!(app.structured_editor.is_none());
     }
 
-    let mut app = app();
+    let mut app = app_with_language(UiLanguage::ZhCn);
     app.session_mut().set_profile(WorkerProfile::Normal);
     app.handle_action(TuiAction::Next).unwrap();
     app.handle_action(TuiAction::Next).unwrap();
@@ -338,6 +384,7 @@ fn room_service_preconfiguration_and_review_share_toolset_state() {
         .session()
         .effective_toolsets()
         .is_enabled(crate::config::ToolNamespace::RoomEmail));
+    assert_status(&app, "Room 密钥 API", "已配置");
 
     open_section(&mut app, OptionalSection::Toolsets);
     key(&mut app, KeyCode::Char('r'));
@@ -347,8 +394,11 @@ fn room_service_preconfiguration_and_review_share_toolset_state() {
         .session()
         .effective_toolsets()
         .is_enabled(crate::config::ToolNamespace::RoomSecret));
+    assert_status(&app, "Room 密钥 API", "已关闭");
     app.handle_action(TuiAction::Next).unwrap();
     assert_eq!(app.page(), ConfigPage::Review);
+    app.focus_field(SetupField::RoomSecretServerUrl);
+    assert_status(&app, "Room 密钥 API", "已关闭");
     app.focus_field(SetupField::Toolsets);
     key(&mut app, KeyCode::Enter);
     app.state.review_subfocus = crate::config::ToolNamespace::all()
@@ -362,10 +412,23 @@ fn room_service_preconfiguration_and_review_share_toolset_state() {
         .session()
         .effective_toolsets()
         .is_enabled(crate::config::ToolNamespace::RoomSecret));
+    app.focus_field(SetupField::RoomSecretServerUrl);
+    assert_status(&app, "Room 密钥 API", "已配置");
     assert!(!app
         .session()
         .effective_toolsets()
         .is_enabled(crate::config::ToolNamespace::RoomDiary));
+    let OptionalSectionDraft::RoomSecret(secret) =
+        app.session().optional_draft(OptionalSection::RoomSecret)
+    else {
+        panic!("Room Secret settings draft was lost after disabling the toolset")
+    };
+    let secret = secret.to_config().unwrap();
+    assert_eq!(secret.server_url, "https://vault.example.invalid");
+    assert_eq!(secret.account, "fixture@example.invalid");
+    assert_eq!(secret.client_id, "env:INPUT_TEST_CLIENT_ID");
+    assert_eq!(secret.client_secret, "env:INPUT_TEST_CLIENT_SECRET");
+    assert_eq!(secret.master_password, "env:INPUT_TEST_MASTER_PASSWORD");
     let saved: serde_json::Value =
         serde_json::from_str(&app.session().redacted_config_json().unwrap()).unwrap();
     assert!(saved["toolsets"]["enabled"]
