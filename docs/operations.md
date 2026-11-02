@@ -186,7 +186,7 @@ Hub、HTTP、Browser、邮件账户、Secret 后端、Room 根目录和 Skills �
 
 HTTP 监听变更可能使 session/OAuth 状态失效；token 原地更新保留 session 并撤销 OAuth 记录。认证引用不可用时拒绝访问，端口绑定失败由组件重试，不影响其他入口。邮件/Secret 等排空繁忙时保留原 owner 并报告失败；静态校验不检验远程登录可用性。
 
-`tunnel.hubReporting.detail` 更新后续报告，enabled 由辅助 Hub 连接控制，二者不要求重建 Tunnel。配置的待重启 mode/profile 不会阻止无关热更新。Standalone supervisor 在私有 runtime 目录用 0600 启动快照保存本次启动契约；自动重拉 worker 保留原身份并读取最新可热字段，显式重启整个实例才采用新的启动值。快照由 supervisor 清理，不覆盖 desired 文件。
+`tunnel.hubReporting.detail` 和 `tunnel.hubReporting.enabled` 更新后续报告策略，不要求重建 Tunnel，也不会断开确认连接；辅助连接单独由 `hub.enabled` 控制。连接关闭时会保留报告设置并暂停发送。旧配置若报告开启但 `hub.enabled=false`，需要明确打开 `hub.enabled` 才会继续连接并上报。配置的待重启 mode/profile 不会阻止无关热更新。Standalone supervisor 在私有 runtime 目录用 0600 启动快照保存本次启动契约；自动重拉 worker 保留原身份并读取最新可热字段，显式重启整个实例才采用新的启动值。快照由 supervisor 清理，不覆盖 desired 文件。
 
 `config.update` 传输超时不能证明未保存，先用 get 核对；普通校验失败未提交，rename 后的目录同步失败则明确报告文件已替换。Hub 对 update 的等待上限为 180 秒，不自动重试修改。完整字段分类见[配置生效边界](configuration.zh-CN.md#热加载与重启边界)。
 

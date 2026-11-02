@@ -2761,6 +2761,7 @@ def start_reporting_agent(
     try:
         data = json.loads(config.read_text())
         data["hub"] = {
+            "enabled": True,
             "url": hub_url,
             "transport": "websocket",
             "agentSecret": secret,

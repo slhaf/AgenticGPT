@@ -425,7 +425,7 @@ Standalone、Local 和连接 Hub 的 Agent 共用配置更新与串行应用协�
 
 有效变更用于后续请求；已准入 Process、Skill 及下游调用保留其快照。Browser、邮件账户、Secret、Hub/HTTP 等由具体组件排空／重连，失败可保留旧实例或明确报告不可用；保存成功不保证外部依赖可用，也不重放发送、密钥写入或网页动作。Skills 并发调整保留 manager 与运行任务。Room 根目录切换不自动迁移内容。
 
-只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据、client 启动参数需要显式重启实例；`tunnel.hubReporting.detail` 直接更新后续报告，enabled 由辅助 Hub 连接协调。待重启值不会阻止无关热更新。共享状态与详细生效规则见[热加载与重启边界](configuration.md#热加载与重启边界)。
+只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据、client 启动参数需要显式重启实例；`tunnel.hubReporting.detail` 和 `tunnel.hubReporting.enabled` 直接更新后续报告策略。单独切换报告开关不会断开 Hub 确认连接；`hub.enabled` 单独控制辅助连接。待重启值不会阻止无关热更新。共享状态与详细生效规则见[热加载与重启边界](configuration.md#热加载与重启边界)。
 
 MCP server id 只能使用 `A-Z`、`a-z`、`0-9`、`.`、`_` 或 `-`，最长 64 字节；streamable-http 要求绝对 HTTP(S) URL，stdio 要求非空启动命令且不接受 HTTP auth。API 中完整 server id 占一个路径段。
 
@@ -494,15 +494,13 @@ agentic-gpt tunnel-client download --config /path/to/config.json
 
 ## 辅助 Hub 连接与可选上报
 
-Standalone 和 Local 可通过 `hub.enabled=true` 显式开启辅助 Hub 连接，用于 `ntfy` 确认。
+Standalone 和 Local 可通过 `hub.enabled=true` 显式开启辅助 Hub 连接，用于 `ntfy` 确认和 Standalone 运行上报。
 `config init` 的 Connection 页面可以填写辅助连接的开关、URL、传输、Agent 身份和密钥。
-辅助连接标记为 `reporting-only`，不会接收远程执行命令；关闭运行上报时仍发送协议所需的
-Hello（含安全配置摘要）、心跳和确认请求。`agent.info.connections.hubAuxiliary` 报告其状态。
+辅助连接标记为 `reporting-only`，不会接收远程执行命令；连接启用时发送协议所需的 Hello（含安全配置摘要）和心跳。`agent.info.connections.hubAuxiliary` 报告连接状态。
 Local 不提供运行上报，也不增加 HTTP listener。
 
-Standalone 的运行上报由 `tunnel.hubReporting.enabled` 独立控制，默认关闭。
-兼容已有配置：旧上报开关为 true 时仍会建立辅助连接，不要求再设置 `hub.enabled`。
-Reporting 与 Tunnel 命令执行相互独立。只有当本地配置已有 Agent 连接所需的 Hub 身份
+Standalone 的运行上报由 `tunnel.hubReporting.enabled` 独立控制，默认关闭。该开关只决定是否发送报告；Hub 连接关闭时会保留设置并暂停报告。单独切换报告开关不会断开确认连接。
+启用辅助连接和上报时，只有当本地配置已有 Agent 连接所需的 Hub 身份
 （`hub.url`、`hub.transport`、`agentId` 和 `hub.agentSecret`）时，才启用 reporting：
 
 ```bash
@@ -510,8 +508,10 @@ agentic-gpt config set tunnel.hubReporting.enabled true
 agentic-gpt config set tunnel.hubReporting.detail metadata
 ```
 
-Reporting connection 会标明自身为 `reporting-only`。它可以发送 hello/heartbeat、direct-run 生命周期事件、process 快照和现有确认流量，
+辅助连接会标明自身为 `reporting-only`。连接开启时发送 hello/heartbeat；运行报告开关开启时发送 direct-run 生命周期事件和 process 快照。配置了 `ntfy` 时也可承载确认流量，
 但绝不接受 Hub 执行 envelope。Hub 会在创建 run 之前拒绝 reporting-only Agent。Reporting 断连、队列丢弃或 Hub 不可用都不会延迟或改变本地 MCP 结果。
+
+旧配置中若 `hub.enabled=false`、`tunnel.hubReporting.enabled=true`，更新后不会再仅因报告开关而连接 Hub，报告会暂停。要继续上报，需明确设置 `hub.enabled=true`；原上报开关和 `ntfy` 通道设置都会保留。
 
 `metadata` 级别会记录工具/来源/profile/状态/时间戳/持续时间、标识符、退出码和有界的失败原因；不包含 arguments、results、程序 argv、工作目录或
 stdout/stderr。`full` 还会保存有界的 JSON arguments/results 和有界的现有 process 快照；超大值会记录字节数与 SHA-256 的截断信息，而非部分 JSON。

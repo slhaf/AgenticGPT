@@ -365,8 +365,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Hub,
         Boolean,
         false,
-        "Enable an auxiliary Hub connection in standalone or local mode.",
-        "在 Standalone 或 Local 模式启用辅助 Hub 连接。",
+        "Enable the auxiliary Hub connection in standalone or local mode. Required for ntfy confirmations and standalone hub reporting.",
+        "在 Standalone 或 Local 模式启用 Hub 辅助连接；`ntfy` 确认和 Standalone Hub 上报都需要此连接。",
         "false",
         set_hub_enabled
     ),
@@ -936,8 +936,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Tunnel,
         Boolean,
         false,
-        "Enable tunnel hub reporting.",
-        "启用隧道 Hub 上报。",
+        "Enable standalone runtime reporting over an already enabled auxiliary Hub connection. This does not enable or disable the connection.",
+        "启用 Standalone 运行上报；需要 Hub 辅助连接已开启。此项不启停辅助连接。",
         "false",
         set_tunnel_hub_reporting_enabled
     ),

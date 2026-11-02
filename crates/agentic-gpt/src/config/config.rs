@@ -1675,7 +1675,7 @@ impl Config {
     }
 
     pub(crate) fn auxiliary_hub_enabled(&self) -> bool {
-        self.mode != RuntimeMode::Hub && (self.hub.enabled || self.hub_reporting_enabled())
+        self.mode != RuntimeMode::Hub && self.hub.enabled
     }
 
     pub(crate) fn hub_reporting_enabled(&self) -> bool {

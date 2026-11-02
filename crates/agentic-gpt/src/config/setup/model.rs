@@ -918,29 +918,13 @@ impl SetupSession {
         &mut self.hub
     }
     pub(crate) fn optional_draft(&self, section: OptionalSection) -> OptionalSectionDraft {
-        let mut draft = self.optional.get(section).unwrap_or_else(|| {
+        self.optional.get(section).unwrap_or_else(|| {
             default_optional_draft_for_profile(self.language, section, self.selected_profile)
-        });
-        if self.imported_base.is_none()
-            && self.selected_mode != RuntimeMode::Hub
-            && !self.auxiliary_hub_connection_enabled()
-            && self.optional.get(section).is_none()
-        {
-            if let OptionalSectionDraft::Confirmation(value) = &mut draft {
-                value.channels = r#"["freedesktop"]"#.to_string();
-            }
-        }
-        draft
+        })
     }
 
     pub(crate) fn auxiliary_hub_connection_enabled(&self) -> bool {
-        let reporting_enabled = self
-            .optional
-            .get(OptionalSection::HubReporting)
-            .is_some_and(
-                |draft| matches!(draft, OptionalSectionDraft::HubReporting(value) if value.enabled),
-            );
-        self.hub.enabled || (self.selected_mode == RuntimeMode::Standalone && reporting_enabled)
+        self.selected_mode != RuntimeMode::Hub && self.hub.enabled
     }
     pub(crate) fn optional_drafts(&self) -> &OptionalDrafts {
         &self.optional
@@ -1031,7 +1015,7 @@ impl SetupSession {
             }
             _ => false,
         };
-        if changed_toolset || !self.draft_matches_default(section, &draft, override_draft) {
+        if changed_toolset || !self.draft_matches_default(section, &draft) {
             SectionStatus::Configured
         } else {
             SectionStatus::Default
@@ -1095,25 +1079,9 @@ impl SetupSession {
         &self,
         section: OptionalSection,
         draft: &OptionalSectionDraft,
-        override_draft: Option<&OptionalSectionDraft>,
     ) -> bool {
-        let mut default =
+        let default =
             default_optional_draft_for_profile(self.language, section, self.selected_profile);
-        if let OptionalSectionDraft::Confirmation(value) = &mut default {
-            let reporting_enabled = match override_draft {
-                Some(OptionalSectionDraft::HubReporting(value)) => value.enabled,
-                _ => self
-                    .optional
-                    .hub_reporting
-                    .as_ref()
-                    .is_some_and(|value| value.enabled),
-            };
-            let auxiliary_enabled = self.hub.enabled
-                || (self.selected_mode == RuntimeMode::Standalone && reporting_enabled);
-            if self.selected_mode != RuntimeMode::Hub && !auxiliary_enabled {
-                value.channels = r#"["freedesktop"]"#.to_string();
-            }
-        }
         if let OptionalSectionDraft::Identity(current) = draft {
             let ui_default = default_optional_draft_for_profile(
                 self.language,

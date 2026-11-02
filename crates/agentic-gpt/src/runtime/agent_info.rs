@@ -153,7 +153,11 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             },
             "hubReporting": {
                 "enabled": state.runtime.transport == Transport::Hub || config.hub_reporting_enabled(),
-                "status": if state.runtime.transport == Transport::Hub || config.hub_reporting_enabled() {
+                "status": if state.runtime.transport != Transport::Hub
+                    && config.hub_reporting_enabled()
+                    && !config.auxiliary_hub_enabled() {
+                    "paused"
+                } else if state.runtime.transport == Transport::Hub || config.hub_reporting_enabled() {
                     reporting_status(runtime, hub_sender, reporting_sender)
                 } else { "disabled" },
             },

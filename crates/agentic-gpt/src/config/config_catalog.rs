@@ -486,7 +486,7 @@ fn chapter(section: &str) -> &'static str {
         "hub" => "Hub 连接由当前实例的连接 owner 重连。配置此连接的请求先向原 Hub 返回结果；旧结果不会转发给另一 Hub。连接失败不撤销配置保存。",
         "http-mcp" => "HTTP MCP 入口属于 standalone。监听和认证由 HTTP owner 更新；旧已接纳请求完成后关闭旧会话。新地址绑定失败尽可能保留旧监听；外部凭据引用仍须可解析。",
         "mcp" => "这是以稳定 server ID 为 key 的映射。ID 中的点是一个路径段；用同一批操作补齐 enabled、transport、url 及可选 auth。下游客户端按调用创建，进行中调用保留原快照。",
-        "tunnel" => "Tunnel 身份、凭据和客户端启动参数保存后须手动重启；hubReporting.enabled 局部控制辅助 Hub，detail 直接更新报告策略。自动故障恢复沿用原启动契约。",
+        "tunnel" => "Tunnel 身份、凭据和客户端启动参数保存后须手动重启；hubReporting.enabled 控制运行上报，detail 更新报告内容策略，二者都不控制或断开 Hub 辅助连接。连接关闭时保留上报设置并暂停发送。自动故障恢复沿用原启动契约。",
         "browser" => "显式 runtime 优先于托管发现。字段修改会准备新运行环境并排空旧调用，重建后旧租约失效；准备失败保留可用旧 owner，不重放浏览器操作。",
         "email" => "启用时 account 必须完整且使用 env:/file: 密码引用。账户切换等待在途操作结束并释放旧 owner，保留邮件存储；其他设置按新请求快照使用，不重放发送。",
         "room" => "仓库路径切换只切换并初始化新目标，不迁移已有内容。Secret 后端和凭据由自身 owner 重新建立；策略及 syncWaitTimeoutMs 直接更新，已接纳请求保留快照。",

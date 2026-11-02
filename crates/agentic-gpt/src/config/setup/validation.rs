@@ -124,26 +124,13 @@ mod tests {
     }
 
     #[test]
-    fn local_auxiliary_hub_builds_confirmation_only_and_requires_connection_for_ntfy() {
-        let mut disabled = session(RuntimeMode::Local, WorkerProfile::Normal);
+    fn local_auxiliary_hub_connection_configuration_is_preserved() {
+        let disabled = session(RuntimeMode::Local, WorkerProfile::Normal);
         let disabled_input = build_active_input_unchecked(&disabled).unwrap();
         assert!(disabled_input.agent_secret.is_none());
         let disabled_build = build_config(disabled.build_active_input().unwrap()).unwrap();
         assert!(!disabled_build.config.auxiliary_hub_enabled());
         assert!(!disabled_build.config.hub_reporting_enabled());
-        assert!(!disabled_build
-            .config
-            .confirmation_provider
-            .channels
-            .contains(&crate::config::ConfirmationChannel::Ntfy));
-
-        assert!(disabled
-            .save_optional_section(OptionalSectionDraft::Confirmation(ConfirmationDraft {
-                channels: r#"["ntfy"]"#.to_string(),
-                language: "en".to_string(),
-            }))
-            .is_err());
-
         let mut enabled = SetupSession::new(
             SetupSeed {
                 mode: Some(RuntimeMode::Local),
@@ -172,7 +159,6 @@ mod tests {
             .contains(&crate::config::ConfirmationChannel::Ntfy));
 
         enabled.hub_mut().enabled = false;
-        assert!(validate_for_review(&enabled).is_err());
         let closed_input = build_active_input_unchecked(&enabled).unwrap();
         assert_eq!(
             closed_input.hub_url.as_deref(),
@@ -187,7 +173,7 @@ mod tests {
         let mut imported = crate::config::Config::default_config().unwrap();
         imported.mode = RuntimeMode::Local;
         imported.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
-        let legacy = SetupSession::new(
+        let imported_session = SetupSession::new(
             SetupSeed {
                 imported_base: Some(imported),
                 mode: Some(RuntimeMode::Local),
@@ -196,21 +182,7 @@ mod tests {
             UiLanguage::En,
             PathBuf::from("/tmp/config.json"),
         );
-        assert!(validate_for_review(&legacy).is_ok());
-
-        let mut hub_config = crate::config::Config::default_config().unwrap();
-        hub_config.mode = RuntimeMode::Hub;
-        hub_config.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
-        let converted_hub = SetupSession::new(
-            SetupSeed {
-                imported_base: Some(hub_config),
-                mode: Some(RuntimeMode::Local),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            PathBuf::from("/tmp/config.json"),
-        );
-        assert!(validate_for_review(&converted_hub).is_err());
+        assert!(validate_for_review(&imported_session).is_ok());
 
         enabled.hub_mut().enabled = true;
         let review = enabled.review_model().unwrap();
@@ -732,32 +704,7 @@ pub(super) fn validate_optional_draft(
             "config_init_optional_section_invalid",
         )]);
     }
-    let mut errors = validate_optional(session, section, draft);
-    if let OptionalSectionDraft::Confirmation(value) = draft {
-        let channels = parse_confirmation_channels(&value.channels).ok();
-        let legacy_ntfy = session.imported_base().is_some_and(|config| {
-            config.mode != RuntimeMode::Hub
-                && !config.auxiliary_hub_enabled()
-                && config
-                    .confirmation_provider
-                    .channels
-                    .contains(&config::ConfirmationChannel::Ntfy)
-        });
-        if session.selected_mode() != RuntimeMode::Hub
-            && !session.auxiliary_hub_connection_enabled()
-            && !legacy_ntfy
-            && channels.is_some_and(|channels| {
-                channels
-                    .channels
-                    .contains(&config::ConfirmationChannel::Ntfy)
-            })
-        {
-            errors.push(error(
-                SetupField::ConfirmationChannels,
-                "config_init_hub_confirmation_requires_connection",
-            ));
-        }
-    }
+    let errors = validate_optional(session, section, draft);
     if errors.is_empty() {
         Ok(())
     } else {

@@ -129,8 +129,8 @@ Browser、Skills、安全策略和配置管理，不再有“其他配置”兜�
   显示这些 tunnel 部分。
 - Standalone 和 Local 的 Connection 页默认关闭 Hub 辅助连接。打开后可配置 Hub URL、传输方式、
   Agent ID 和密钥；这条连接可为 `ntfy` 确认提供响应，但不会接受 Hub 执行命令。连接仍会发送
-  Hello 和心跳。Standalone 的上报由独立的 `tunnel.hubReporting.enabled` 控制；旧配置启用上报时
-  仍会保持辅助连接。Local 只使用确认连接，不新增上报。
+  Hello 和心跳。`hub.enabled` 控制是否建立辅助连接；Standalone 的 `tunnel.hubReporting.enabled`
+  只控制运行上报。Hub 连接关闭时会保留上报设置并暂停上报；重新连接后按设置恢复。Local 只使用确认连接，不新增上报。
 - 不选可选部分时会保留模板默认值。
 
 键盘操作如下：
@@ -184,11 +184,11 @@ Optional settings 还提供以下编辑入口：
 | 公共 identity/workspace/policy | 必需 | 必需 | 必需 |
 | `tunnel` | 必需 | 忽略 | 忽略 |
 | `httpMcp` | 可选，仅在 Standalone 中生效 | 忽略 | 忽略 |
-| `hub`（`url`、`transport`、`agentSecret`） | 仅可选 Hub reporting/ntfy relay 使用 | 忽略 | 必需 |
+| `hub`（`url`、`transport`、`agentSecret`） | 可选辅助连接用于上报或 ntfy relay | 可选辅助连接用于 ntfy relay | 必需 |
 | 公开 Hub/VPS | 不需要 | 不需要 | 需要 |
 | 启动命令 | `agentic-gpt run` | `agentic-gpt run` | `agentic-gpt run` |
 
-所有模式的 JSON 类型仍保留嵌套 `hub` section，便于同一配置在不同 runtime 之间切换。Standalone 与 Local 的命令链路不经过 Hub。Standalone 只有在启用 `tunnel.hubReporting.enabled` 或使用 Hub-backed `ntfy` 确认时才会使用 Hub 字段；显式配置的非活动 section 会保留。
+所有模式的 JSON 类型仍保留嵌套 `hub` section，便于同一配置在不同 runtime 之间切换。Standalone 与 Local 的命令链路不经过 Hub。Standalone 只有在 `hub.enabled=true` 时才建立辅助连接；该连接可承载已启用的运行上报和 Hub-backed `ntfy` 确认。Hub 连接关闭时，上报设置和确认通道设置都会保留，但相应功能不可用。显式配置的非活动 section 会保留。
 
 ## 优先采用 Standalone 的配置
 
@@ -239,7 +239,7 @@ agentic-gpt run
 | `email` | 单账户 IMAP/SMTP、同步间隔、本地内容保存限制和发送/垃圾箱策略；见[邮件使用指南](email.zh-CN.md)。 |
 | `tunnel` | Standalone tunnel-client 路径、secret 引用与可选 reporting。 |
 | `browser` | 可选的高级 Browser runtime 覆盖；Browser runtime 自动 discovery 受 Browser 工具集开关控制；managed runtime 自动 provisioning 需显式启用 `browser.managed.autoProvision`，默认 `false`。 |
-| `hub` | `enabled` 在 Standalone/Local 启用确认用的 Hub 辅助连接，默认 `false`；Hub 模式仍始终使用命令连接。Standalone 的上报由 `tunnel.hubReporting.enabled` 独立控制。 |
+| `hub` | `enabled` 在 Standalone/Local 启用 Hub 辅助连接，默认 `false`；Hub 模式仍始终使用命令连接。Standalone 的上报由 `tunnel.hubReporting.enabled` 独立控制，但需要辅助连接开启才会发送。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
 | `events` | 持久事件收件箱中 `low` 严重级别事件的保留时长，以及内部事件严重级别覆盖。 |
 
@@ -561,7 +561,7 @@ Agentic 固定使用内置的官方 tunnel-client 版本和平台摘要。未设
 不需要 Tunnel ID 或 API key。CLI 在 stderr 定期显示进度，并在开始、重试和结束时更新；有总大小时显示字节数和百分比，未知时显示
 已下载字节数。终端使用单行刷新，非终端逐行输出。
 
-`hubReporting.enabled` 默认 false。启用后 Hub 连接是 reporting-only，绝不会接收执行命令。`detail` 可为 `metadata` 或 `full`；隐私边界见 [`standalone-runtime.md`](standalone-runtime.md)。
+`hubReporting.enabled` 默认 false。它只控制是否发送运行报告，不控制 Hub 连接。启用后，需同时开启 `hub.enabled` 才会发送；连接关闭时会保留该设置并暂停报告。辅助 Hub 连接是 reporting-only，绝不会接收执行命令。`detail` 可为 `metadata` 或 `full`；隐私边界见 [`standalone-runtime.md`](standalone-runtime.md)。
 
 ## Hub 配置
 
@@ -588,11 +588,7 @@ agentic-gpt config init --non-interactive --mode local --hub-enabled true \
   --agent-id laptop --agent-secret '<与 Hub 匹配的 agent secret>'
 ```
 
-`hub.enabled` 默认 `false`，不会自动建立外部连接。辅助连接只支持确认响应；Hub 仍会收到 Hello
-和心跳。Standalone 的 `tunnel.hubReporting.enabled` 是独立开关：开启上报也会保持辅助连接，
-但关闭上报不会关闭由 `hub.enabled` 启用的确认连接。Local 不提供 Hub reporting。Hub 模式
-保留命令接收语义，不受该辅助连接开关影响。配置 `ntfy` 确认通道时，Standalone/Local 必须启用
-辅助连接并提供有效凭据；默认未选择 `ntfy`，旧配置中已有的 `ntfy` 设置仍兼容。
+`hub.enabled` 默认 `false`，不会自动建立外部连接。它是 Standalone/Local 辅助连接的总开关：关闭时连接停止，Hub 不会收到 Hello、心跳、报告或确认请求。辅助连接只支持报告和确认响应，不接受 Hub 执行命令。Standalone 的 `tunnel.hubReporting.enabled` 只控制运行上报；连接关闭时会保留上报设置并暂停发送，重新开启连接后恢复。Local 不提供 Hub reporting。Hub 模式保留命令接收语义，不受该辅助连接开关影响。`ntfy` 通道配置会保留；要通过 `ntfy` 收发确认，Standalone/Local 必须开启辅助连接并提供有效凭据。旧配置中若 `hub.enabled=false` 但 `tunnel.hubReporting.enabled=true`，更新后报告会暂停；要继续连接和上报，需明确将 `hub.enabled` 设为 `true`。
 
 Hub credential 与 Standalone tunnel API key 是两套独立凭据，不要复用。
 
@@ -623,7 +619,7 @@ Hub credential 与 Standalone tunnel API key 是两套独立凭据，不要复�
 
 此检测超时与等待用户点击确认的超时不同。
 
-未启用 Hub 模式、Hub 辅助连接或旧的 Hub reporting 连接时，使用 `freedesktop`。新建且未启用 Hub 连接的配置默认选择 `freedesktop`；启用 Hub 连接后才可选择 `ntfy`，不要求同时启用上报。所有配置通道均不可用时，需要确认的操作会 fail closed。本地拒绝或超时不会继续回退到其他通道。
+Hub 辅助连接未启用时，`ntfy` 不可用，但它仍可保留在通道配置中。启用 Hub 连接后可使用 `ntfy`，不要求同时启用上报。所有配置通道均不可用时，需要确认的操作会 fail closed。本地拒绝或超时不会继续回退到其他通道。
 
 CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会序列化为规范有序数组。
 
@@ -946,8 +942,9 @@ Standalone、Local 和连接 Hub 的 Agent 共用串行配置应用协调。目�
 | --- | --- |
 | `mode`、`profile`、`agentId`、`workspaceRoot` | 保留当前启动值，保存的目标值需显式重启实例；不自动迁移工作空间或重启用户进程。 |
 | `tunnel.tunnelId`、`tunnel.apiKey`、`tunnel.client.cacheDir`、`tunnel.client.executable` | 保留 supervisor 捕获的身份、凭据和客户端启动参数；下次显式启动采用新值。 |
-| `tunnel.hubReporting.detail` | 更新后续报告策略，不重建 Tunnel。 |
-| `tunnel.hubReporting.enabled`、`hub.*` | 由 Hub 连接所有者局部协调，可能处于连接中或失败；旧目标的结果不会作为新目标的调用结果重放。 |
+| `hub.enabled`、`hub.url`、`hub.transport`、`hub.agentSecret` | 启停或重配 Standalone/Local 辅助连接；Hub 连接关闭时依赖它的报告暂停，`ntfy` 确认不可用。Hub 模式的命令连接不受影响。 |
+| `tunnel.hubReporting.enabled` | 更新后续报告是否发送，不重建或断开辅助连接；连接关闭时保留设置并暂停发送。 |
+| `tunnel.hubReporting.detail` | 更新后续报告策略，不重建 Tunnel 或 Hub 连接。 |
 | `httpMcp.*` | Standalone listener/auth 所有者协调监听、认证与 session；endpoint identity 改变后客户端需重新 initialize。Local/Hub 模式不因此新增 TCP listener。 |
 | `browser.*`、Browser 工具集启停 | 协调发现、排空旧租约并替换 runtime；旧租约、JS 变量和会话可能失效，不重放网页动作。 |
 | `email.account` | 排空在途邮件请求与同步，释放旧账户 owner 后切换；保留 Store、同步记录与发送结果，不自动重发。 |

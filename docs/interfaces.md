@@ -44,7 +44,7 @@ Tmux 与 Browser 工具集关闭时，启动不创建默认 tmux 会话，也不
 热启用 Tmux 时准备默认会话；Browser 启停或配置变化通过局部 runtime 协调，旧租约和 JS 会话可能失效。
 关闭 Skills 时保留重启恢复记录与提交日志协调，但不重新调度排队安装；热启用后幂等恢复。
 基础 Event API、历史状态协调与显式 CLI 管理入口继续保留。`agent.info.connections.hubAuxiliary`
-报告 Standalone/Local 辅助连接的启用与连接状态，`hubReporting` 单独报告运行上报状态。
+报告 Standalone/Local 辅助连接的启用与连接状态，`hubReporting` 单独报告运行上报状态。辅助连接由 `hub.enabled` 控制；报告开关只控制上报，连接关闭时上报暂停，但设置保留。
 
 `agentic-gpt local` 是 Unix MCP 客户端，使用常规 MCP 操作准入门并记录 `local:` 来源。
 

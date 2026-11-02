@@ -218,7 +218,6 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     } = input;
 
     let has_imported_base = imported_base.is_some();
-    let explicit_confirmation = confirmation_provider.is_some();
     let mut config = imported_base.unwrap_or(Config::default_config()?);
     if let Some(email) = email {
         config.email = email;
@@ -381,17 +380,6 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
             }
         }
         RuntimeMode::Local => config.validate_local()?,
-    }
-
-    if !has_imported_base
-        && !explicit_confirmation
-        && mode != RuntimeMode::Hub
-        && !config.auxiliary_hub_enabled()
-    {
-        config
-            .confirmation_provider
-            .channels
-            .retain(|channel| *channel != crate::config::ConfirmationChannel::Ntfy);
     }
 
     if !additional.is_empty() {

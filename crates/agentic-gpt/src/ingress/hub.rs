@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{atomic::Ordering, Arc, Mutex as StdMutex};
 
 use crate::process_model::ProcessInfo;
 use agentic_gpt_protocol::{
@@ -266,16 +266,18 @@ async fn connect_websocket_session(
     let (event_tx, mut event_rx) = mpsc::channel::<AgentMessage>(64);
     let route = ConnectionRoute::new(hub_target(&config), tx.clone());
     *state.hub_sender.lock().await = Some(tx.clone());
-    *state.reporting_sender.lock().await =
-        (reporting && config.hub_reporting_enabled()).then(|| event_tx.clone());
+    let reporting_enabled = state.config_runtime.hub_reporting_enabled.clone();
     let mut writer = ConnectionTask(tokio::spawn(async move {
         loop {
-            let message = tokio::select! {
+            let (message, is_report) = tokio::select! {
                 biased;
-                Some(message) = rx.recv() => message,
-                Some(message) = event_rx.recv() => message,
+                Some(message) = rx.recv() => (message, false),
+                Some(message) = event_rx.recv() => (message, true),
                 else => break,
             };
+            if is_report && !reporting_enabled.load(Ordering::Acquire) {
+                continue;
+            }
             let text = match serde_json::to_string(&message) {
                 Ok(text) => text,
                 Err(_) => continue,
@@ -293,10 +295,17 @@ async fn connect_websocket_session(
             notification_channels: notify::freedesktop_notification_channel(&config).into_iter().collect(),
         })?;
         *state.config_runtime.hub_applied.write().await = Some(config.clone());
-        connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applied, None).await;
-        if reporting {
-            if config.hub_reporting_enabled() { send_current_process_snapshots(&state, &event_tx).await; }
-        } else { reconcile_transport_runs(&state, &route).await; }
+        let reporting_enabled = if reporting {
+            apply_reporting(&state, &config, &event_tx).await
+        } else {
+            connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applied, None).await;
+            Some(false)
+        };
+        if reporting_enabled == Some(true) {
+            send_current_process_snapshots(&state, &event_tx).await;
+        } else if !reporting {
+            reconcile_transport_runs(&state, &route).await;
+        }
         let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_heartbeat_ack = Instant::now();
@@ -310,6 +319,11 @@ async fn connect_websocket_session(
                     reconfigure = true;
                     reconfigure_started.get_or_insert_with(Instant::now);
                     connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applying, None).await;
+                }
+                _ = state.config_runtime.hub_reporting_changed.notified(), if reporting => {
+                    if apply_reporting(&state, &config, &event_tx).await == Some(true) {
+                        send_current_process_snapshots(&state, &event_tx).await;
+                    }
                 }
                 _ = route.progress.notified(), if reconfigure => {},
                 message = read.next() => {
@@ -408,6 +422,47 @@ async fn clear_reporting_senders(
     {
         *reporting = None;
     }
+}
+
+async fn apply_reporting(
+    state: &AppState,
+    connection: &Config,
+    sender: &mpsc::Sender<AgentMessage>,
+) -> Option<bool> {
+    let _serial = state.config_runtime.apply_lock.lock().await;
+    let config = state.config.read().await;
+    if config.hub.enabled != connection.hub.enabled
+        || config.hub.url != connection.hub.url
+        || config.hub.transport != connection.hub.transport
+        || config.hub.agent_secret != connection.hub.agent_secret
+        || config.hub.extra != connection.hub.extra
+    {
+        return None;
+    }
+    let enabled = config.auxiliary_hub_enabled() && config.hub_reporting_enabled();
+    let reporting = config
+        .tunnel
+        .as_ref()
+        .map(|tunnel| tunnel.hub_reporting.clone());
+    drop(config);
+    state
+        .config_runtime
+        .hub_reporting_enabled
+        .store(enabled, Ordering::Release);
+    *state.reporting_sender.lock().await = enabled.then(|| sender.clone());
+    if let Some(applied) = state.config_runtime.hub_applied.write().await.as_mut() {
+        if let (Some(tunnel), Some(reporting)) = (&mut applied.tunnel, reporting) {
+            tunnel.hub_reporting = reporting;
+        }
+    }
+    connection_status(
+        state,
+        Some(hub_target(connection)),
+        ConfigApplyStatus::Applied,
+        None,
+    )
+    .await;
+    Some(enabled)
 }
 
 async fn send_current_process_snapshots(state: &AppState, sender: &mpsc::Sender<AgentMessage>) {
@@ -635,22 +690,27 @@ async fn connect_sse_session(
     let (event_tx, mut event_rx) = mpsc::channel::<AgentMessage>(64);
     let route = ConnectionRoute::new(hub_target(&config), tx.clone());
     *state.hub_sender.lock().await = Some(tx.clone());
-    *state.reporting_sender.lock().await =
-        (reporting && config.hub_reporting_enabled()).then(|| event_tx.clone());
+    let reporting_enabled = state.config_runtime.hub_reporting_enabled.clone();
     let post_client = client.clone();
     let secret = config.hub.agent_secret.clone();
     let writer_route = route.clone();
     let mut writer = ConnectionTask(tokio::spawn(async move {
         loop {
-            let message = tokio::select! {
+            let (message, is_report) = tokio::select! {
                 biased;
-                Some(message) = rx.recv() => message,
-                Some(message) = event_rx.recv() => message,
+                Some(message) = rx.recv() => (message, false),
+                Some(message) = event_rx.recv() => (message, true),
                 else => break,
             };
+            if is_report && !reporting_enabled.load(Ordering::Acquire) {
+                continue;
+            }
             let secret_response = matches!(&message, AgentMessage::SecretResponse { .. });
             let mut delay = Duration::from_millis(250);
             loop {
+                if is_report && !reporting_enabled.load(Ordering::Acquire) {
+                    break;
+                }
                 let response = post_client
                     .post(&messages_url)
                     .header("x-agent-secret", &secret)
@@ -692,10 +752,17 @@ async fn connect_sse_session(
             notification_channels: notify::freedesktop_notification_channel(&config).into_iter().collect(),
         })?;
         *state.config_runtime.hub_applied.write().await = Some(config.clone());
-        connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applied, None).await;
-        if reporting {
-            if config.hub_reporting_enabled() { send_current_process_snapshots(&state, &event_tx).await; }
-        } else { reconcile_transport_runs(&state, &route).await; }
+        let reporting_enabled = if reporting {
+            apply_reporting(&state, &config, &event_tx).await
+        } else {
+            connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applied, None).await;
+            Some(false)
+        };
+        if reporting_enabled == Some(true) {
+            send_current_process_snapshots(&state, &event_tx).await;
+        } else if !reporting {
+            reconcile_transport_runs(&state, &route).await;
+        }
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut data = String::new();
@@ -712,6 +779,11 @@ async fn connect_sse_session(
                     reconfigure = true;
                     reconfigure_started.get_or_insert_with(Instant::now);
                     connection_status(&state, Some(route.target.clone()), ConfigApplyStatus::Applying, None).await;
+                }
+                _ = state.config_runtime.hub_reporting_changed.notified(), if reporting => {
+                    if apply_reporting(&state, &config, &event_tx).await == Some(true) {
+                        send_current_process_snapshots(&state, &event_tx).await;
+                    }
                 }
                 _ = route.progress.notified(), if reconfigure => {},
                 chunk = stream.next() => {
@@ -1428,9 +1500,63 @@ pub(crate) async fn send_agent_message(state: &AppState, message: AgentMessage) 
 mod reporting_tests {
     use super::*;
 
+    use agentic_gpt_protocol::{ConfigChange, ConfigGetRequest, ConfigUpdateRequest};
     use std::fmt::Write;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    async fn set_config(state: &AppState, path: &[&str], value: serde_json::Value) -> Result<()> {
+        let response = crate::config_api::update(
+            state,
+            &crate::operation::RequestContext::new(
+                crate::operation::RequestIngress::LocalUnix,
+                "config.update",
+            ),
+            ConfigUpdateRequest {
+                changes: vec![ConfigChange::Set {
+                    path: path.iter().map(|part| (*part).to_owned()).collect(),
+                    value,
+                }],
+                dry_run: false,
+            },
+        )
+        .await?;
+        anyhow::ensure!(
+            response["saved"] == true,
+            "config update rejected: {response}"
+        );
+        Ok(())
+    }
+
+    async fn get_reporting(state: &AppState) -> Result<serde_json::Value> {
+        crate::config_api::get(
+            state,
+            ConfigGetRequest {
+                paths: vec![vec![
+                    "tunnel".into(),
+                    "hubReporting".into(),
+                    "enabled".into(),
+                ]],
+            },
+        )
+        .await
+    }
+
+    async fn wait_reporting_applied(state: &AppState, expected: bool) -> Result<serde_json::Value> {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let response = get_reporting(state).await?;
+                if response["items"][0]["value"] == expected
+                    && response["items"][0]["applyStatus"] == "applied"
+                    && response["items"][0].get("appliedValue").is_none()
+                {
+                    return Ok::<_, anyhow::Error>(response);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?
+    }
 
     struct RecoveryTestHome {
         root: PathBuf,
@@ -1914,5 +2040,619 @@ mod reporting_tests {
         assert_eq!(recovered["run-old-completed"].result, Some(old_result));
         assert_eq!(recovered["run-current"].status, "completed");
         assert_eq!(recovered["run-current"].command_hash, "hash-current");
+    }
+
+    // ⑤ Keeps reporting hot changes, pending confirmation delivery, config.get projection,
+    // and the auxiliary connection's master switch on one real transport lifecycle.
+    #[tokio::test]
+    async fn reporting_toggle_keeps_connection_and_master_disable_pauses_saved_intent() -> Result<()>
+    {
+        async fn next_non_heartbeat(
+            socket: &mut WebSocketStream<TcpStream>,
+        ) -> Result<AgentMessage> {
+            loop {
+                let message = socket
+                    .next()
+                    .await
+                    .ok_or_else(|| anyhow!("socket closed"))??;
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let message: AgentMessage = serde_json::from_str(&text)?;
+                if let AgentMessage::Heartbeat { sent_at } = message {
+                    socket
+                        .send(Message::Text(
+                            serde_json::to_string(&HubMessage::HeartbeatAck {
+                                sent_at,
+                                received_at: Utc::now(),
+                            })?
+                            .into(),
+                        ))
+                        .await?;
+                } else {
+                    return Ok(message);
+                }
+            }
+        }
+
+        let home = recovery_test_home();
+        let mut state = recovery_test_state(&home.root);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let replacement_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let replacement_url = format!("http://{}", replacement_listener.local_addr()?);
+        let mut config = state.config.read().await.clone();
+        config.mode = crate::config::RuntimeMode::Standalone;
+        config.hub.enabled = true;
+        config.hub.url = format!("http://{}", listener.local_addr()?);
+        config.hub.agent_secret = "report-toggle-secret".to_owned();
+        config.tunnel = Some(crate::config::TunnelConfig {
+            tunnel_id: "report-toggle-test".to_owned(),
+            api_key: "env:AGENTIC_TEST_TUNNEL_API_KEY".to_owned(),
+            hub_reporting: crate::config::HubReportingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        config.toolsets.enable(crate::config::ToolNamespace::Config);
+        config.config_api.update_policy = crate::config::ConfigUpdatePolicy::Allow;
+        config.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
+        crate::config::write_config_with_backup(&state.config_path, &config)?;
+        *state.config.write().await = config.clone();
+        state.runtime =
+            crate::state::RuntimeModel::tunnel(crate::state::CapabilityProfile::Normal, true);
+
+        let shutdown = CancellationToken::new();
+        let owner_state = state.clone();
+        let owner_shutdown = shutdown.clone();
+        let mut owner = ConnectionTask(tokio::spawn(async move {
+            let _ = connect_loop_with_shutdown(owner_state, owner_shutdown).await;
+        }));
+
+        let scenario = timeout(Duration::from_secs(30), async {
+            let (stream, _) = timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .map_err(|_| anyhow!("Hub did not accept auxiliary connection"))??;
+            let mut socket = tokio_tungstenite::accept_async(stream).await?;
+            anyhow::ensure!(matches!(
+                next_non_heartbeat(&mut socket).await?,
+                AgentMessage::Hello {
+                    connection_mode: AgentConnectionMode::ReportingOnly,
+                    ..
+                }
+            ));
+
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(true)).await?;
+            wait_reporting_applied(&state, true).await?;
+            report_tool_arguments(
+                &state,
+                "report-open-run",
+                "report-open-request",
+                "process.exec",
+                serde_json::json!({"command":"true"}),
+                Utc::now(),
+            );
+            anyhow::ensure!(matches!(
+                timeout(Duration::from_secs(3), next_non_heartbeat(&mut socket)).await??,
+                AgentMessage::RunReport { .. }
+            ));
+
+            // A report queued while the active connection changes target must never reach the
+            // old Hub. Then toggle reporting off and on to prove it resumes on the new target.
+            set_config(&state, &["hub", "url"], serde_json::json!(replacement_url)).await?;
+            report_tool_arguments(
+                &state,
+                "report-during-hub-change-run",
+                "report-during-hub-change-request",
+                "process.exec",
+                serde_json::json!({"command":"true"}),
+                Utc::now(),
+            );
+            match timeout(Duration::from_millis(200), next_non_heartbeat(&mut socket)).await {
+                Ok(Ok(AgentMessage::RunReport { report }))
+                    if report.request_id == "report-during-hub-change-request" =>
+                {
+                    return Err(anyhow!("new-target report reached the old Hub"));
+                }
+                Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+            }
+            let (stream, _) = timeout(Duration::from_secs(5), replacement_listener.accept())
+                .await
+                .map_err(|_| anyhow!("Hub did not connect to the replacement address"))??;
+            let mut socket = tokio_tungstenite::accept_async(stream).await?;
+            anyhow::ensure!(matches!(
+                next_non_heartbeat(&mut socket).await?,
+                AgentMessage::Hello {
+                    connection_mode: AgentConnectionMode::ReportingOnly,
+                    ..
+                }
+            ));
+            set_config(
+                &state,
+                &["tunnel", "hubReporting", "enabled"],
+                serde_json::json!(false),
+            )
+            .await?;
+            wait_reporting_applied(&state, false).await?;
+            set_config(
+                &state,
+                &["tunnel", "hubReporting", "enabled"],
+                serde_json::json!(true),
+            )
+            .await?;
+            wait_reporting_applied(&state, true).await?;
+            report_tool_arguments(
+                &state,
+                "report-after-hub-change-run",
+                "report-after-hub-change-request",
+                "process.exec",
+                serde_json::json!({"command":"true"}),
+                Utc::now(),
+            );
+            anyhow::ensure!(matches!(
+                timeout(Duration::from_secs(3), next_non_heartbeat(&mut socket)).await??,
+                AgentMessage::RunReport { report }
+                    if report.request_id == "report-after-hub-change-request"
+            ));
+            anyhow::ensure!(
+                timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "the old Hub accepted a replacement connection"
+            );
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(false)).await?;
+            let disabled = wait_reporting_applied(&state, false).await?;
+            report_tool_arguments(
+                &state,
+                "report-closed-run",
+                "report-closed-request",
+                "process.exec",
+                serde_json::json!({"command":"false"}),
+                Utc::now(),
+            );
+            anyhow::ensure!(
+                timeout(Duration::from_millis(150), next_non_heartbeat(&mut socket))
+                    .await
+                    .is_err()
+            );
+            anyhow::ensure!(disabled["items"][0]["applyStatus"] == "applied");
+
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(true)).await?;
+            wait_reporting_applied(&state, true).await?;
+            report_tool_arguments(
+                &state,
+                "report-reopened-run",
+                "report-reopened-request",
+                "process.exec",
+                serde_json::json!({"command":"true"}),
+                Utc::now(),
+            );
+            anyhow::ensure!(matches!(
+                timeout(Duration::from_secs(3), next_non_heartbeat(&mut socket)).await??,
+                AgentMessage::RunReport { .. }
+            ));
+
+            let confirm_state = state.clone();
+            let confirm_config = state.config.read().await.clone();
+            let confirmation = confirmation::authorize_operation(
+                &confirm_state,
+                &confirm_config,
+                None,
+                crate::policy::PolicyDecision::Confirm,
+                "true",
+                &[],
+                "请求运行 true",
+            );
+            tokio::pin!(confirmation);
+            let request_id = tokio::select! {
+                _result = &mut confirmation => return Err(anyhow!("confirmation ended before Hub request")),
+                message = timeout(Duration::from_secs(3), next_non_heartbeat(&mut socket)) => {
+                    match message?? {
+                        AgentMessage::ConfirmationRequest { request_id, .. } => request_id,
+                        other => return Err(anyhow!("unexpected confirmation message: {other:?}")),
+                    }
+                }
+            };
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(false)).await?;
+            wait_reporting_applied(&state, false).await?;
+            socket
+                .send(Message::Text(serde_json::to_string(&HubMessage::ConfirmationResponse {
+                    request_id,
+                    decision: agentic_gpt_protocol::ConfirmationDecision::AllowOnce,
+                    reason: "test".to_owned(),
+                })?.into()))
+                .await?;
+            anyhow::ensure!(confirmation.await.map_err(|error| anyhow!(error))?.approved);
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(true)).await?;
+            wait_reporting_applied(&state, true).await?;
+
+            set_config(&state, &["hub", "enabled"], serde_json::json!(false)).await?;
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if state.hub_sender.lock().await.is_none() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            anyhow::ensure!(state.config.read().await.hub_reporting_enabled());
+            let paused = wait_reporting_applied(&state, true).await?;
+            anyhow::ensure!(paused["items"][0]["value"] == true);
+            anyhow::ensure!(paused["items"][0]["applyStatus"] == "applied");
+            anyhow::ensure!(paused["items"][0].get("appliedValue").is_none());
+            anyhow::ensure!(
+                crate::agent_info::collect(&state).await["connections"]["hubReporting"]["status"]
+                    == "paused"
+            );
+            let disabled_config = crate::config_api::get(
+                &state,
+                ConfigGetRequest {
+                    paths: vec![
+                        vec!["hub".into(), "enabled".into()],
+                        vec!["tunnel".into(), "hubReporting".into(), "enabled".into()],
+                        vec!["confirmationProvider".into(), "channels".into()],
+                    ],
+                },
+            )
+            .await?;
+            anyhow::ensure!(disabled_config["items"][0]["value"] == false);
+            anyhow::ensure!(disabled_config["items"][0]["applyStatus"] == "applied");
+            anyhow::ensure!(disabled_config["items"][1]["value"] == true);
+            anyhow::ensure!(disabled_config["items"][1]["applyStatus"] == "applied");
+            anyhow::ensure!(disabled_config["items"][2]["value"][0] == "ntfy");
+            let confirmation_config = state.config.read().await.clone();
+            let unavailable = confirmation::authorize_operation(
+                &state,
+                &confirmation_config,
+                None,
+                crate::policy::PolicyDecision::Confirm,
+                "true",
+                &[],
+                "请求运行 true",
+            )
+            .await
+            .expect_err("ntfy confirmation must fail while the Hub connection is disabled");
+            anyhow::ensure!(unavailable == "provider_unavailable");
+            anyhow::ensure!(
+                timeout(Duration::from_millis(100), replacement_listener.accept())
+                    .await
+                    .is_err()
+            );
+
+            set_config(&state, &["hub", "enabled"], serde_json::json!(true)).await?;
+            let (stream, _) = timeout(Duration::from_secs(5), replacement_listener.accept())
+                .await
+                .map_err(|_| anyhow!("Hub did not reconnect after enabling"))??;
+            let mut reconnected = tokio_tungstenite::accept_async(stream).await?;
+            anyhow::ensure!(matches!(
+                next_non_heartbeat(&mut reconnected).await?,
+                AgentMessage::Hello {
+                    connection_mode: AgentConnectionMode::ReportingOnly,
+                    ..
+                }
+            ));
+            wait_reporting_applied(&state, true).await?;
+            report_tool_arguments(
+                &state,
+                "report-resumed-run",
+                "report-resumed-request",
+                "process.exec",
+                serde_json::json!({"command":"true"}),
+                Utc::now(),
+            );
+            anyhow::ensure!(matches!(
+                timeout(Duration::from_secs(3), next_non_heartbeat(&mut reconnected)).await??,
+                AgentMessage::RunReport { .. }
+            ));
+            let resumed_config = crate::config_api::get(
+                &state,
+                ConfigGetRequest {
+                    paths: vec![vec!["hub".into(), "enabled".into()]],
+                },
+            )
+            .await?;
+            anyhow::ensure!(resumed_config["items"][0]["value"] == true);
+            anyhow::ensure!(resumed_config["items"][0]["applyStatus"] == "applied");
+            anyhow::ensure!(resumed_config["items"][0].get("appliedValue").is_none());
+            reconnected.close(None).await?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| anyhow!("WebSocket reporting test timed out"))
+        .and_then(|result| result);
+        shutdown.cancel();
+        owner.stop().await;
+        scenario?;
+        Ok(())
+    }
+
+    // ⑤ Covers the separate SSE event stream and POST writer lifecycle for the same behavior.
+    #[tokio::test]
+    async fn sse_reporting_toggle_keeps_connection_confirmation_and_paused_intent() -> Result<()> {
+        use axum::{
+            extract::{Path, State as AxumState},
+            response::sse::{Event, Sse},
+            routing::{get, post},
+            Json, Router,
+        };
+        use std::{
+            convert::Infallible,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+
+        #[derive(Clone)]
+        struct SseTestState {
+            messages: mpsc::UnboundedSender<AgentMessage>,
+            events: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>,
+            connections: Arc<AtomicUsize>,
+        }
+
+        async fn events(
+            Path(_agent_id): Path<String>,
+            AxumState(state): AxumState<SseTestState>,
+        ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+            state.connections.fetch_add(1, Ordering::Relaxed);
+            let stream =
+                futures_util::stream::unfold((state.events, true), |(events, first)| async move {
+                    if first {
+                        return Some((
+                            Ok::<_, Infallible>(Event::default().comment("connected")),
+                            (events, false),
+                        ));
+                    }
+                    let data = events.lock().await.recv().await?;
+                    Some((
+                        Ok::<_, Infallible>(Event::default().data(data)),
+                        (events, false),
+                    ))
+                });
+            Sse::new(stream)
+        }
+
+        async fn messages(
+            AxumState(state): AxumState<SseTestState>,
+            Json(message): Json<AgentMessage>,
+        ) -> axum::http::StatusCode {
+            let _ = state.messages.send(message);
+            axum::http::StatusCode::OK
+        }
+
+        async fn next_message(
+            messages: &mut mpsc::UnboundedReceiver<AgentMessage>,
+            events: &mpsc::UnboundedSender<String>,
+        ) -> Result<AgentMessage> {
+            loop {
+                let message = timeout(Duration::from_secs(3), messages.recv())
+                    .await
+                    .map_err(|_| anyhow!("timed out waiting for Agent SSE POST"))?
+                    .ok_or_else(|| anyhow!("SSE test server stopped"))?;
+                if let AgentMessage::Heartbeat { sent_at } = message {
+                    events.send(serde_json::to_string(&HubMessage::HeartbeatAck {
+                        sent_at,
+                        received_at: Utc::now(),
+                    })?)?;
+                } else {
+                    return Ok(message);
+                }
+            }
+        }
+
+        let home = recovery_test_home();
+        let mut state = recovery_test_state(&home.root);
+        let (agent_messages, mut received_messages) = mpsc::unbounded_channel();
+        let (hub_events, event_stream) = mpsc::unbounded_channel();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let server_state = SseTestState {
+            messages: agent_messages,
+            events: Arc::new(tokio::sync::Mutex::new(event_stream)),
+            connections: connections.clone(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let hub_addr = listener.local_addr()?;
+
+        let mut config = state.config.read().await.clone();
+        config.mode = crate::config::RuntimeMode::Standalone;
+        config.hub.enabled = true;
+        config.hub.transport = "sse".to_owned();
+        config.hub.url = format!("http://{hub_addr}");
+        config.hub.agent_secret = "sse-report-toggle-secret".to_owned();
+        config.tunnel = Some(crate::config::TunnelConfig {
+            tunnel_id: "sse-report-toggle-test".to_owned(),
+            api_key: "env:AGENTIC_TEST_SSE_TUNNEL_API_KEY".to_owned(),
+            hub_reporting: crate::config::HubReportingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        config.toolsets.enable(crate::config::ToolNamespace::Config);
+        config.config_api.update_policy = crate::config::ConfigUpdatePolicy::Allow;
+        config.confirmation_provider.channels = vec![crate::config::ConfirmationChannel::Ntfy];
+        crate::config::write_config_with_backup(&state.config_path, &config)?;
+        *state.config.write().await = config;
+        state.runtime =
+            crate::state::RuntimeModel::tunnel(crate::state::CapabilityProfile::Normal, true);
+
+        let app = Router::new()
+            .route("/v1/agents/:agent_id/events", get(events))
+            .route("/v1/agents/:agent_id/messages", post(messages))
+            .with_state(server_state);
+        let mut server =
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("SSE test server") });
+
+        let shutdown = CancellationToken::new();
+        let owner_state = state.clone();
+        let owner_shutdown = shutdown.clone();
+        let mut owner = ConnectionTask(tokio::spawn(async move {
+            let _ = connect_loop_with_shutdown(owner_state, owner_shutdown).await;
+        }));
+
+        let scenario = timeout(Duration::from_secs(30), async {
+            anyhow::ensure!(matches!(
+                next_message(&mut received_messages, &hub_events).await?,
+                AgentMessage::Hello {
+                    connection_mode: AgentConnectionMode::ReportingOnly,
+                    ..
+                }
+            ));
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(true)).await?;
+            wait_reporting_applied(&state, true).await?;
+            report_tool_arguments(
+                &state,
+                "sse-report-open-run",
+                "sse-report-open-request",
+                "process.exec",
+                serde_json::json!({"command":"true"}),
+                Utc::now(),
+            );
+            anyhow::ensure!(matches!(
+                next_message(&mut received_messages, &hub_events).await?,
+                AgentMessage::RunReport { .. }
+            ));
+
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(false)).await?;
+            wait_reporting_applied(&state, false).await?;
+            report_tool_arguments(
+                &state,
+                "sse-report-closed-run",
+                "sse-report-closed-request",
+                "process.exec",
+                serde_json::json!({"command":"false"}),
+                Utc::now(),
+            );
+            anyhow::ensure!(
+                timeout(Duration::from_millis(150), received_messages.recv())
+                    .await
+                    .is_err()
+            );
+
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(true)).await?;
+            wait_reporting_applied(&state, true).await?;
+            report_tool_arguments(
+                &state,
+                "sse-report-reopen-run",
+                "sse-report-reopen-request",
+                "process.exec",
+                serde_json::json!({"command":"true"}),
+                Utc::now(),
+            );
+            anyhow::ensure!(matches!(
+                next_message(&mut received_messages, &hub_events).await?,
+                AgentMessage::RunReport { .. }
+            ));
+
+            let confirm_config = state.config.read().await.clone();
+            let confirmation = confirmation::authorize_operation(
+                &state,
+                &confirm_config,
+                None,
+                crate::policy::PolicyDecision::Confirm,
+                "true",
+                &[],
+                "请求运行 true",
+            );
+            tokio::pin!(confirmation);
+            let request_id = tokio::select! {
+                _result = &mut confirmation => return Err(anyhow!("confirmation ended before SSE request")),
+                message = next_message(&mut received_messages, &hub_events) => {
+                    match message? {
+                        AgentMessage::ConfirmationRequest { request_id, .. } => request_id,
+                        other => return Err(anyhow!("unexpected SSE confirmation message: {other:?}")),
+                    }
+                }
+            };
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(false)).await?;
+            wait_reporting_applied(&state, false).await?;
+            hub_events.send(serde_json::to_string(&HubMessage::ConfirmationResponse {
+                request_id,
+                decision: agentic_gpt_protocol::ConfirmationDecision::AllowOnce,
+                reason: "test".to_owned(),
+            })?)?;
+            anyhow::ensure!(confirmation.await.map_err(|error| anyhow!(error))?.approved);
+            set_config(&state, &["tunnel", "hubReporting", "enabled"], serde_json::json!(true)).await?;
+            wait_reporting_applied(&state, true).await?;
+            anyhow::ensure!(connections.load(Ordering::Relaxed) == 1);
+
+            set_config(&state, &["hub", "enabled"], serde_json::json!(false)).await?;
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if state.hub_sender.lock().await.is_none() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            wait_reporting_applied(&state, true).await?;
+            anyhow::ensure!(connections.load(Ordering::Relaxed) == 1);
+            anyhow::ensure!(state.config.read().await.hub_reporting_enabled());
+            anyhow::ensure!(
+                crate::agent_info::collect(&state).await["connections"]["hubReporting"]["status"]
+                    == "paused"
+            );
+            let disabled_config = crate::config_api::get(
+                &state,
+                ConfigGetRequest {
+                    paths: vec![
+                        vec!["hub".into(), "enabled".into()],
+                        vec!["tunnel".into(), "hubReporting".into(), "enabled".into()],
+                        vec!["confirmationProvider".into(), "channels".into()],
+                    ],
+                },
+            )
+            .await?;
+            anyhow::ensure!(disabled_config["items"][0]["value"] == false);
+            anyhow::ensure!(disabled_config["items"][0]["applyStatus"] == "applied");
+            anyhow::ensure!(disabled_config["items"][1]["value"] == true);
+            anyhow::ensure!(disabled_config["items"][1]["applyStatus"] == "applied");
+            anyhow::ensure!(disabled_config["items"][2]["value"][0] == "ntfy");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            anyhow::ensure!(connections.load(Ordering::Relaxed) == 1);
+
+            set_config(&state, &["hub", "enabled"], serde_json::json!(true)).await?;
+            anyhow::ensure!(matches!(
+                next_message(&mut received_messages, &hub_events).await?,
+                AgentMessage::Hello {
+                    connection_mode: AgentConnectionMode::ReportingOnly,
+                    ..
+                }
+            ));
+            wait_reporting_applied(&state, true).await?;
+            report_tool_arguments(
+                &state,
+                "sse-report-resumed-run",
+                "sse-report-resumed-request",
+                "process.exec",
+                serde_json::json!({"command":"true"}),
+                Utc::now(),
+            );
+            anyhow::ensure!(matches!(
+                next_message(&mut received_messages, &hub_events).await?,
+                AgentMessage::RunReport { .. }
+            ));
+            anyhow::ensure!(connections.load(Ordering::Relaxed) == 2);
+            let resumed_config = crate::config_api::get(
+                &state,
+                ConfigGetRequest {
+                    paths: vec![vec!["hub".into(), "enabled".into()]],
+                },
+            )
+            .await?;
+            anyhow::ensure!(resumed_config["items"][0]["value"] == true);
+            anyhow::ensure!(resumed_config["items"][0]["applyStatus"] == "applied");
+            anyhow::ensure!(resumed_config["items"][0].get("appliedValue").is_none());
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| anyhow!("SSE reporting test timed out"))
+        .and_then(|result| result);
+
+        shutdown.cancel();
+        owner.stop().await;
+        server.abort();
+        let _ = (&mut server).await;
+        scenario?;
+        Ok(())
     }
 }

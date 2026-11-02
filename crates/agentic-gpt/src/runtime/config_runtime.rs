@@ -1,5 +1,12 @@
 //! Serial configuration application, with concrete service owners retaining their resources.
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use agentic_gpt_protocol::ConfigApplyStatus;
 use anyhow::Result;
@@ -17,6 +24,8 @@ pub(crate) struct ConfigRuntime {
     errors: RwLock<BTreeMap<String, String>>,
     pub(crate) http_attempted_config: RwLock<Option<HttpMcpConfig>>,
     pub(crate) hub_changed: Notify,
+    pub(crate) hub_reporting_changed: Notify,
+    pub(crate) hub_reporting_enabled: Arc<AtomicBool>,
     pub(crate) hub_connection: RwLock<crate::hub::HubConnectionState>,
     pub(crate) hub_applied: RwLock<Option<Config>>,
     pub(crate) http_updates: RwLock<Option<watch::Sender<HttpMcpConfig>>>,
@@ -258,6 +267,8 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     }
     let hub_changed =
         differs(&old.hub, &next.hub) || old.auxiliary_hub_enabled() != next.auxiliary_hub_enabled();
+    let hub_reporting_changed = old.hub_reporting_enabled() != next.hub_reporting_enabled()
+        || old.auxiliary_hub_enabled() != next.auxiliary_hub_enabled();
     let http_changed = differs(&old.http_mcp, &next.http_mcp);
     let tmux_enable = !old.toolsets.is_enabled(crate::config::ToolNamespace::Tmux)
         && next.toolsets.is_enabled(crate::config::ToolNamespace::Tmux);
@@ -293,11 +304,37 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     drop(email_guard);
     drop(secret_guard);
     if hub_changed {
+        state
+            .config_runtime
+            .hub_reporting_enabled
+            .store(false, Ordering::Release);
+        *state.reporting_sender.lock().await = None;
         let mut connection = state.config_runtime.hub_connection.write().await;
         connection.status = ConfigApplyStatus::Applying;
         connection.error = None;
         drop(connection);
         state.config_runtime.hub_changed.notify_one();
+    }
+    if hub_reporting_changed {
+        let enabled = !hub_changed && next.auxiliary_hub_enabled() && next.hub_reporting_enabled();
+        if !enabled {
+            state
+                .config_runtime
+                .hub_reporting_enabled
+                .store(false, Ordering::Release);
+            *state.reporting_sender.lock().await = None;
+        }
+        if !next.auxiliary_hub_enabled() {
+            let mut applied = state.config_runtime.hub_applied.write().await;
+            if let Some(applied) = applied.as_mut() {
+                if let (Some(applied_tunnel), Some(next_tunnel)) =
+                    (&mut applied.tunnel, &next.tunnel)
+                {
+                    applied_tunnel.hub_reporting = next_tunnel.hub_reporting.clone();
+                }
+            }
+        }
+        state.config_runtime.hub_reporting_changed.notify_one();
     }
     if http_changed {
         if let Some(sender) = state.config_runtime.http_updates.read().await.as_ref() {
@@ -352,6 +389,10 @@ impl ConfigRuntime {
         if config.mode == crate::config::RuntimeMode::Hub || config.auxiliary_hub_enabled() {
             runtime.hub_connection.get_mut().status = ConfigApplyStatus::Applying;
         }
+        runtime.hub_reporting_enabled.store(
+            config.auxiliary_hub_enabled() && config.hub_reporting_enabled(),
+            Ordering::Relaxed,
+        );
         runtime
     }
 

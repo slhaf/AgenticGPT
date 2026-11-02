@@ -80,10 +80,6 @@ pub(super) fn localized_error(code: &str, language: UiLanguage) -> String {
             "Confirmation channels must be an ordered list of supported channels without duplicates.",
             "确认通道必须是受支持且不重复的有序列表。",
         ),
-        "config_init_hub_confirmation_requires_connection" => (
-            "Enable the auxiliary Hub connection and configure its credentials to use ntfy confirmations.",
-            "使用 ntfy 确认前，请启用 Hub 辅助连接并填写连接凭据。",
-        ),
         "config_init_reporting_detail_invalid" => {
             ("Reporting detail is invalid.", "报告详细程度无效。")
         }
@@ -1094,11 +1090,13 @@ fn connection_inspector_body(
         },
         Some(SetupField::HubEnabled) => match language {
             UiLanguage::En => &[
-                "Connect to the Hub for ntfy confirmations. Standalone reporting is controlled separately.",
+                "Controls the auxiliary Hub connection used by ntfy confirmations and Standalone reporting.",
+                "Reporting pauses while this connection is off; confirmation channel settings are retained.",
                 "The connection still sends Hello and heartbeats, but never accepts execution commands.",
             ],
             UiLanguage::ZhCn => &[
-                "连接 Hub 以使用 ntfy 确认；Standalone 上报由独立设置控制。",
+                "控制 ntfy 确认和 Standalone 上报使用的 Hub 辅助连接。",
+                "关闭连接时暂停上报，确认通道设置仍会保留。",
                 "连接期间仍会发送 Hello 和心跳，但不会接收执行命令。",
             ],
         },
@@ -1397,8 +1395,22 @@ fn render_optional_center(
         let title = section
             .map(|section| section_label(section, language))
             .unwrap_or_else(|| t(language, "Optional settings", "可选配置"));
-        let body = optional_center_inspector_body(section, language);
-        render_inspector(frame, inspector, title, body, theme);
+        let mut body = optional_center_inspector_body(section, language).to_vec();
+        if section == Some(OptionalSection::HubReporting)
+            && !session.auxiliary_hub_connection_enabled()
+            && matches!(
+                session.optional_draft(OptionalSection::HubReporting),
+                OptionalSectionDraft::HubReporting(value) if value.enabled
+            )
+        {
+            body.push("");
+            body.push(t(
+                language,
+                "Currently paused: Hub connection is off.",
+                "当前因 Hub 连接关闭而暂停上报。",
+            ));
+        }
+        render_inspector(frame, inspector, title, &body, theme);
     }
     render_horizontal_rule(frame, bottom_rule, theme);
     render_surface_footer(
@@ -1958,8 +1970,19 @@ fn render_optional_form(
                 render_inspector(frame, inspector, title, &body, theme);
             }
         } else {
-            let inspector_body = optional_form_inspector_body(section, field, language);
-            render_inspector(frame, inspector, title, inspector_body, theme);
+            let mut inspector_body =
+                optional_form_inspector_body(section, field, language).to_vec();
+            if !session.auxiliary_hub_connection_enabled()
+                && matches!(draft, OptionalSectionDraft::HubReporting(value) if value.enabled)
+            {
+                inspector_body.push("");
+                inspector_body.push(t(
+                    language,
+                    "Currently paused: Hub connection is off.",
+                    "当前因 Hub 连接关闭而暂停上报。",
+                ));
+            }
+            render_inspector(frame, inspector, title, &inspector_body, theme);
         }
     }
     render_horizontal_rule(frame, bottom_rule, theme);
@@ -3524,6 +3547,7 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::Confirmation => &[
                     "Choose how confirmation requests are delivered and which language they use.",
+                    "ntfy stays selected when the Hub connection is off, but is unavailable until the connection is enabled.",
                     "",
                     "Default channel order:",
                     "• freedesktop → ntfy",
@@ -3584,6 +3608,7 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::HubReporting => &[
                     "Control optional run and Process reporting from Standalone to the Hub.",
+                    "Reporting pauses while the auxiliary Hub connection is off and resumes when it is enabled.",
                     "Default: off; metadata hides tool arguments, results, and command/output details.",
                 ],
                 OptionalSection::Events => &[
@@ -3622,6 +3647,7 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::Confirmation => &[
                     "设置确认请求的投递通道和语言。",
+                    "关闭 Hub 辅助连接时仍保留 ntfy 设置，但该通道不可用；重新连接后恢复。",
                     "",
                     "默认通道顺序：",
                     "• freedesktop → ntfy",
@@ -3682,6 +3708,7 @@ fn optional_center_inspector_body(
                 ],
                 OptionalSection::HubReporting => &[
                     "控制 Standalone 向 Hub 上报运行和 Process 信息。",
+                    "Hub 辅助连接关闭时暂停上报；重新连接后恢复。",
                     "默认关闭；metadata 会隐藏工具参数、结果以及命令和输出细节。",
                 ],
                 OptionalSection::Events => &[
@@ -3730,6 +3757,7 @@ fn optional_form_inspector_body(
                 SetupField::ConfirmationChannels => &[
                     "Choose confirmation fallback channels.",
                     "Selected order is the fallback order: the first available channel handles the request.",
+                    "ntfy is unavailable while the auxiliary Hub connection is off; its selection is retained.",
                     "",
                     "An empty selection means required confirmations cannot be delivered.",
                 ],
@@ -3970,6 +3998,7 @@ fn optional_form_inspector_body(
                 SetupField::ConfirmationChannels => &[
                     "选择确认请求的降级通道。",
                     "选中顺序就是降级顺序：按顺序尝试，首个可用通道处理请求。",
+                    "Hub 辅助连接关闭时 ntfy 不可用，但选择会保留。",
                     "",
                     "全部取消表示需要确认的操作无法投递确认。",
                 ],
