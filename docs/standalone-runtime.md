@@ -164,7 +164,9 @@ Room 核心预设额外选择 `room.bootstrap`、`room.diary`、`room.notebook`�
 
 这些过滤器只会从已公布的工具表面移除名称，不会暴露仅供 dispatch 使用的别名。
 
-先调用 `agent.info`，检查当前 profile、已启用的 namespace、受限的路径策略、容量、确认功能是否可用以及 reporting 状态：
+通过 `tools/list` 查看当前可调用的工具；调用 `agent.info` 查看当前 profile、策略规则数量、容量、确认功能是否可用以及 reporting 状态。`agent.info` 不列出具体命令规则和路径；数量来自完整的已生效配置。响应的 `schemaVersion` 为 `2`，工作区位于 `workspaceRoot`，文件搜索上限位于 `execution.fileSearchMaxContextLines`，Secret 同步状态位于 `secret.syncStatus` 和 `secret.syncLastTriggeredAt`。
+
+常用工具包括：
 ```text
 process.exec, process.batch, process.read, process.list, process.cancel
 skills.list, skills.read, skills.setActive, skills.install,
@@ -324,7 +326,7 @@ GIF metadata 包含
 
 `contextLines` 必须是非负整数，默认值为 0。运行时最大值由
 `limits.maxFileSearchContextLines` 指定（默认 5，可配置为 0–100，并显示在
-`agent.info.execution.fileSearch.maxContextLines` 中）。超过最大值的请求会被裁剪，而非拒绝。普通搜索响应只返回 `matches`；
+`agent.info.execution.fileSearchMaxContextLines` 中）。超过最大值的请求会被裁剪，而非拒绝。普通搜索响应只返回 `matches`；
 发生裁剪时会附上实际生效的 `contextLines` 和有界警告，只有实际发生截断/跳过文件时才会返回相应证据。负数或非整数值会在参数验证时失败。
 
 `file.read` 和 `file.search` 还接受有序的 `requests` 数组，每项最多支持 32 种请求形状。扁平形式和 batch 形式互斥。结构化 batch 的

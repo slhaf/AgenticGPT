@@ -114,7 +114,7 @@ impl SecretService {
             reconfiguration: Mutex::new(()),
             owner: parking_lot::Mutex::new(None),
             job: Mutex::new(None),
-            status: parking_lot::Mutex::new(json!({"sync":{"status":null,"lastTriggeredAt":null}})),
+            status: parking_lot::Mutex::new(json!({"syncStatus":null,"syncLastTriggeredAt":null})),
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stopping: parking_lot::Mutex::new(tokio_util::sync::CancellationToken::new()),
         }))
@@ -186,7 +186,7 @@ impl SecretService {
         }
         let (sender, receiver) = watch::channel(None);
         let triggered = Utc::now().to_rfc3339();
-        *self.status.lock() = json!({"sync":{"status":"syncing","lastTriggeredAt":triggered}});
+        *self.status.lock() = json!({"syncStatus":"syncing","syncLastTriggeredAt":triggered});
         let service = self.clone();
         let event_store = state.event_store.clone();
         let ttl = state.config.read().await.events.low_ttl_seconds;
@@ -205,7 +205,7 @@ impl SecretService {
                 Ok(())
             };
             let result: Result<()> = tokio::select! { result=synchronize=>result, _=stopping.cancelled()=>Err(Error::Unavailable) };
-            service.status.lock()["sync"]["status"] = json!(if result.is_ok() {
+            service.status.lock()["syncStatus"] = json!(if result.is_ok() {
                 "succeeded"
             } else {
                 "failed"
@@ -260,7 +260,7 @@ impl SecretService {
         self.stop_commands().await;
         self.release_owner().await;
         *self.stopping.lock() = tokio_util::sync::CancellationToken::new();
-        *self.status.lock() = json!({"sync":{"status":null,"lastTriggeredAt":null}});
+        *self.status.lock() = json!({"syncStatus":null,"syncLastTriggeredAt":null});
         Ok(SecretReconfigureGuard {
             service: self,
             _admission: admission,

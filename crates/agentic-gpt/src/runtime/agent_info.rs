@@ -5,13 +5,12 @@ use std::sync::LazyLock;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use crate::config::{Config, ConfirmationChannel, PolicyConfig};
+use crate::config::{Config, ConfirmationChannel};
 use crate::exec;
 use crate::notify;
 use crate::process;
 use crate::state::{AppState, HubMode, Transport};
 
-const MAX_SUMMARY_ENTRIES: usize = 128;
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(crate) async fn collect(state: &AppState) -> Value {
@@ -57,10 +56,6 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         .map(|issue| Value::String(issue.to_string()))
         .collect::<Vec<_>>();
     let capabilities = state.runtime.capabilities();
-    let command_summary = policy_summary(&config.policy.command);
-    let (read_only, read_truncated) = path_values(config.policy.path.read_only.iter());
-    let (write, write_truncated) = path_values(config.policy.path.write.iter());
-    let (deny, deny_truncated) = path_values(config.policy.path.deny.iter());
     let channels = config
         .confirmation_provider
         .channels
@@ -95,7 +90,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         }));
     }
     json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "generatedAt": generated_at,
         "identity": {
             "agentId": config.agent_id,
@@ -113,17 +108,21 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "arch": std::env::consts::ARCH,
             "availableParallelism": resolved_limit.available_parallelism.unwrap_or(1),
         },
-        "workspace": {
-            "root": exact_path(&config.workspace_root),
-        },
+        "workspaceRoot": exact_path(&config.workspace_root),
         "policy": {
             "enabled": config.policy.enabled,
             "bubblewrap": config.policy.bubblewrap,
-            "command": command_summary,
+            "command": {
+                "defaultAction": config.policy.command.default_action,
+                "allowCount": config.policy.command.allow.len(),
+                "confirmCount": config.policy.command.confirm.len(),
+                "denyCount": config.policy.command.deny.len(),
+            },
             "path": {
                 "defaultAction": config.policy.path.default_action,
-                "readOnly": read_only, "write": write, "deny": deny,
-                "truncated": read_truncated || write_truncated || deny_truncated,
+                "readOnlyCount": config.policy.path.read_only.len(),
+                "writeCount": config.policy.path.write.len(),
+                "denyCount": config.policy.path.deny.len(),
             },
         },
         "execution": {
@@ -135,9 +134,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
                 "active": active_count,
                 "available": resolved_limit.resolved.saturating_sub(active_count),
             },
-            "fileSearch": {
-                "maxContextLines": config.limits.max_file_search_context_lines,
-            },
+            "fileSearchMaxContextLines": config.limits.max_file_search_context_lines,
         },
         "confirmation": {
             "channels": channels,
@@ -238,40 +235,6 @@ fn exact_path(path: &Path) -> String {
         .collect::<PathBuf>()
         .to_string_lossy()
         .into_owned()
-}
-
-fn path_values<'a>(roots: impl Iterator<Item = &'a PathBuf>) -> (Vec<String>, bool) {
-    let mut values = Vec::new();
-    let mut truncated = false;
-    for root in roots {
-        if values.len() >= MAX_SUMMARY_ENTRIES {
-            truncated = true;
-            break;
-        }
-        let value = exact_path(root);
-        if !values.contains(&value) {
-            values.push(value);
-        }
-    }
-    (values, truncated)
-}
-
-fn policy_summary(policy: &PolicyConfig) -> Value {
-    let (allow, allow_truncated) = rule_values(&policy.allow);
-    let (confirm, confirm_truncated) = rule_values(&policy.confirm);
-    let (deny, deny_truncated) = rule_values(&policy.deny);
-    json!({ "defaultAction": policy.default_action, "counts": { "allow": policy.allow.len(), "confirm": policy.confirm.len(), "deny": policy.deny.len() }, "allow": allow, "confirm": confirm, "deny": deny, "truncated": allow_truncated || confirm_truncated || deny_truncated })
-}
-
-fn rule_values(rules: &[String]) -> (Vec<Value>, bool) {
-    (
-        rules
-            .iter()
-            .take(MAX_SUMMARY_ENTRIES)
-            .map(|rule| json!(rule))
-            .collect(),
-        rules.len() > MAX_SUMMARY_ENTRIES,
-    )
 }
 
 struct ConfigHealth {
@@ -436,46 +399,14 @@ mod tests {
         let value = collect(&state(CapabilityProfile::Room)).await;
         assert!(value.get("surface").is_none());
         assert_eq!(value["identity"]["profile"], "room");
-        assert!(value["policy"]["path"]["write"][0].is_string());
         assert_eq!(value["config"]["diskStatus"], "missing");
         assert_eq!(value["mcp"]["concurrency"]["globalLimit"], 8);
         assert_eq!(value["mcp"]["concurrency"]["perServerLimit"], 2);
         assert_eq!(value["mcp"]["concurrency"]["active"], 0);
         assert_eq!(value["mcp"]["concurrency"]["queued"], 0);
-        assert_eq!(value["execution"]["fileSearch"]["maxContextLines"], 5);
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(!serialized.contains("change-me"));
         assert!(!serialized.contains("agent_secret"));
-    }
-
-    #[tokio::test]
-    async fn info_preserves_empty_policy_lists_and_deduplicates_workspace_root() {
-        let app = state(CapabilityProfile::Room);
-        let root =
-            std::env::temp_dir().join(format!("agent-info-room-{}", uuid::Uuid::new_v4().simple()));
-        {
-            let mut config = app.config.write().await;
-            config.workspace_root = PathBuf::from(format!("{}/", root.display()));
-            config.policy.path.write = vec![root.to_path_buf(), PathBuf::from("/tmp")];
-            config.policy.path.read_only.clear();
-            config.policy.path.deny.clear();
-            config.policy.path.deny.clear();
-        }
-
-        let value = collect(&app).await;
-        assert_eq!(value["workspace"]["root"], root.to_string_lossy().as_ref());
-        assert_eq!(
-            value["policy"]["path"]["write"].as_array().unwrap().len(),
-            2
-        );
-        assert!(value["policy"]["path"]["readOnly"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-        assert!(value["policy"]["path"]["deny"]
-            .as_array()
-            .unwrap()
-            .is_empty());
     }
 
     #[tokio::test]

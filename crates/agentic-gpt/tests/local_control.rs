@@ -44,8 +44,17 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     config["mode"] = json!("local");
     config["profile"] = json!("normal");
     config["displayName"] = json!("Local E2E");
-    config["workspaceRoot"] = json!(workspace);
+    config["workspaceRoot"] = json!(format!("{}/", workspace.display()));
     set_fixture_path_policy(&mut config, &[&workspace]);
+    let allow = config["policy"]["command"]["allow"]
+        .as_array_mut()
+        .ok_or("missing allow rules")?;
+    allow.extend((0..140).map(|index| json!(format!("agent-info-rule-{index} **"))));
+    let allow_count = allow.len();
+    config["policy"]["path"]["deny"] = json!((0..130)
+        .map(|index| workspace.join(format!("agent-info-private-{index}")))
+        .collect::<Vec<_>>());
+    config["limits"]["maxFileSearchContextLines"] = json!(7);
     config["shell"]["initFile"] = Value::Null;
     config["tunnel"] = Value::Null;
     config["policy"]["command"]["deny"] = json!(["/usr/bin/printf **"]);
@@ -131,6 +140,19 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         || info["connections"]["hubReporting"]["status"] != "disabled"
     {
         return Err("agent.info local readiness mismatch".to_string());
+    }
+    if info["workspaceRoot"] != workspace.to_string_lossy().as_ref()
+        || info["policy"]["command"]["allowCount"] != allow_count
+        || info["policy"]["path"]["writeCount"] != 1
+        || info["policy"]["path"]["readOnlyCount"] != 0
+        || info["policy"]["path"]["denyCount"] != 130
+        || info["execution"]["fileSearchMaxContextLines"] != 7
+        || info["secret"].get("syncStatus") != Some(&Value::Null)
+        || info["secret"].get("syncLastTriggeredAt") != Some(&Value::Null)
+        || info.to_string().contains("agent-info-rule-")
+        || info.to_string().contains("agent-info-private-")
+    {
+        return Err("agent.info summary mismatch".to_string());
     }
 
     let mut ranged = GuardChild(Some(

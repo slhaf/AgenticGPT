@@ -240,7 +240,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 每次请求触发或复用进行中的同步。查询默认等待 3000 毫秒；明确网络故障或预算耗尽时，可读的本地库结果带 `stale:true` 与来自 `bw` 的 `lastSyncedAt`，无同步记录时为 `null`。过期数据未命中返回 `secret_presence_unknown`；认证、TLS、解锁、数据及无法归类的失败不降级。写操作必须观察同步成功。`confirm` 策略要求明确批准，不能因确认不可用或全局命令策略关闭而继续。
 
-四项操作的普通工具 reporting 仅保留脱敏状态，不保存请求和结果正文；Hub 持久运行回执与 Agent 重放账本不保存这些操作，不能通过 run 查询取回密码或旧验证码。响应丢失后重新调用 `get`，按当时策略重新授权；写入返回 `secret_write_outcome_unknown` 时不得盲目重发。各入口保留现有错误与 `events` 封套；同步终态另产生一条 `low` 事件。`agent.info.secret.sync` 只观察 `status` 和 `lastTriggeredAt`，不主动同步或返回密码库内容。
+四项操作的普通工具 reporting 仅保留脱敏状态，不保存请求和结果正文；Hub 持久运行回执与 Agent 重放账本不保存这些操作，不能通过 run 查询取回密码或旧验证码。响应丢失后重新调用 `get`，按当时策略重新授权；写入返回 `secret_write_outcome_unknown` 时不得盲目重发。各入口保留现有错误与 `events` 封套；同步终态另产生一条 `low` 事件。`agent.info.secret` 只观察 `syncStatus` 和 `syncLastTriggeredAt`，不主动同步或返回密码库内容。
 
 配置、请求示例、已验证的 `bw` 版本及实际部署验证边界见[Room 密钥使用指南](room-secret.zh-CN.md)；HTTP schema 以 [OpenAPI](../openapi/hub.yaml) 为准。
 

@@ -254,7 +254,7 @@ async fn secret_queries_share_sync_preserve_budget_and_fail_closed_confirmation(
         let first = fixture.call("room.secret.list", json!({})).await;
         assert_eq!(first["stale"], true);
         assert_eq!(first["items"][0]["account"], "Alice");
-        let triggered = fixture.state.secret.info()["sync"]["lastTriggeredAt"].clone();
+        let triggered = fixture.state.secret.info()["syncLastTriggeredAt"].clone();
         fixture.write("missing", "");
         let missing = fixture
             .call(
@@ -265,7 +265,7 @@ async fn secret_queries_share_sync_preserve_budget_and_fail_closed_confirmation(
         assert_eq!(missing["error"]["code"], "secret_presence_unknown");
         assert_eq!(missing["lastSyncedAt"], "2026-10-01T00:00:00Z");
         assert_eq!(
-            fixture.state.secret.info()["sync"]["lastTriggeredAt"],
+            fixture.state.secret.info()["syncLastTriggeredAt"],
             triggered
         );
         assert_eq!(
@@ -287,7 +287,7 @@ async fn secret_queries_share_sync_preserve_budget_and_fail_closed_confirmation(
         assert!(!denied.to_string().contains("old-test-value"));
         assert_eq!(fixture.owner.usage.rank(ITEM_ID), (0.0, 0));
         fixture.complete_sync().await;
-        assert_eq!(fixture.state.secret.info()["sync"]["status"], "succeeded");
+        assert_eq!(fixture.state.secret.info()["syncStatus"], "succeeded");
     })
     .catch_unwind()
     .await;

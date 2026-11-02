@@ -1614,6 +1614,7 @@ PROCESS_OVERFLOW_MARKER = "overflow-" + "x" * 20000
 PROCESS_BINARY_OUTPUT = b"\xff" * 7000
 PROCESS_BINARY_FORMAT = r"\377" * len(PROCESS_BINARY_OUTPUT)
 PROCESS_ESCAPE_OUTPUT = ('"\\\n\t' * 700)
+PROCESS_RETAINED_MCP_TEXT = "contract-parity-retained-result\n" * 400
 PROCESS_AUTO_MARKER = "contract-parity-auto-before-exit"
 PROCESS_AUTO_COMMAND = f"printf '%s' '{PROCESS_AUTO_MARKER}'; sleep 2"
 PROCESS_TAIL_MARKER = "contract-parity-post-exit-tail"
@@ -2469,6 +2470,9 @@ def start_http_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Mana
     port = free_port()
     config, _, env = init_agent(binary, root, "standalone", "normal", "parity-http")
     prepare_skill_fixture(config)
+    (Path(json.loads(config.read_text())["workspaceRoot"]) / "retained-mcp-result.txt").write_text(
+        PROCESS_RETAINED_MCP_TEXT
+    )
     write_large_mcp_result_fixture(Path(json.loads(config.read_text())["workspaceRoot"]))
     write_large_mcp_result_fixture(
         Path(json.loads(config.read_text())["workspaceRoot"]),
@@ -6669,8 +6673,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         mcp_payload = {
             "agentId": normal_id,
             "serverId": "standalone-http",
-            "toolName": "agent.info",
-            "arguments": {},
+            "toolName": "file.read",
+            "arguments": {"path": "retained-mcp-result.txt"},
             "waitSeconds": 5,
         }
         validate_instance(document, schemas, "McpCallToolRequest", mcp_payload, "Hub HTTP mcp.callTool request")
@@ -6722,12 +6726,9 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         mcp_result = mcp_read.get("mcpResult", {})
         mcp_value = mcp_result.get("value", {})
         mcp_info = mcp_value.get("structuredContent", {}) if isinstance(mcp_value, dict) else {}
-        mcp_identity = mcp_info.get("identity", {}) if isinstance(mcp_info, dict) else {}
         if (
             mcp_result.get("status") != "included"
-            or mcp_identity.get("agentId") != "parity-http"
-            or mcp_identity.get("profile") != "normal"
-            or mcp_identity.get("transport") != "tunnel-stdio"
+            or mcp_info.get("content") != PROCESS_RETAINED_MCP_TEXT
         ):
             fail("Hub Full explicit MCP result", f"deferred downstream result was not retrievable intact: {mcp_read}")
 

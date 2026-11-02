@@ -71,7 +71,7 @@ Agent 本地 MCP 在 Secret 关闭时隐藏四个工具。Hub Full MCP 沿用固
 
 `upsert/delete` 必须观察同步成功，不能按查询等待预算降级写入。同一实例协调同步、定位和修改；其他客户端仍可能并发修改，不承诺跨客户端的原子身份唯一性。写请求已发出而无法确定远端结果时返回 `secret_write_outcome_unknown`，不自动重放；应先通过 Vaultwarden 客户端或后续同步核对，避免盲目重发。
 
-每个实际启动的同步任务在完成时产生一条 `low` 事件；请求复用任务或等待预算耗尽不会另外产生失败事件。`agent.info.secret.sync` 提供 `status`（未触发为 `null`，否则为 `syncing/failed/succeeded`）与 `lastTriggeredAt`。查询状态不触发同步；`lastTriggeredAt` 与密码库的 `lastSyncedAt` 含义不同。
+每个实际启动的同步任务在完成时产生一条 `low` 事件；请求复用任务或等待预算耗尽不会另外产生失败事件。`agent.info.secret` 提供 `syncStatus`（未触发为 `null`，否则为 `syncing/failed/succeeded`）与 `syncLastTriggeredAt`。查询状态不触发同步；`syncLastTriggeredAt` 与密码库的 `lastSyncedAt` 含义不同。
 
 ## 本地状态与敏感内容
 

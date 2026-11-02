@@ -310,18 +310,16 @@ Agentic 负责输入校验、按公开身份定位、确认、同步任务协调
 ```json
 {
   "secret": {
-    "sync": {
-      "status": "syncing",
-      "lastTriggeredAt": "2026-10-24T02:00:00Z"
-    }
+    "syncStatus": "syncing",
+    "syncLastTriggeredAt": "2026-10-24T02:00:00Z"
   }
 }
 ```
 
-- `status` 为 `syncing | failed | succeeded`；未触发时为 `null`。
-- `lastTriggeredAt` 为最近实际启动的同步任务的触发时间；未触发时为 `null`。复用任务和完成任务都不修改该触发时间。
+- `syncStatus` 为 `syncing | failed | succeeded`；未触发时为 `null`。
+- `syncLastTriggeredAt` 为最近实际启动的同步任务的触发时间；未触发时为 `null`。复用任务和完成任务都不修改该触发时间。
 - 成功、失败只由同步任务的实际终态决定，不能依据查询等待是否超时推断。
-- `lastTriggeredAt` 不等于读取结果中的 `lastSyncedAt`：后者来自 `bw` 记录的最后同步时间。
+- `syncLastTriggeredAt` 不等于读取结果中的 `lastSyncedAt`：后者来自 `bw` 记录的最后同步时间。
 - `agent.info` 仅观察现有状态，不为查询摘要主动触发同步或泄露密码库内容。
 
 ## 13. 敏感内容、回执与错误
