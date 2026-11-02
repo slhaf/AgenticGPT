@@ -9,3 +9,6 @@
 - 原有链路测试补齐 Room 目录；实际 MCP 链路同时覆盖不完整配置、CLI 启停、热更新、Room 路径和 Browser 资源不可用。
 - 实际 Room 调用以 MCP 协议错误返回路径问题，调整集成检查以识别该返回方式。
 - 远程完整 workspace 测试通过（567 通过、1 忽略）；远程格式与严格 Clippy 检查通过。
+- 远程 workspace 构建通过；接口一致性检查完成并返回 PASS。
+- 按既定范围开始部署到 laptop；部署脚本只选择 laptop，保留现有配置。
+- laptop 部署完成，发布文件校验一致；服务 active/running，重启计数为 0，本地 MCP 工具列表和 agent.info 均正常响应。
