@@ -142,7 +142,7 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 
 Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirmation` 对象：
 
-- 传入对象即主动请求确认；`reason` 必填，原文不超过 100 个 Unicode 字符，去除首尾空白后非空，用请求语气说明目的和影响。
+- 传入对象即主动请求确认；`reason` 必填，原文长度为 1–100 个 Unicode 字符，用请求语气说明目的和影响。
 - 可选 `method` 仅接受 ntfy/freedesktop，省略时沿用配置。
 - 旧 `acquire`、`needConfirm`／`confirmMethod` 字段及未知对象字段会被拒绝。
 - `allow_once` 可单次覆盖命令和路径策略的拒绝；明确拒绝或取消会中止操作。

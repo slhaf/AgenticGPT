@@ -34,8 +34,7 @@ pub(super) struct AcquireConfirmationArgs {
     #[schemars(
         with = "String",
         length(min = 1, max = 100),
-        regex(pattern = r"\S"),
-        description = "向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。"
+        description = "向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；长度为 1–100 个 Unicode 字符。"
     )]
     reason: ConfirmationReason,
     #[serde(default)]
@@ -66,8 +65,7 @@ pub(super) struct AcquireConfirmationNoScopeArgs {
     #[schemars(
         with = "String",
         length(min = 1, max = 100),
-        regex(pattern = r"\S"),
-        description = "向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。"
+        description = "向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；长度为 1–100 个 Unicode 字符。"
     )]
     reason: ConfirmationReason,
     #[serde(default)]

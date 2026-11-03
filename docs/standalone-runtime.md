@@ -335,7 +335,7 @@ GIF metadata 包含
 每项的 JSON envelope（若有图像则包含其 metadata）后面紧跟该项 image block；GIF 帧按时间顺序排列。纯文本响应及其现有响应边界不变。Search
 batch 除每次搜索自身的限制外，还保留 20,000 个文件和 128 MiB 的汇总扫描上限。
 
-`file.edit` 接受 `patch` 和可选的 `acquireConfirmation`。`file.read`／`file.search` 也接受同一确认对象；传入即主动请求，必填 `reason` 原文最多 100 个 Unicode 字符，且去除首尾空白后非空，可选 `method` 为 ntfy/freedesktop，不接受旧 `acquire` 字段。file 工具根据实际请求确定批准范围，不接受其中的 `read`／`write` 字段。主动批准可覆盖本次路径策略，明确拒绝或取消终止；超时、过期或不可用按配置回退，Confirm 复用失败结果而不会重复请求。
+`file.edit` 接受 `patch` 和可选的 `acquireConfirmation`。`file.read`／`file.search` 也接受同一确认对象；传入即主动请求，必填 `reason` 原文长度为 1–100 个 Unicode 字符，可选 `method` 为 ntfy/freedesktop，不接受旧 `acquire` 字段。file 工具根据实际请求确定批准范围，不接受其中的 `read`／`write` 字段。主动批准可覆盖本次路径策略，明确拒绝或取消终止；超时、过期或不可用按配置回退，Confirm 复用失败结果而不会重复请求。
 
 patch 使用 Codex apply-patch 语法，可一次新增、更新、删除或移动多个文件。所有源路径和目标路径都会依据现有路径策略解析，以确定性顺序加锁，
 并检查是否为 UTF-8 及是否不超过 8 MiB；操作在读取源内容、创建父目录和暂存前，对全部源路径、目标路径及需创建的父目录统一判定策略并按需取得一次批准。批准后重新核对目标身份，再读取、暂存和验证变更。对于 `Add File`，仅当请求路径通过既有路径策略时，

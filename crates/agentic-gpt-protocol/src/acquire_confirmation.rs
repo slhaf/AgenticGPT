@@ -32,9 +32,9 @@ impl<'de> Deserialize<'de> for ConfirmationReason {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if value.trim().is_empty() {
+        if value.is_empty() {
             return Err(serde::de::Error::custom(
-                "acquireConfirmation reason must not be blank",
+                "acquireConfirmation reason must be at least 1 character",
             ));
         }
         if value.chars().count() > 100 {

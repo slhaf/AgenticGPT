@@ -16,7 +16,7 @@ const PATCH_SCHEMA_DESCRIPTION: &str =
 
 fn acquire_confirmation_schema(allow_scope: bool) -> Value {
     let mut properties = json!({
-        "reason":{"type":"string","minLength":1,"maxLength":100,"pattern":"\\S","description":"向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；非空白，最多 100 个 Unicode 字符。"},
+        "reason":{"type":"string","minLength":1,"maxLength":100,"description":"向用户请求确认的文案；说明操作目的和主要影响，使用请求语气；长度为 1–100 个 Unicode 字符。"},
         "method":{"type":"string","enum":["ntfy","freedesktop"],"description":"可选确认提供方；省略沿用配置。"},
     });
     if allow_scope {

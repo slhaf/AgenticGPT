@@ -682,7 +682,7 @@ CLI 参数传入，路径列表只接受具体根。旧的 `pathPolicy`、`sandb
 
 ### 单次主动确认
 
-Process、文件及 tmux 请求使用可选 `acquireConfirmation` 对象；传入对象即主动请求确认，不传时按策略判定。对象的 `reason` 必填，原文不超过 100 个 Unicode 字符，去除首尾空白后必须非空；用自由的请求语气说明本次操作的目的和影响。可选 `method` 仅接受 `ntfy` 或 `freedesktop`，省略沿用配置。
+Process、文件及 tmux 请求使用可选 `acquireConfirmation` 对象；传入对象即主动请求确认，不传时按策略判定。对象的 `reason` 必填，原文长度为 1–100 个 Unicode 字符；用自由的请求语气说明本次操作的目的和影响。可选 `method` 仅接受 `ntfy` 或 `freedesktop`，省略沿用配置。
 
 主动确认的结果如下：
 
