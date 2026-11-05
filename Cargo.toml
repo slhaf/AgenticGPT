@@ -6,6 +6,7 @@ members = [
     "crates/agentic-apply-patch",
     "crates/agentic-browser-host",
 ]
+exclude = ["vendor/obscura"]
 resolver = "2"
 
 [workspace.package]

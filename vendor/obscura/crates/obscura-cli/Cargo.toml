@@ -1,0 +1,43 @@
+[package]
+name = "obscura-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "obscura"
+path = "src/main.rs"
+
+[[bin]]
+name = "obscura-worker"
+path = "src/worker.rs"
+
+[features]
+default = []
+stealth = ["obscura-browser/stealth", "obscura-net/stealth", "obscura-mcp/stealth"]
+render = ["obscura-browser/render", "obscura-cdp/render", "obscura-mcp/render"]
+
+[dependencies]
+obscura-browser = { workspace = true }
+obscura-mcp = { workspace = true }
+obscura-cdp = { workspace = true }
+obscura-dom = { workspace = true }
+obscura-net = { workspace = true }
+obscura-js = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
