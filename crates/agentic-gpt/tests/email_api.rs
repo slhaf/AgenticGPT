@@ -70,10 +70,8 @@ fn local_email_api_preserves_native_images_cursors_and_attachment_writes() {
         "Email fixture text. {} needle-final",
         "Long paragraph for cursor traversal. ".repeat(1800)
     );
-    let html = format!(
-        r#"<html><body><div style="height:1800px;background:#aa3322">first slice</div><div style="height:1800px;background:#225599">second slice</div></body></html>"#
-    );
-    fixture.seed(&id, &text, &html);
+    let html = r#"<html><body><div style="height:1800px;background:#aa3322">first slice</div><div style="height:1800px;background:#225599">second slice</div></body></html>"#;
+    fixture.seed(&id, &text, html);
 
     let listed = fixture.call("room.email.list", json!({}));
     assert_eq!(data(&listed)["items"][0]["id"], id);

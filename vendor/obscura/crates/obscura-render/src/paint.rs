@@ -4,7 +4,7 @@
 //! white page. Text rendering arrives with the text step; borders and images
 //! are later enhancements. Pure Rust (tiny-skia, CPU), deterministic, no system
 //! dependencies, so a screenshot is reproducible across hosts.
-//! Modified by AgenticGPT: canonicalize CID cache keys for MIME resources.
+//! Modified by AgenticGPT: canonicalize CID cache keys and retain email render resources.
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use obscura_dom::tree::DomTree;
@@ -257,6 +257,13 @@ impl RenderResourceCache {
             sync_miss_keys: HashSet::new(),
             loader: Box::new(loader),
         }
+    }
+
+    /// Retain every resource prepared by an email page instead of evicting
+    /// bytes under the browser cache's ordinary size/count budget.
+    pub fn set_unbounded_retention(&mut self) {
+        self.max_entries = usize::MAX;
+        self.max_bytes = usize::MAX;
     }
 
     /// Temporarily control the compatibility loader used by synchronous

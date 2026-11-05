@@ -700,7 +700,7 @@ pub(crate) fn validate_url(url: &Url, allow_private_network: bool) -> Result<(),
 /// itself so a new caller cannot read `file://` by forgetting the gate.
 pub(crate) async fn fetch_file_url(
     url: &Url,
-    max_response_bytes: usize,
+    max_response_bytes: Option<usize>,
     allow_file_access: bool,
 ) -> Result<Response, ObscuraNetError> {
     if !allow_file_access {
@@ -711,16 +711,18 @@ pub(crate) async fn fetch_file_url(
     let path = url
         .to_file_path()
         .map_err(|_| ObscuraNetError::Network("Invalid file URL".to_string()))?;
-    if let Ok(metadata) = tokio::fs::metadata(&path).await {
-        if metadata.len() > max_response_bytes as u64 {
-            return Err(response_too_large(url, max_response_bytes));
+    if let (Some(limit), Ok(metadata)) = (max_response_bytes, tokio::fs::metadata(&path).await) {
+        if metadata.len() > limit as u64 {
+            return Err(response_too_large(url, limit));
         }
     }
     let body = tokio::fs::read(&path)
         .await
         .map_err(|e| ObscuraNetError::Network(format!("Failed to read file: {}", e)))?;
-    if body.len() > max_response_bytes {
-        return Err(response_too_large(url, max_response_bytes));
+    if let Some(limit) = max_response_bytes {
+        if body.len() > limit {
+            return Err(response_too_large(url, limit));
+        }
     }
 
     let mut headers = HashMap::new();
@@ -801,8 +803,11 @@ fn validate_reqwest_cors_response(
 fn reject_oversized_content_length(
     headers: &HeaderMap,
     url: &Url,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<(), ObscuraNetError> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
     let Some(value) = headers.get(reqwest::header::CONTENT_LENGTH) else {
         return Ok(());
     };
@@ -822,20 +827,24 @@ fn reject_oversized_content_length(
 async fn read_reqwest_body_limited(
     mut response: reqwest::Response,
     url: &Url,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<Vec<u8>, ObscuraNetError> {
     reject_oversized_content_length(response.headers(), url, limit)?;
-    let capacity = response
-        .content_length()
-        .and_then(|length| usize::try_from(length).ok())
-        .unwrap_or(0)
-        .min(limit);
+    let capacity = limit.map_or(0, |limit| {
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(0)
+            .min(limit)
+    });
     let mut body = Vec::with_capacity(capacity);
     while let Some(chunk) = response.chunk().await.map_err(|error| {
         ObscuraNetError::Network(format!("Failed to read body: {}", error_chain(&error)))
     })? {
-        if chunk.len() > limit.saturating_sub(body.len()) {
-            return Err(response_too_large(url, limit));
+        if let Some(limit) = limit {
+            if chunk.len() > limit.saturating_sub(body.len()) {
+                return Err(response_too_large(url, limit));
+            }
         }
         body.extend_from_slice(&chunk);
     }
@@ -851,6 +860,10 @@ pub struct ObscuraHttpClient {
     pub extra_headers: RwLock<HashMap<String, String>>,
     pub interceptor: RwLock<Option<Box<dyn RequestInterceptor + Send + Sync>>>,
     pub timeout: Duration,
+    // Modified for AgenticGPT: email rendering consumes complete response bodies.
+    unlimited_response_bodies: bool,
+    // Modified for AgenticGPT: email rendering lets resource loading finish without a time cap.
+    timeout_disabled: bool,
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
     pub block_trackers: bool,
     resource_loader: std::sync::Mutex<ResourceLoaderState>,
@@ -1070,6 +1083,8 @@ impl ObscuraHttpClient {
             interceptor: RwLock::new(None),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             timeout: Duration::from_secs(30),
+            unlimited_response_bodies: false,
+            timeout_disabled: false,
             block_trackers: false,
             resource_loader: std::sync::Mutex::new(ResourceLoaderState::default()),
             allow_private_network,
@@ -1085,11 +1100,20 @@ impl ObscuraHttpClient {
         self.allow_file_access.store(allow, Ordering::Relaxed);
     }
 
+    /// Modified for AgenticGPT: let the email renderer fetch complete resources.
+    pub fn allow_unlimited_response_bodies(&mut self) {
+        self.unlimited_response_bodies = true;
+    }
+
+    /// Modified for AgenticGPT: disable the transport timeout for email resources.
+    pub fn disable_transport_timeout(&mut self) {
+        self.timeout_disabled = true;
+    }
+
     async fn get_client(&self) -> &Client {
         self.client.get_or_init(|| async {
             let mut builder = Client::builder()
                 .redirect(Policy::none())
-                .timeout(self.timeout)
                 .danger_accept_invalid_certs(false)
                 // Read a folded header line (obs-fold) as browsers do instead of
                 // failing the response.
@@ -1097,6 +1121,10 @@ impl ObscuraHttpClient {
                 // SSRF guard: reject hostnames that resolve to a private/loopback IP.
                 .dns_resolver(Arc::new(SsrfGuardResolver::new(self.allow_private_network)))
 ;
+
+            if !self.timeout_disabled {
+                builder = builder.timeout(self.timeout);
+            }
 
             if std::env::var_os("SSL_CERT_FILE").is_some()
                 || std::env::var_os("SSL_CERT_DIR").is_some()
@@ -1421,7 +1449,12 @@ impl ObscuraHttpClient {
         validate_request_mode(&request, url)?;
 
         if url.scheme() == "file" {
-            return fetch_file_url(url, request.max_response_bytes, self.allow_file_access()).await;
+            return fetch_file_url(
+                url,
+                (!self.unlimited_response_bodies).then_some(request.max_response_bytes),
+                self.allow_file_access(),
+            )
+            .await;
         }
 
         let mut method = initial_method;
@@ -1682,7 +1715,7 @@ impl ObscuraHttpClient {
             let body_bytes = read_reqwest_body_limited(
                 resp,
                 &current_url,
-                request.max_response_bytes,
+                (!self.unlimited_response_bodies).then_some(request.max_response_bytes),
             )
             .await?;
             drop(in_flight);
@@ -3053,7 +3086,7 @@ mod file_access_tests {
     #[tokio::test]
     async fn loader_refuses_file_urls_without_the_opt_in() {
         let (_dir, url) = fixture();
-        let error = fetch_file_url(&url, 1024, false)
+        let error = fetch_file_url(&url, Some(1024), false)
             .await
             .expect_err("file:// must be refused without allow_file_access")
             .to_string();
@@ -3063,7 +3096,7 @@ mod file_access_tests {
     #[tokio::test]
     async fn loader_reads_file_urls_with_the_opt_in() {
         let (_dir, url) = fixture();
-        let response = fetch_file_url(&url, 1024, true).await.expect("opted in");
+        let response = fetch_file_url(&url, Some(1024), true).await.expect("opted in");
         assert_eq!(response.body, b"local-secret");
         assert_eq!(response.headers.get("content-type").unwrap(), "text/html");
     }

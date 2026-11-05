@@ -113,7 +113,12 @@ fn load_web_storage(storage: &OriginStorage, dir: Option<&PathBuf>) {
 
 impl BrowserContext {
     pub fn new(id: String) -> Self {
-        Self::_new_inner(id, None, false, None, None, false)
+        Self::_new_inner(id, None, false, None, None, false, false)
+    }
+
+    /// Modified for AgenticGPT: construct a context for rendering complete email resources.
+    pub fn for_email_rendering(id: String) -> Self {
+        Self::_new_inner(id, None, false, None, None, true, true)
     }
 
     /// Create a BrowserContext with an optional storage directory.
@@ -123,7 +128,7 @@ impl BrowserContext {
         id: String,
         storage_dir: Option<PathBuf>,
     ) -> Self {
-        Self::_new_inner(id, None, false, None, storage_dir, false)
+        Self::_new_inner(id, None, false, None, storage_dir, false, false)
     }
 
     /// Create a BrowserContext with full options including storage_dir.
@@ -134,7 +139,7 @@ impl BrowserContext {
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, false)
+        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, false, false)
     }
 
     /// Variant that also accepts the `allow_private_network` opt-in. All
@@ -148,7 +153,15 @@ impl BrowserContext {
         storage_dir: Option<PathBuf>,
         allow_private_network: bool,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, allow_private_network)
+        Self::_new_inner(
+            id,
+            proxy_url,
+            stealth,
+            user_agent,
+            storage_dir,
+            allow_private_network,
+            false,
+        )
     }
 
     fn _new_inner(
@@ -158,6 +171,7 @@ impl BrowserContext {
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
         allow_private_network: bool,
+        email_rendering: bool,
     ) -> Self {
         let cookie_jar = Arc::new(CookieJar::new());
 
@@ -182,6 +196,10 @@ impl BrowserContext {
             proxy_url.as_deref(),
             allow_private_network,
         );
+        if email_rendering {
+            client.disable_transport_timeout();
+            client.allow_unlimited_response_bodies();
+        }
         if stealth {
             client.block_trackers = true;
         }
@@ -242,7 +260,7 @@ impl BrowserContext {
         stealth: bool,
         user_agent: Option<String>,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, None, false)
+        Self::_new_inner(id, proxy_url, stealth, user_agent, None, false, false)
     }
 
     pub fn with_proxy(id: String, proxy_url: Option<String>) -> Self {

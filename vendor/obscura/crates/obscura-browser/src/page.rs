@@ -1,4 +1,5 @@
-// Modified by AgenticGPT: add in-memory HTML navigation and MIME CID resources.
+// Modified by AgenticGPT: add in-memory HTML navigation, MIME CID resources,
+// and uncapped email resource preparation through the shared page transport.
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -370,6 +371,9 @@ pub struct Page {
     pub network_events: Vec<NetworkEvent>,
     /// MIME parts addressable through `cid:` URLs in the current page.
     cid_resources: std::collections::HashMap<String, CidResource>,
+    /// Email HTML pages load every discovered renderer resource rather than
+    /// applying the browser's general warmup candidate cap.
+    load_all_render_resources: bool,
     response_bodies: std::collections::HashMap<String, StoredResponseBody>,
     response_body_order: std::collections::VecDeque<String>,
     network_event_counter: u32,
@@ -1205,6 +1209,7 @@ impl Page {
             pending_history_traversal: std::sync::Mutex::new(None),
             network_events: Vec::new(),
             cid_resources: std::collections::HashMap::new(),
+            load_all_render_resources: false,
             response_bodies: std::collections::HashMap::new(),
             response_body_order: std::collections::VecDeque::new(),
             network_event_counter: 0,
@@ -2061,6 +2066,11 @@ impl Page {
         }
 
         #[cfg(feature = "render")]
+        if self.load_all_render_resources {
+            rt.set_email_render_resource_mode();
+        }
+
+        #[cfg(feature = "render")]
         for resource in self.cid_resources.values() {
             rt.seed_render_resource(cid_url(&resource.content_id), Some(resource.bytes.clone()));
         }
@@ -2152,10 +2162,11 @@ impl Page {
                 continue;
             }
             roots.push((AuthorStylesheetTarget::Linked(link_index), key.clone(), None));
-            if scheduled.insert(key.clone()) {
-                if scheduled.len() <= MAX_STYLESHEET_RESOURCES {
-                    pending.push((key, resolved, 0u8));
-                }
+            if scheduled.insert(key.clone())
+                && (self.load_all_render_resources
+                    || scheduled.len() <= MAX_STYLESHEET_RESOURCES)
+            {
+                pending.push((key, resolved, 0usize));
             }
         }
         for (style_index, import) in inline_imports {
@@ -2175,8 +2186,11 @@ impl Page {
                 key.clone(),
                 import.media,
             ));
-            if scheduled.insert(key.clone()) && scheduled.len() <= MAX_STYLESHEET_RESOURCES {
-                pending.push((key, resolved, 1u8));
+            if scheduled.insert(key.clone())
+                && (self.load_all_render_resources
+                    || scheduled.len() <= MAX_STYLESHEET_RESOURCES)
+            {
+                pending.push((key, resolved, 1usize));
             }
         }
 
@@ -2264,7 +2278,9 @@ impl Page {
                 }
                 let css = obscura_net::decode_non_html(&response.body, response.content_type());
                 let (imports, rules) = split_css_imports(&css);
-                let imports = if depth < MAX_STYLESHEET_IMPORT_DEPTH {
+                let imports = if self.load_all_render_resources
+                    || depth < usize::from(MAX_STYLESHEET_IMPORT_DEPTH)
+                {
                     imports
                 } else {
                     Vec::new()
@@ -2280,7 +2296,9 @@ impl Page {
                     },
                 );
 
-                if depth >= MAX_STYLESHEET_IMPORT_DEPTH {
+                if !self.load_all_render_resources
+                    && depth >= usize::from(MAX_STYLESHEET_IMPORT_DEPTH)
+                {
                     continue;
                 }
                 for import in imports {
@@ -2291,7 +2309,9 @@ impl Page {
                     if aliases.contains_key(&import_key) || scheduled.contains(&import_key) {
                         continue;
                     }
-                    if scheduled.len() >= MAX_STYLESHEET_RESOURCES {
+                    if !self.load_all_render_resources
+                        && scheduled.len() >= MAX_STYLESHEET_RESOURCES
+                    {
                         tracing::warn!(
                             "stylesheet resource cap reached at {} resources",
                             MAX_STYLESHEET_RESOURCES
@@ -2349,25 +2369,22 @@ impl Page {
     /// load-delaying dynamic scripts keep their distinct lifecycle semantics.
     async fn drive_pending_scripts(
         js: &mut ObscuraJsRuntime,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
         pending: fn(&mut ObscuraJsRuntime) -> bool,
         label: &str,
     ) -> bool {
         while pending(js) {
-            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
-            else {
-                return false;
-            };
-            if remaining.is_zero() {
+            let poll_budget = deadline
+                .map(|deadline| {
+                    deadline.saturating_duration_since(tokio::time::Instant::now())
+                });
+            if poll_budget.is_some_and(|remaining| remaining.is_zero()) {
                 return false;
             }
-            let poll_budget = remaining.min(tokio::time::Duration::from_millis(25));
-            match tokio::time::timeout(
-                poll_budget,
-                js.run_load_delaying_event_loop_tick(),
-            )
-            .await
-            {
+            let poll_budget = poll_budget
+                .map(|remaining| remaining.min(tokio::time::Duration::from_millis(25)))
+                .unwrap_or_else(|| tokio::time::Duration::from_millis(25));
+            match tokio::time::timeout(poll_budget, js.run_load_delaying_event_loop_tick()).await {
                 Ok(Ok(_idle)) => {
                     if pending(js) {
                         tokio::task::yield_now().await;
@@ -2397,7 +2414,7 @@ impl Page {
 
     async fn drive_load_delaying_scripts(
         js: &mut ObscuraJsRuntime,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> bool {
         Self::drive_pending_scripts(
             js,
@@ -2410,7 +2427,7 @@ impl Page {
 
     async fn drive_parser_blocking_scripts(
         js: &mut ObscuraJsRuntime,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> bool {
         Self::drive_pending_scripts(
             js,
@@ -2423,6 +2440,7 @@ impl Page {
 
     async fn execute_scripts_with_module_budget(&mut self, module_budget_override: Option<u64>) {
         let scripts_started = std::time::Instant::now();
+        let unbounded = self.load_all_render_resources && module_budget_override.is_none();
         tracing::info!(
             "execute_scripts called, js runtime exists: {}",
             self.js.is_some()
@@ -2444,8 +2462,9 @@ impl Page {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(30_000);
-        let script_deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_millis(script_deadline_ms);
+        let script_deadline = (!unbounded).then(|| {
+            tokio::time::Instant::now() + tokio::time::Duration::from_millis(script_deadline_ms)
+        });
 
         // Hard backstop over the WHOLE script-execution phase. Inline scripts
         // run back-to-back with no await between them, so neither the soft
@@ -2453,10 +2472,13 @@ impl Page {
         // can interrupt a page that burns the budget across many synchronous
         // scripts (the real-world SPA / anti-bot busy-loop hang). This watchdog
         // terminates the isolate if cumulative synchronous script work overruns.
-        let exec_wd = self
-            .js
-            .as_mut()
-            .map(|js| js.arm_watchdog(std::time::Duration::from_millis(script_deadline_ms + 1000)));
+        let exec_wd = if unbounded {
+            None
+        } else {
+            self.js
+                .as_mut()
+                .map(|js| js.arm_watchdog(std::time::Duration::from_millis(script_deadline_ms + 1000)))
+        };
 
         #[derive(Debug, Clone, Copy)]
         enum ScriptKind {
@@ -2690,19 +2712,22 @@ impl Page {
         // and matches what real Chrome does for a given origin.
         use futures::StreamExt as _;
         let fetch_stream = futures::stream::iter(fetch_futures).buffer_unordered(16);
-        let fetch_results = match tokio::time::timeout_at(
-            script_deadline,
-            fetch_stream.collect::<Vec<_>>(),
-        )
-        .await
-        {
-            Ok(results) => results,
-            Err(_) => {
-                tracing::warn!(
-                    "execute_scripts: fetch deadline reached, some scripts may not have loaded"
-                );
-                Vec::new()
-            }
+        let fetch_results = match script_deadline {
+            Some(deadline) => match tokio::time::timeout_at(
+                deadline,
+                fetch_stream.collect::<Vec<_>>(),
+            )
+            .await
+            {
+                Ok(results) => results,
+                Err(_) => {
+                    tracing::warn!(
+                        "execute_scripts: fetch deadline reached, some scripts may not have loaded"
+                    );
+                    Vec::new()
+                }
+            },
+            None => fetch_stream.collect::<Vec<_>>().await,
         };
 
         let mut fetched: std::collections::HashMap<usize, (String, String, obscura_net::Response)> =
@@ -2767,7 +2792,9 @@ impl Page {
         // idle-waits ~10s) cannot block navigation completion. A page whose
         // body is still an empty shell IS the SPA (issue #205), so give it the
         // full script budget and the app module still mounts.
-        let module_budget_ms: u64 = {
+        let module_budget_ms: Option<u64> = if unbounded {
+            None
+        } else {
             let body_nodes = self
                 .js
                 .as_ref()
@@ -2789,17 +2816,17 @@ impl Page {
             });
             // A rendered body has hundreds of descendants; an unmounted Vite/Next
             // shell is <root> plus maybe a spinner.
-            if module_budget_override.is_some() || body_nodes > 50 {
+            Some(if module_budget_override.is_some() || body_nodes > 50 {
                 short_ms
             } else {
                 script_deadline_ms
-            }
+            })
         };
         // V8 can flag an overrun while a synchronous renderer host call is in
         // progress, but it cannot preempt Rust after entering that call. Allow
         // one bounded, finite style/layout flush without weakening the
         // page-wide script deadline. Private test overrides keep zero grace.
-        let module_hostcall_grace_ms = if module_budget_override.is_some() {
+        let module_hostcall_grace_ms = if unbounded || module_budget_override.is_some() {
             0
         } else {
             std::env::var("OBSCURA_MODULE_HOSTCALL_GRACE_MS")
@@ -2813,13 +2840,16 @@ impl Page {
             Module {
                 prepared: obscura_js::runtime::PreparedModule,
                 url: Option<String>,
-                remaining_active_ms: u64,
+                remaining_active_ms: Option<u64>,
                 graph_elapsed_ms: u64,
                 queued_at: std::time::Instant,
             },
         }
 
-        let remaining_budget_ms = |deadline: tokio::time::Instant| -> Option<u64> {
+        let remaining_budget_ms = |deadline: Option<tokio::time::Instant>| -> Option<Option<u64>> {
+            let Some(deadline) = deadline else {
+                return Some(None);
+            };
             let remaining = deadline.checked_duration_since(tokio::time::Instant::now())?;
             if remaining.is_zero() {
                 return None;
@@ -2827,7 +2857,7 @@ impl Page {
             let millis = remaining
                 .as_millis()
                 .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0));
-            Some(millis.min(u128::from(u64::MAX)) as u64)
+            Some(Some(millis.min(u128::from(u64::MAX)) as u64))
         };
         let elapsed_ms_ceil = |elapsed: std::time::Duration| -> u64 {
             elapsed
@@ -2836,12 +2866,17 @@ impl Page {
                 .max(1)
                 .min(u128::from(u64::MAX)) as u64
         };
-        let evaluation_budget_ms = |remaining_active_ms: u64| -> Option<u64> {
-            let remaining_page_ms = remaining_budget_ms(script_deadline)?;
+        let evaluation_budget_ms = |remaining_active_ms: Option<u64>| -> Option<Option<u64>> {
+            let Some(remaining_active_ms) = remaining_active_ms else {
+                return Some(None);
+            };
+            let Some(Some(remaining_page_ms)) = remaining_budget_ms(script_deadline) else {
+                return None;
+            };
             let budget = remaining_active_ms
                 .saturating_add(module_hostcall_grace_ms)
                 .min(remaining_page_ms);
-            (budget != 0).then_some(budget)
+            (budget != 0).then_some(Some(budget))
         };
 
         let execute_classic =
@@ -2866,7 +2901,12 @@ impl Page {
                                 "<current-script>",
                                 &format!("globalThis.__currentScriptNid={};", script.nid),
                             );
-                            if let Err(error) = js.execute_script_guarded(&execution_url, &code) {
+                            let result = if unbounded {
+                                js.execute_script(&execution_url, &code)
+                            } else {
+                                js.execute_script_guarded(&execution_url, &code)
+                            };
+                            if let Err(error) = result {
                                 tracing::warn!("Script error ({}): {}", execution_url, error);
                             }
                             let _ = js.execute_script(
@@ -2881,9 +2921,12 @@ impl Page {
                             "<current-script>",
                             &format!("globalThis.__currentScriptNid={};", script.nid),
                         );
-                        if let Err(error) =
+                        let result = if unbounded {
+                            js.execute_script(&script.base_url, &script.inline)
+                        } else {
                             js.execute_script_guarded(&script.base_url, &script.inline)
-                        {
+                        };
+                        if let Err(error) = result {
                             tracing::warn!("Inline script error: {}", error);
                         }
                         let _ = js
@@ -2898,7 +2941,7 @@ impl Page {
         // register at their exact position; module graphs start there too, but
         // evaluation of non-async modules remains post-parse.
         for (index, script) in all_scripts.iter().enumerate() {
-            if tokio::time::Instant::now() >= script_deadline {
+            if script_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 tracing::warn!(
                     "execute_scripts: deadline reached, skipping {} remaining scripts",
                     all_scripts.len() - index,
@@ -2943,7 +2986,11 @@ impl Page {
                         tracing::warn!("ES module budget exhausted before graph preparation");
                         continue;
                     };
-                    let prepare_budget_ms = module_budget_ms.min(remaining_page_ms);
+                    let prepare_budget_ms = match (module_budget_ms, remaining_page_ms) {
+                        (None, _) => None,
+                        (Some(module), Some(page)) => Some(module.min(page)),
+                        (Some(module), None) => Some(module),
+                    };
                     let prepare_started = std::time::Instant::now();
                     let (prepared, module_url) = if let Some(src) = &script.src {
                         let full_url = if src.starts_with("http://")
@@ -2960,7 +3007,10 @@ impl Page {
                         };
                         tracing::info!("Preparing ES module graph: {}", full_url);
                         let result = match &mut self.js {
-                            Some(js) => js.prepare_module(&full_url, prepare_budget_ms).await,
+                            Some(js) => match prepare_budget_ms {
+                                Some(budget_ms) => js.prepare_module(&full_url, budget_ms).await,
+                                None => js.prepare_module_unbounded(&full_url).await,
+                            },
                             None => continue,
                         };
                         tracing::debug!(
@@ -2980,14 +3030,23 @@ impl Page {
                         }
                     } else {
                         let result = match &mut self.js {
-                            Some(js) => {
-                                js.prepare_inline_module(
-                                    &script.inline,
-                                    &script.base_url,
-                                    prepare_budget_ms,
-                                )
-                                .await
-                            }
+                            Some(js) => match prepare_budget_ms {
+                                Some(budget_ms) => {
+                                    js.prepare_inline_module(
+                                        &script.inline,
+                                        &script.base_url,
+                                        budget_ms,
+                                    )
+                                    .await
+                                }
+                                None => {
+                                    js.prepare_inline_module_unbounded(
+                                        &script.inline,
+                                        &script.base_url,
+                                    )
+                                    .await
+                                }
+                            },
                             None => continue,
                         };
                         tracing::debug!(
@@ -3007,12 +3066,13 @@ impl Page {
                         }
                     };
                     let graph_elapsed_ms = elapsed_ms_ceil(prepare_started.elapsed());
-                    let remaining_active_ms = module_budget_ms.saturating_sub(graph_elapsed_ms);
-                    if remaining_active_ms == 0 {
+                    let remaining_active_ms = prepare_budget_ms
+                        .map(|budget_ms| budget_ms.saturating_sub(graph_elapsed_ms));
+                    if remaining_active_ms == Some(0) {
                         tracing::warn!(
                             module = module_url.as_deref().unwrap_or("<inline>"),
                             graph_elapsed_ms,
-                            active_budget_ms = module_budget_ms,
+                            active_budget_ms = ?module_budget_ms,
                             "ES module exhausted its active budget during graph preparation",
                         );
                         continue;
@@ -3048,10 +3108,12 @@ impl Page {
                         let queue_wait_ms = queued_at.elapsed().as_millis();
                         let evaluation_started = std::time::Instant::now();
                         let result = match &mut self.js {
-                            Some(js) => {
-                                js.evaluate_prepared_module(prepared, evaluation_budget_ms)
-                                    .await
-                            }
+                            Some(js) => match evaluation_budget_ms {
+                                Some(budget_ms) => {
+                                    js.evaluate_prepared_module(prepared, budget_ms).await
+                                }
+                                None => js.evaluate_prepared_module_unbounded(prepared).await,
+                            },
                             None => continue,
                         };
                         tracing::debug!(
@@ -3089,7 +3151,7 @@ impl Page {
         }
 
         for scheduled in post_parse {
-            if tokio::time::Instant::now() >= script_deadline {
+            if script_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 tracing::warn!("execute_scripts: deadline reached during post-parse scripts");
                 break;
             }
@@ -3128,10 +3190,12 @@ impl Page {
                     let queue_wait_ms = queued_at.elapsed().as_millis();
                     let evaluation_started = std::time::Instant::now();
                     let result = match &mut self.js {
-                        Some(js) => {
-                            js.evaluate_prepared_module(prepared, evaluation_budget_ms)
-                                .await
-                        }
+                        Some(js) => match evaluation_budget_ms {
+                            Some(budget_ms) => {
+                                js.evaluate_prepared_module(prepared, budget_ms).await
+                            }
+                            None => js.evaluate_prepared_module_unbounded(prepared).await,
+                        },
                         None => continue,
                     };
                     tracing::debug!(
@@ -3202,7 +3266,7 @@ impl Page {
         tracing::debug!(
             phase = "script-execution-total",
             elapsed_ms = scripts_started.elapsed().as_millis(),
-            budget_ms = script_deadline_ms,
+            budget_ms = ?(!unbounded).then_some(script_deadline_ms),
             "script execution phase complete",
         );
         self.sync_js_network_events();
@@ -3230,7 +3294,14 @@ impl Page {
         body: &str,
     ) -> Result<(), PageError> {
         self.cid_resources.clear();
-        self.navigate_with_wait_post_response(url_str, wait_until, method, body, None)
+        self.navigate_with_wait_post_response(
+            url_str,
+            wait_until,
+            method,
+            body,
+            Some(self.navigation_timeout()),
+            None,
+        )
             .await
     }
 
@@ -3266,6 +3337,7 @@ impl Page {
             crate::lifecycle::WaitUntil::Load,
             "GET",
             "",
+            None,
             Some(response),
         )
         .await
@@ -3277,40 +3349,33 @@ impl Page {
         wait_until: crate::lifecycle::WaitUntil,
         method: &str,
         body: &str,
+        navigation_timeout: Option<std::time::Duration>,
         initial_response: Option<Response>,
     ) -> Result<(), PageError> {
-        // Hard ceiling on a single end-to-end navigation. Without this a slow
-        // primary fetch or a runaway settle loop can hold the V8 lock for
-        // arbitrarily long (we've measured 60+ seconds on JS-heavy news
-        // sites), wedging every other in-flight CDP request because the
-        // dispatcher holds the lock across the entire handler. 30 seconds
-        // matches reqwest's default per-request timeout — the worst case is
-        // one slow primary GET plus one slow JS-redirect chain step. Override
-        // with `OBSCURA_NAV_TIMEOUT_MS=NN`, or set a page-scoped deadline when
-        // the automation request already has an explicit timeout.
-        let nav_timeout = self.navigation_timeout();
-        let nav_timeout_ms = duration_millis_u64(nav_timeout);
-
-        let result = match tokio::time::timeout(
-            nav_timeout,
-            self.navigate_with_wait_post_inner(
-                url_str,
-                wait_until,
-                method,
-                body,
-                "",
-                initial_response,
-            ),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => {
-                self.lifecycle = crate::lifecycle::LifecycleState::Failed;
-                Err(PageError::NetworkError(format!(
-                    "navigation exceeded {nav_timeout_ms}ms deadline"
-                )))
+        let deadline = navigation_timeout
+            .map(|timeout| tokio::time::Instant::now() + timeout);
+        let navigation = self.navigate_with_wait_post_inner(
+            url_str,
+            wait_until,
+            method,
+            body,
+            "",
+            deadline,
+            initial_response,
+        );
+        let result = if let Some(nav_timeout) = navigation_timeout {
+            let nav_timeout_ms = duration_millis_u64(nav_timeout);
+            match tokio::time::timeout(nav_timeout, navigation).await {
+                Ok(result) => result,
+                Err(_) => {
+                    self.lifecycle = crate::lifecycle::LifecycleState::Failed;
+                    Err(PageError::NetworkError(format!(
+                        "navigation exceeded {nav_timeout_ms}ms deadline"
+                    )))
+                }
             }
+        } else {
+            navigation.await
         };
         if result.is_ok() {
             self.push_history(self.url_string());
@@ -3576,6 +3641,7 @@ impl Page {
         method: &str,
         body: &str,
         initial_referrer: &str,
+        deadline: Option<tokio::time::Instant>,
         initial_response: Option<Response>,
     ) -> Result<(), PageError> {
         // file:// is a local file read. Every client route (CLI, CDP's
@@ -3588,7 +3654,6 @@ impl Page {
                 "file:// navigation is disabled for this browser context: {url_str}"
             )));
         }
-        let deadline = tokio::time::Instant::now() + self.navigation_timeout();
         self.network_events.clear();
         let mut current_url = url_str.to_string();
         let mut current_method = method.to_string();
@@ -3661,9 +3726,10 @@ impl Page {
         method: &str,
         body: &str,
         referrer: &str,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
         synthetic_response: Option<Response>,
     ) -> Result<(), PageError> {
+        self.load_all_render_resources = synthetic_response.is_some();
         let url = Url::parse(url_str).map_err(|e| PageError::InvalidUrl(e.to_string()))?;
         self.navigation_timing = NavigationTiming::default();
 
@@ -3967,12 +4033,19 @@ impl Page {
     #[cfg(test)]
     async fn wait_for_network_idle(&mut self, threshold: u32) -> Result<(), PageError> {
         let deadline = tokio::time::Instant::now() + self.navigation_timeout();
-        self.wait_for_network_idle_until(threshold, deadline).await
+        self.wait_for_network_idle_until(threshold, Some(deadline)).await
     }
 
-    async fn wait_for_network_idle_until(&mut self, threshold: u32, deadline: tokio::time::Instant) -> Result<(), PageError> {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let netidle_wd = self.js.as_mut().map(|js| js.arm_watchdog(remaining));
+    async fn wait_for_network_idle_until(
+        &mut self,
+        threshold: u32,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), PageError> {
+        let netidle_wd = deadline.and_then(|deadline| {
+            self.js.as_mut().map(|js| {
+                js.arm_watchdog(deadline.saturating_duration_since(tokio::time::Instant::now()))
+            })
+        });
         let mut idle_since: Option<tokio::time::Instant> = None;
 
         let reached_idle = loop {
@@ -3981,7 +4054,9 @@ impl Page {
             let active = active + self.stealth_client.as_ref().map_or(0, |client| client.active_requests());
             let now = tokio::time::Instant::now();
 
-            if now >= deadline { break false; }
+            if deadline.is_some_and(|deadline| now >= deadline) {
+                break false;
+            }
             if active <= threshold {
                 if idle_since.is_none() {
                     idle_since = Some(now);
@@ -3998,8 +4073,12 @@ impl Page {
             // An idle runtime can stay parked. Wake at the existing quiet
             // window or hard deadline instead of adding a final full slice.
             let readiness_deadline = idle_since
-                .map_or(deadline, |since| since + tokio::time::Duration::from_millis(500))
-                .min(deadline);
+                .map(|since| since + tokio::time::Duration::from_millis(500))
+                .or(deadline)
+                .unwrap_or_else(|| now + tokio::time::Duration::from_millis(100));
+            let readiness_deadline = deadline
+                .map(|deadline| readiness_deadline.min(deadline))
+                .unwrap_or(readiness_deadline);
             if let Some(js) = &mut self.js {
                 let next_check = readiness_deadline.min(now + tokio::time::Duration::from_millis(50));
                 crate::idle_deadline::wait_for_activity(
@@ -4029,7 +4108,14 @@ impl Page {
             Ok(())
         } else {
             self.lifecycle = LifecycleState::Failed;
-            Err(PageError::NetworkError("network idle exceeded the navigation deadline".into()))
+            Err(PageError::NetworkError(
+                if deadline.is_some() {
+                    "network idle exceeded the navigation deadline"
+                } else {
+                    "network idle event loop was terminated"
+                }
+                .into(),
+            ))
         }
     }
 
@@ -4182,9 +4268,12 @@ impl Page {
 
         let mut loadable = Vec::new();
         let mut rejected = Vec::new();
-        // Preserve the historical warmup bound. Anything beyond this batch
-        // is reported again by a later cache-only layout.
-        for (url, profile, is_font) in candidates.into_iter().take(MAX_STYLESHEET_RESOURCES) {
+        let candidate_limit = if self.load_all_render_resources {
+            candidates.len()
+        } else {
+            MAX_STYLESHEET_RESOURCES
+        };
+        for (url, profile, is_font) in candidates.into_iter().take(candidate_limit) {
             if subresource_allowed(Some(&document_url), &url) && !self.should_block_url(&url) {
                 loadable.push((url, profile, is_font));
             } else {
@@ -4294,7 +4383,11 @@ impl Page {
                         None => js.seed_render_resource(url, None),
                     }
                 }
-                let mut requests = js.mark_render_resources_in_flight(loadable);
+                let mut requests = if self.load_all_render_resources {
+                    js.mark_all_render_resources_in_flight(loadable)
+                } else {
+                    js.mark_render_resources_in_flight(loadable)
+                };
                 requests.extend(js.take_render_resource_requests());
                 js.start_render_resource_loads(requests)
             }
@@ -5307,7 +5400,13 @@ impl Page {
         tokio::time::timeout(
             nav_timeout,
             self.navigate_with_wait_post_inner(
-                url, crate::lifecycle::WaitUntil::Load, method, body, &source_url, None,
+                url,
+                crate::lifecycle::WaitUntil::Load,
+                method,
+                body,
+                &source_url,
+                Some(tokio::time::Instant::now() + nav_timeout),
+                None,
             ),
         ).await.map_err(|_| {
             self.lifecycle = crate::lifecycle::LifecycleState::Failed;
@@ -9362,7 +9461,7 @@ mod tests {
 
         let completed = super::Page::drive_load_delaying_scripts(
             page.js.as_mut().unwrap(),
-            deadline,
+            Some(deadline),
         )
         .await;
 
@@ -9433,7 +9532,7 @@ mod tests {
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let completed =
-            super::Page::drive_load_delaying_scripts(page.js.as_mut().unwrap(), deadline).await;
+            super::Page::drive_load_delaying_scripts(page.js.as_mut().unwrap(), Some(deadline)).await;
 
         assert!(
             completed,

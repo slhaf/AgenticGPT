@@ -364,14 +364,7 @@ async fn render_document(request: WorkerRequest) -> Result<WorkerResponse, Strin
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let mut context = BrowserContext::with_storage_and_network(
-        "email-render".to_owned(),
-        None,
-        false,
-        None,
-        None,
-        true,
-    );
+    let mut context = BrowserContext::for_email_rendering("email-render".to_owned());
     context.set_allow_file_access(true);
     let mut page = Page::new("email-render".to_owned(), Arc::new(context));
     page.set_viewport((WIDTH, VIEWPORT_HEIGHT));

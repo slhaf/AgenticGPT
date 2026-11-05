@@ -16,6 +16,8 @@ pub(super) struct Attachment {
     pub bytes: Vec<u8>,
     #[serde(skip)]
     pub cid: Option<String>,
+    #[serde(skip)]
+    pub content_type: String,
 }
 
 pub(super) struct Content {
@@ -86,7 +88,7 @@ fn parse_parts(raw: &[u8], parts: Parts<'_>) -> Result<Content> {
         &mut html,
         &mut attachments,
         parts,
-        false,
+        None,
     )?;
     let (body, format) = if !matches!(parts, Parts::Import) {
         (String::new(), "plain")
@@ -213,6 +215,7 @@ fn header(mail: &ParsedMail<'_>, name: &str) -> String {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect(
     mail: &ParsedMail<'_>,
     depth: usize,
@@ -221,7 +224,7 @@ fn collect(
     html: &mut Option<String>,
     attachments: &mut Vec<Attachment>,
     parts: Parts<'_>,
-    related_root: bool,
+    related_part: Option<bool>,
 ) -> Result<()> {
     *count += 1;
     if depth > 30 || *count > 1000 {
@@ -252,9 +255,11 @@ fn collect(
             None
         };
         for (index, child) in mail.subparts.iter().enumerate() {
-            let child_is_related_root = related_root_index
-                .map(|root_index| root_index == index)
-                .unwrap_or(related_root);
+            let child_related_part = if mime == "multipart/related" {
+                Some(related_root_index == Some(index))
+            } else {
+                related_part
+            };
             collect(
                 child,
                 depth + 1,
@@ -263,10 +268,10 @@ fn collect(
                 html,
                 attachments,
                 parts,
-                child_is_related_root,
+                child_related_part,
             )?;
         }
-    } else if cid.is_some() && mail.subparts.is_empty() && !related_root {
+    } else if cid.is_some() && mail.subparts.is_empty() && related_part == Some(false) {
         let index = attachments.len() + 1;
         let id = format!("attachment_{index}");
         let decode = matches!(parts, Parts::Import | Parts::Metadata | Parts::Image)
@@ -286,12 +291,19 @@ fn collect(
             name: name
                 .map(|s| safe_filename(s))
                 .unwrap_or_else(|| format!("attachment-{index}")),
+            content_type: mail
+                .headers
+                .get_first_value("Content-Type")
+                .unwrap_or_else(|| mime.clone()),
             mime_type: mime,
             size,
             bytes,
             cid: cid.map(|s| s.trim().trim_matches(['<', '>']).to_owned()),
         });
-    } else if (!is_attachment || related_root) && mime == "text/plain" {
+    } else if related_part != Some(false)
+        && (!is_attachment || related_part == Some(true))
+        && mime == "text/plain"
+    {
         if plain.is_none() && matches!(parts, Parts::Import) {
             let body = mail
                 .get_body()
@@ -301,7 +313,10 @@ fn collect(
                 *plain = Some(body);
             }
         }
-    } else if (!is_attachment || related_root) && mime == "text/html" {
+    } else if related_part != Some(false)
+        && (!is_attachment || related_part == Some(true))
+        && mime == "text/html"
+    {
         if html.is_none() && matches!(parts, Parts::Import | Parts::Image) {
             *html = Some(
                 mail.get_body()
@@ -312,6 +327,7 @@ fn collect(
         let index = attachments.len() + 1;
         let id = format!("attachment_{index}");
         let decode = matches!(parts, Parts::Import | Parts::Metadata)
+            || matches!(parts, Parts::Image) && cid.is_some()
             || matches!(parts, Parts::Attachment(target) if target == id);
         let mut bytes = if decode {
             mail.get_body_raw()
@@ -328,6 +344,10 @@ fn collect(
             name: name
                 .map(|s| safe_filename(s))
                 .unwrap_or_else(|| format!("attachment-{index}")),
+            content_type: mail
+                .headers
+                .get_first_value("Content-Type")
+                .unwrap_or_else(|| mime.clone()),
             mime_type: mime,
             size,
             bytes,
@@ -372,7 +392,7 @@ pub(super) fn cid_resources(content: &Content) -> Vec<crate::email_render::Email
                 .as_ref()
                 .map(|content_id| crate::email_render::EmailCidResource {
                     content_id: content_id.clone(),
-                    content_type: attachment.mime_type.clone(),
+                    content_type: attachment.content_type.clone(),
                     bytes: attachment.bytes.clone(),
                 })
         })

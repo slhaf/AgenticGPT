@@ -349,7 +349,8 @@ impl StealthHttpClient {
         validate_url(url, self.allow_private_network)?;
         validate_request_mode(&request, url)?;
         if url.scheme() == "file" {
-            return fetch_file_url(url, request.max_response_bytes, self.allow_file_access).await;
+            // Modified for AgenticGPT: keep the stealth transport's existing file limit.
+            return fetch_file_url(url, Some(request.max_response_bytes), self.allow_file_access).await;
         }
 
         let mut current_url = url.clone();

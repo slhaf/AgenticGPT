@@ -1,6 +1,6 @@
 // Modified by AgenticGPT maintainers: load the bootstrap as a runtime
 // extension for cross-architecture builds that cannot generate a native V8
-// startup snapshot during cross-compilation.
+// startup snapshot, and allow email pages to queue all render resources.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
@@ -50,39 +50,6 @@ static SNAPSHOT: &[u8] = include_bytes!(env!("OBSCURA_SNAPSHOT_PATH"));
 
 #[cfg(obscura_runtime_bootstrap)]
 static RUNTIME_BOOTSTRAP: &str = include_str!(env!("OBSCURA_BOOTSTRAP_PATH"));
-
-fn runtime_extensions() -> Vec<deno_core::Extension> {
-    #[cfg(obscura_runtime_bootstrap)]
-    {
-        vec![
-            deno_core::Extension {
-                name: "obscura_bootstrap",
-                js_files: vec![deno_core::ExtensionFileSource::new_computed(
-                    "<obscura:bootstrap>",
-                    RUNTIME_BOOTSTRAP.to_string().into(),
-                )]
-                .into(),
-                ..Default::default()
-            },
-            build_extension(),
-        ]
-    }
-
-    #[cfg(not(obscura_runtime_bootstrap))]
-    {
-        if cfg!(obscura_external_bootstrap) {
-            vec![
-                deno_core::Extension {
-                    name: "obscura_bootstrap",
-                    ..Default::default()
-                },
-                build_extension(),
-            ]
-        } else {
-            vec![build_extension()]
-        }
-    }
-}
 
 /// Serialize first initialization (#430), then allow two snapshot restorations
 /// at a time. Unbounded construction increases CPU and peak memory contention.
@@ -304,6 +271,9 @@ pub struct ObscuraJsRuntime {
     /// intentionally separate from page fetch/XHR activity so analytics does
     /// not hold screenshot readiness open.
     module_load_activity: std::sync::Arc<ModuleLoadActivity>,
+    /// Email pages queue every renderer-discovered resource; the page
+    /// transport still applies its shared request concurrency limit.
+    unbounded_render_resource_queue: bool,
     /// Thread-safe handle to this runtime's V8 isolate, captured at
     /// construction. Lets a watchdog be armed from `&self` (the CDP dispatcher
     /// only holds `&Page` on the hot path) and is stable for the isolate's life.
@@ -721,7 +691,14 @@ impl ObscuraJsRuntime {
             }
 
             let mut runtime = JsRuntime::new(RuntimeOptions {
-                extensions: runtime_extensions(),
+                extensions: if cfg!(obscura_external_bootstrap) {
+                    vec![deno_core::Extension {
+                        name: "obscura_bootstrap",
+                        ..Default::default()
+                    }, build_extension()]
+                } else {
+                    vec![build_extension()]
+                },
                 module_loader: Some(module_loader),
                 startup_snapshot: if cfg!(obscura_runtime_bootstrap) {
                     None
@@ -748,6 +725,11 @@ impl ObscuraJsRuntime {
                 heap_limit_state.clone(),
             );
 
+            #[cfg(obscura_runtime_bootstrap)]
+            runtime
+                .execute_script("<obscura:bootstrap>", RUNTIME_BOOTSTRAP)
+                .expect("bootstrap.js should not fail during runtime initialization");
+
             runtime
                 .execute_script(
                     "<obscura:init>",
@@ -766,6 +748,7 @@ impl ObscuraJsRuntime {
             object_counter: 0,
             import_map,
             module_load_activity,
+            unbounded_render_resource_queue: false,
             isolate_handle,
             heap_limit_state,
             module_evaluations: HashMap::new(),
@@ -2253,7 +2236,9 @@ impl ObscuraJsRuntime {
                 }
                 continue;
             }
-            if state.render_resource_in_flight.len() >= MAX_PENDING_RENDER_RESOURCES {
+            if !self.unbounded_render_resource_queue
+                && state.render_resource_in_flight.len() >= MAX_PENDING_RENDER_RESOURCES
+            {
                 continue;
             }
             if state
@@ -2273,18 +2258,50 @@ impl ObscuraJsRuntime {
         &self,
         candidates: Vec<(String, Option<crate::ops::ImageRequestProfile>, bool)>,
     ) -> Vec<(String, Option<crate::ops::ImageRequestProfile>, bool)> {
+        self.mark_render_resources_in_flight_with_limit(candidates, true)
+    }
+
+    /// Mark every discovered resource for an email page. The shared page
+    /// transport limits active requests independently of this pending set.
+    #[cfg(feature = "render")]
+    pub fn mark_all_render_resources_in_flight(
+        &self,
+        candidates: Vec<(String, Option<crate::ops::ImageRequestProfile>, bool)>,
+    ) -> Vec<(String, Option<crate::ops::ImageRequestProfile>, bool)> {
+        self.mark_render_resources_in_flight_with_limit(candidates, false)
+    }
+
+    #[cfg(feature = "render")]
+    fn mark_render_resources_in_flight_with_limit(
+        &self,
+        candidates: Vec<(String, Option<crate::ops::ImageRequestProfile>, bool)>,
+        limited: bool,
+    ) -> Vec<(String, Option<crate::ops::ImageRequestProfile>, bool)> {
         let mut state = self.state.borrow_mut();
-        let available =
-            MAX_PENDING_RENDER_RESOURCES.saturating_sub(state.render_resource_in_flight.len());
-        candidates
-            .into_iter()
-            .filter(|(url, profile, is_font)| {
-                state
-                    .render_resource_in_flight
-                    .insert((url.clone(), *profile, *is_font))
-            })
-            .take(available)
-            .collect()
+        let available = limited.then(|| {
+            MAX_PENDING_RENDER_RESOURCES.saturating_sub(state.render_resource_in_flight.len())
+        });
+        let mut marked = Vec::new();
+        for candidate in candidates {
+            if available.is_some_and(|limit| marked.len() >= limit) {
+                break;
+            }
+            if state.render_resource_in_flight.insert(candidate.clone()) {
+                marked.push(candidate);
+            }
+        }
+        marked
+    }
+
+    /// Keep all raw renderer resources for this page and let the existing
+    /// transport concurrency limiter schedule them without a pending cap.
+    #[cfg(feature = "render")]
+    pub fn set_email_render_resource_mode(&mut self) {
+        self.unbounded_render_resource_queue = true;
+        self.state
+            .borrow_mut()
+            .render_resources
+            .set_unbounded_retention();
     }
 
     /// Abort every background load of this document and discard results
@@ -3086,7 +3103,18 @@ impl ObscuraJsRuntime {
         url: &str,
         budget_ms: u64,
     ) -> Result<PreparedModule, String> {
-        let budget = tokio::time::Duration::from_millis(budget_ms);
+        self.prepare_module_with_budget(url, Some(budget_ms)).await
+    }
+
+    pub async fn prepare_module_unbounded(&mut self, url: &str) -> Result<PreparedModule, String> {
+        self.prepare_module_with_budget(url, None).await
+    }
+
+    async fn prepare_module_with_budget(
+        &mut self,
+        url: &str,
+        budget_ms: Option<u64>,
+    ) -> Result<PreparedModule, String> {
         let specifier = deno_core::ModuleSpecifier::parse(url)
             .map_err(|e| format!("Invalid module URL {}: {}", url, e))?;
         let loaded_start = self.loaded_module_specifiers.borrow().len();
@@ -3101,15 +3129,25 @@ impl ObscuraJsRuntime {
         let load = entered_runtime_future(&mut self.js_runtime, |runtime| {
             runtime.load_side_es_module(&specifier)
         });
-        let module_id = match tokio::time::timeout(budget, load).await {
-            Ok(Ok(id)) => id,
-            Ok(Err(e)) => return Err(format!("Module load error: {}", e)),
-            Err(_) => {
-                return Err(format!(
-                    "Module graph load timed out after {}ms: {}",
-                    budget_ms, url
-                ));
-            }
+        let module_id = match budget_ms {
+            Some(budget_ms) => match tokio::time::timeout(
+                tokio::time::Duration::from_millis(budget_ms),
+                load,
+            )
+            .await
+            {
+                Ok(Ok(id)) => id,
+                Ok(Err(e)) => return Err(format!("Module load error: {}", e)),
+                Err(_) => {
+                    return Err(format!(
+                        "Module graph load timed out after {}ms: {}",
+                        budget_ms, url
+                    ));
+                }
+            },
+            None => load
+                .await
+                .map_err(|error| format!("Module load error: {}", error))?,
         };
 
         // Return as soon as the module finishes evaluating rather than waiting
@@ -3141,7 +3179,7 @@ impl ObscuraJsRuntime {
     async fn drive_module_eval(
         &mut self,
         module_id: deno_core::ModuleId,
-        budget_ms: u64,
+        budget_ms: Option<u64>,
         what: &str,
     ) -> Result<(), String> {
         if let Some(outcome) = self.module_evaluations.get(&module_id) {
@@ -3149,7 +3187,6 @@ impl ObscuraJsRuntime {
         }
 
         self.begin_javascript_task();
-        let budget = tokio::time::Duration::from_millis(budget_ms);
         // deno_core 0.350 asserts instead of treating a second evaluation as
         // the module-map no-op required by browsers. The local outcome cache
         // covers duplicate roots prepared by Obscura. A root can also have
@@ -3177,18 +3214,20 @@ impl ObscuraJsRuntime {
         };
         tokio::pin!(result);
 
-        let outcome = tokio::time::timeout(
-            budget,
-            std::future::poll_fn(|cx| {
+        let poll = std::future::poll_fn(|cx| {
                 let mut entered = self.runtime();
                 match entered.poll_event_loop(cx, deno_core::PollEventLoopOptions::default()) {
                     Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
                     Poll::Ready(Ok(())) => result.as_mut().poll(cx),
                     Poll::Pending => result.as_mut().poll(cx),
                 }
-            }),
-        )
-        .await;
+            });
+        let outcome = if let Some(budget_ms) = budget_ms {
+            tokio::time::timeout(tokio::time::Duration::from_millis(budget_ms), poll)
+                .await
+        } else {
+            Ok(poll.await)
+        };
 
         let outcome = match outcome {
             Ok(Ok(())) => self
@@ -3199,7 +3238,7 @@ impl ObscuraJsRuntime {
             Ok(Err(e)) => Err(format!("{} eval error: {}", what, e)),
             Err(_) => Err(format!(
                 "{} evaluation timed out after {}ms",
-                what, budget_ms
+                what, budget_ms.unwrap_or_default()
             )),
         };
         let outcome = self.finish_heap_checked(outcome);
@@ -3232,7 +3271,25 @@ impl ObscuraJsRuntime {
         base_url: &str,
         budget_ms: u64,
     ) -> Result<PreparedModule, String> {
-        let budget = tokio::time::Duration::from_millis(budget_ms);
+        self.prepare_inline_module_with_budget(code, base_url, Some(budget_ms))
+            .await
+    }
+
+    pub async fn prepare_inline_module_unbounded(
+        &mut self,
+        code: &str,
+        base_url: &str,
+    ) -> Result<PreparedModule, String> {
+        self.prepare_inline_module_with_budget(code, base_url, None)
+            .await
+    }
+
+    async fn prepare_inline_module_with_budget(
+        &mut self,
+        code: &str,
+        base_url: &str,
+        budget_ms: Option<u64>,
+    ) -> Result<PreparedModule, String> {
         // Inline modules use the document base URL as their module URL. This is
         // observable through import.meta.url and is also the referrer used for
         // relative imports and import-map scope matching. deno_core permits
@@ -3248,15 +3305,25 @@ impl ObscuraJsRuntime {
                 deno_core::ModuleCodeString::from(code.to_string()),
             )
         });
-        let module_id = match tokio::time::timeout(budget, load).await {
-            Ok(Ok(id)) => id,
-            Ok(Err(e)) => return Err(format!("Inline module load error: {}", e)),
-            Err(_) => {
-                return Err(format!(
-                    "Inline module graph load timed out after {}ms",
-                    budget_ms
-                ));
-            }
+        let module_id = match budget_ms {
+            Some(budget_ms) => match tokio::time::timeout(
+                tokio::time::Duration::from_millis(budget_ms),
+                load,
+            )
+            .await
+            {
+                Ok(Ok(id)) => id,
+                Ok(Err(e)) => return Err(format!("Inline module load error: {}", e)),
+                Err(_) => {
+                    return Err(format!(
+                        "Inline module graph load timed out after {}ms",
+                        budget_ms
+                    ));
+                }
+            },
+            None => load
+                .await
+                .map_err(|error| format!("Inline module load error: {}", error))?,
         };
 
         // Return as soon as the module finishes evaluating rather than waiting
@@ -3283,6 +3350,23 @@ impl ObscuraJsRuntime {
         prepared: PreparedModule,
         budget_ms: u64,
     ) -> Result<(), String> {
+        self.evaluate_prepared_module_with_budget(prepared, Some(budget_ms))
+            .await
+    }
+
+    pub async fn evaluate_prepared_module_unbounded(
+        &mut self,
+        prepared: PreparedModule,
+    ) -> Result<(), String> {
+        self.evaluate_prepared_module_with_budget(prepared, None)
+            .await
+    }
+
+    async fn evaluate_prepared_module_with_budget(
+        &mut self,
+        prepared: PreparedModule,
+        budget_ms: Option<u64>,
+    ) -> Result<(), String> {
         let PreparedModule {
             module_id,
             description,
@@ -3299,15 +3383,14 @@ impl ObscuraJsRuntime {
         // pins the runtime thread in V8. Pair the async timeout with a hard V8
         // watchdog so this budget is a real wall-clock ceiling for both forms
         // of evaluation.
-        let watchdog = self.arm_watchdog(std::time::Duration::from_millis(budget_ms));
-        let result = self
-            .drive_module_eval(module_id, budget_ms, &description)
-            .await;
-        let watchdog_fired = self.disarm_watchdog(watchdog);
+        let watchdog = budget_ms
+            .map(|budget_ms| self.arm_watchdog(std::time::Duration::from_millis(budget_ms)));
+        let result = self.drive_module_eval(module_id, budget_ms, &description).await;
+        let watchdog_fired = watchdog.is_some_and(|watchdog| self.disarm_watchdog(watchdog));
         let result = if watchdog_fired {
             Err(format!(
                 "{} evaluation timed out after {}ms",
-                description, budget_ms
+                description, budget_ms.unwrap_or_default()
             ))
         } else {
             result
