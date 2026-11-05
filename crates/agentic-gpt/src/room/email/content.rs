@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
 use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +86,7 @@ fn parse_parts(raw: &[u8], parts: Parts<'_>) -> Result<Content> {
         &mut html,
         &mut attachments,
         parts,
+        false,
     )?;
     let (body, format) = if !matches!(parts, Parts::Import) {
         (String::new(), "plain")
@@ -221,6 +221,7 @@ fn collect(
     html: &mut Option<String>,
     attachments: &mut Vec<Attachment>,
     parts: Parts<'_>,
+    related_root: bool,
 ) -> Result<()> {
     *count += 1;
     if depth > 30 || *count > 1000 {
@@ -235,34 +236,41 @@ fn collect(
     let is_attachment = disposition.disposition == DispositionType::Attachment || name.is_some();
     let mime = mail.ctype.mimetype.to_ascii_lowercase();
     if !is_attachment && !mail.subparts.is_empty() {
-        for child in &mail.subparts {
-            collect(child, depth + 1, count, plain, html, attachments, parts)?;
-        }
-    } else if !is_attachment && mime == "text/plain" {
-        if plain.is_none() && matches!(parts, Parts::Import) {
-            let body = mail
-                .get_body()
-                .map_err(|_| anyhow!("email_body_decode_failed"))?;
-            let body = normalize_text(&body);
-            if !body.is_empty() {
-                *plain = Some(body);
+        let related_root_index = if mime == "multipart/related" {
+            if let Some(start) = mail.ctype.params.get("start") {
+                let start = normalize_content_id(start);
+                mail.subparts.iter().position(|child| {
+                    child
+                        .headers
+                        .get_first_value("Content-ID")
+                        .is_some_and(|id| normalize_content_id(&id) == start)
+                })
+            } else {
+                Some(0)
             }
+        } else {
+            None
+        };
+        for (index, child) in mail.subparts.iter().enumerate() {
+            let child_is_related_root = related_root_index
+                .map(|root_index| root_index == index)
+                .unwrap_or(related_root);
+            collect(
+                child,
+                depth + 1,
+                count,
+                plain,
+                html,
+                attachments,
+                parts,
+                child_is_related_root,
+            )?;
         }
-    } else if !is_attachment && mime == "text/html" {
-        if html.is_none() && matches!(parts, Parts::Import | Parts::Image) {
-            *html = Some(
-                mail.get_body()
-                    .map_err(|_| anyhow!("email_body_decode_failed"))?,
-            );
-        }
-    } else {
+    } else if cid.is_some() && mail.subparts.is_empty() && !related_root {
         let index = attachments.len() + 1;
         let id = format!("attachment_{index}");
-        let decode = match parts {
-            Parts::Import | Parts::Metadata => true,
-            Parts::Image => cid.is_some() && inline_image(&mime),
-            Parts::Attachment(target) => target == id,
-        };
+        let decode = matches!(parts, Parts::Import | Parts::Metadata | Parts::Image)
+            || matches!(parts, Parts::Attachment(target) if target == id);
         let mut bytes = if decode {
             mail.get_body_raw()
                 .map_err(|_| anyhow!("email_attachment_decode_failed"))?
@@ -283,8 +291,54 @@ fn collect(
             bytes,
             cid: cid.map(|s| s.trim().trim_matches(['<', '>']).to_owned()),
         });
+    } else if (!is_attachment || related_root) && mime == "text/plain" {
+        if plain.is_none() && matches!(parts, Parts::Import) {
+            let body = mail
+                .get_body()
+                .map_err(|_| anyhow!("email_body_decode_failed"))?;
+            let body = normalize_text(&body);
+            if !body.is_empty() {
+                *plain = Some(body);
+            }
+        }
+    } else if (!is_attachment || related_root) && mime == "text/html" {
+        if html.is_none() && matches!(parts, Parts::Import | Parts::Image) {
+            *html = Some(
+                mail.get_body()
+                    .map_err(|_| anyhow!("email_body_decode_failed"))?,
+            );
+        }
+    } else {
+        let index = attachments.len() + 1;
+        let id = format!("attachment_{index}");
+        let decode = matches!(parts, Parts::Import | Parts::Metadata)
+            || matches!(parts, Parts::Attachment(target) if target == id);
+        let mut bytes = if decode {
+            mail.get_body_raw()
+                .map_err(|_| anyhow!("email_attachment_decode_failed"))?
+        } else {
+            Vec::new()
+        };
+        let size = bytes.len();
+        if matches!(parts, Parts::Metadata) {
+            bytes = Vec::new();
+        }
+        attachments.push(Attachment {
+            id,
+            name: name
+                .map(|s| safe_filename(s))
+                .unwrap_or_else(|| format!("attachment-{index}")),
+            mime_type: mime,
+            size,
+            bytes,
+            cid: cid.map(|s| normalize_content_id(&s).to_owned()),
+        });
     }
     Ok(())
+}
+
+fn normalize_content_id(content_id: &str) -> &str {
+    content_id.trim().trim_matches(['<', '>'])
 }
 
 pub(super) fn safe_filename(name: &str) -> String {
@@ -302,33 +356,27 @@ pub(super) fn safe_filename(name: &str) -> String {
 }
 
 pub(super) fn render_html(content: &Content) -> String {
-    let mut html = content
+    content
         .html
         .clone()
-        .unwrap_or_else(|| format!("<pre>{}</pre>", escape_html(&content.body)));
-    for attachment in &content.attachments {
-        if let Some(cid) = &attachment.cid {
-            // SVG and HTML are deliberately excluded from active inline resources.
-            if inline_image(&attachment.mime_type) {
-                html = html.replace(
-                    &format!("cid:{cid}"),
-                    &format!(
-                        "data:{};base64,{}",
-                        attachment.mime_type,
-                        STANDARD.encode(&attachment.bytes)
-                    ),
-                );
-            }
-        }
-    }
-    html
+        .unwrap_or_else(|| format!("<pre>{}</pre>", escape_html(&content.body)))
 }
 
-fn inline_image(mime: &str) -> bool {
-    matches!(
-        mime,
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-    )
+pub(super) fn cid_resources(content: &Content) -> Vec<crate::email_render::EmailCidResource> {
+    content
+        .attachments
+        .iter()
+        .filter_map(|attachment| {
+            attachment
+                .cid
+                .as_ref()
+                .map(|content_id| crate::email_render::EmailCidResource {
+                    content_id: content_id.clone(),
+                    content_type: attachment.mime_type.clone(),
+                    bytes: attachment.bytes.clone(),
+                })
+        })
+        .collect()
 }
 
 fn escape_html(text: &str) -> String {

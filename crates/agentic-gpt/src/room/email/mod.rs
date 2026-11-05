@@ -16,6 +16,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -29,6 +30,7 @@ pub(crate) struct EmailService {
     admission: Arc<tokio::sync::RwLock<()>>,
     network: tokio::sync::Mutex<()>,
     database: std::path::PathBuf,
+    render_cache: TempDir,
     owner: parking_lot::Mutex<Option<Arc<EmailOwner>>>,
     sync_stopping: parking_lot::Mutex<CancellationToken>,
     #[cfg(test)]
@@ -42,16 +44,24 @@ struct EmailOwner {
 
 impl EmailService {
     pub(crate) fn open(paths: &PrivateStatePaths) -> Result<Arc<Self>> {
+        let render_cache = tempfile::Builder::new()
+            .prefix("agentic-email-render-")
+            .tempdir()?;
         Ok(Arc::new(Self {
             store: store::Store::open(&paths.root)?,
             admission: Arc::new(tokio::sync::RwLock::new(())),
             network: tokio::sync::Mutex::new(()),
             database: paths.root.join("email.sqlite3"),
+            render_cache,
             owner: parking_lot::Mutex::new(None),
             sync_stopping: parking_lot::Mutex::new(CancellationToken::new()),
             #[cfg(test)]
             test_root: parking_lot::RwLock::new(None),
         }))
+    }
+
+    pub(crate) fn render_cache(&self) -> &std::path::Path {
+        self.render_cache.path()
     }
 
     fn activate(&self, account: &str) -> Result<Arc<EmailOwner>> {
@@ -509,6 +519,7 @@ async fn read(state: &AppState, account: &EmailAccountConfig, mut args: Value) -
     let request: RoomEmailReadRequest =
         serde_json::from_value(args).map_err(|_| anyhow!("email_arguments_invalid"))?;
     let service = state.email.clone();
+    let render_cache = service.render_cache().to_path_buf();
     let key = account_key(account);
     let id = request.id.clone();
     let image = request.view != RoomEmailView::Text;
@@ -521,12 +532,17 @@ async fn read(state: &AppState, account: &EmailAccountConfig, mut args: Value) -
     .await?;
     let mut response = mail_metadata(&mail, &attachments);
     if let Some(content) = content {
-        let remote = request.view == RoomEmailView::ImageWithRemote;
         let html = content::render_html(&content);
-        let rendered =
-            crate::email_render::render(&mail.id, &html, request.cursor.as_deref(), remote)
-                .await
-                .map_err(anyhow::Error::msg)?;
+        let cid_resources = content::cid_resources(&content);
+        let rendered = crate::email_render::render(
+            &render_cache,
+            &mail.id,
+            &html,
+            &cid_resources,
+            request.cursor.as_deref(),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
         let object = rendered
             .as_object()
             .ok_or_else(|| anyhow!("email_renderer_response_invalid"))?;

@@ -906,7 +906,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             add("id", string("邮件稳定 ID。"));
             add(
                 "view",
-                json!({"type":"string","enum":["text","image","imageWithRemote"],"default":"text","description":"text 为规范化正文；image 离线渲染；imageWithRemote 仅允许额外下载远程图片。三者都不执行脚本或加载远程 CSS。"}),
+                json!({"type":"string","enum":["text","image"],"default":"text","description":"text 返回规范化正文；image 将邮件 HTML 渲染为图片分片，并按页面内容加载资源。"}),
             );
             add(
                 "cursor",
@@ -1140,7 +1140,7 @@ fn tool_description(name: &str) -> String {
         "room.secret.upsert" => "按 site/account 创建或更新账号组；password/totp 至少一个，省略保留，不接受空值清除。写前必须同步成功，遵守 upsertPolicy；重复身份报 ambiguous_secret。返回 created 或 updated；secret_write_outcome_unknown 表示写入成败未知，不自动重放，再次调用前需核对。".to_string(),
         "room.secret.delete" => "按 site/account 精确将整个账号组移入 Vaultwarden 回收站，不永久删除。必须同步成功并遵守 deletePolicy；返回 deleted。重复身份拒绝，secret_write_outcome_unknown 表示成败未知，不自动重放。".to_string(),
         "room.email.list" => "从活动 Room 的本地邮件索引列出当前 INBOX，按接收时间从新到旧；limit 为 1–100、默认 20。filter 的 receivedAfter 含边界、receivedBefore 不含边界；cursor 必须沿用原 filter，可改变 limit。返回 items、hasMore、可选 nextCursor 和 sync 同步状态；不会触发手动同步或标为已读，不接受 agentId。".to_string(),
-        "room.email.read" => "按稳定邮件 id 读取活动 Room 邮件；view 默认 text，返回规范化正文和 plain/markdown 格式；image 返回不联网的图片分片，imageWithRemote 仅额外下载邮件引用的远程图片，不加载远程 CSS，不执行脚本或提交表单。返回邮件详情、附件清单、hasMore 和可选 nextCursor；续读保持 id/view，不会标为已读。sent/unknown 等本地发送记录可回看；内容已清理或不存在时返回明确 error。不接受 agentId。".to_string(),
+        "room.email.read" => "按稳定邮件 id 读取活动 Room 邮件；view 默认 text，返回规范化正文和 plain/markdown 格式；image 将邮件 HTML 页面渲染为图片分片，并按页面内容加载资源，包括远程资源和邮件中的 CID 内嵌资源。返回邮件详情、附件清单、hasMore 和可选 nextCursor；续读保持 id/view，不会标为已读。sent/unknown 等本地发送记录可回看；内容已清理或不存在时返回明确 error。不接受 agentId。".to_string(),
         "room.email.search" => "在活动 Room 已保存的收件及发送记录（含 unknown）中做不区分大小写的字面子串搜索。未传 id 时 field 默认 all，匹配主题、发件人与正文；传 id 时无论 field 如何均规范化为 body。返回 items(ref/text)、truncated 和 sync；邮箱命中的 ref 为邮件 id，正文命中的 ref 可直接作为 read(view=text) 的 cursor。不接受 agentId，不修改邮件。".to_string(),
         "room.email.attachment" => "读取或下载活动 Room 邮件附件，id 和 attachmentId 来自 read。download 默认 false，可内联图片或小型 UTF-8 文本；其他格式/超预算应下载后处理。提供 path 时无论 download 如何均采用下载模式；path 必须相对 workspace，禁止逃逸和覆盖；省略目标时保存到 downloads/email/<mail-id>/<附件名>。下载仅返回规范化相对 path，内联图片返回 image blocks。不接受 agentId。".to_string(),
         "room.email.send" => "使用活动 Room 配置账户发送纯文本邮件，to 至少一个地址；cc/bcc 可省略，replyToId 引用本地原邮件以生成回复头。遵守 email.sendPolicy：allow 直接发、confirm 必须明确批准、deny 拒绝；请求不能覆盖策略。返回稳定 id 和 sent/unknown；unknown 表示是否被 SMTP 接受尚不确定，不会自动重试，再次调用可能重复发送。可通过 search/read 查回记录。不接受 agentId。".to_string(),

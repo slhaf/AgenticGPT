@@ -1,43 +1,35 @@
-//! Bounded, offline email rendering in a disposable worker process.
-//!
-//! The worker uses litehtml's CPU pixel buffer. Resource loading is limited to
-//! validated bytes in data URIs; HTTP, filesystem and stylesheet imports are
-//! never serviced. The parent prepares any explicitly requested remote images.
+//! HTML email rendering in a short-lived Obscura worker.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
-use html5ever::tendril::TendrilSink;
-use html5ever::{parse_document, serialize, Attribute, QualName};
-use image::ImageEncoder;
-use litehtml::email::prepare_email_html;
-use litehtml::pixbuf::PixbufContainer;
-use litehtml::{Document, DrawContext, Position};
-use markup5ever_rcdom::{NodeData, RcDom, SerializableHandle};
+use obscura_browser::page::CidResource;
+use obscura_browser::{BrowserContext, CaptureRegion, Page};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
+use uuid::Uuid;
 
-const WIDTH: u32 = 1024;
-const SLICE_HEIGHT: u32 = 1600;
-const MAX_HEIGHT: u32 = 32_000;
-const MAX_INLINE_PIXELS: u64 = 64 * 1024 * 1024;
-const MAX_HTML_BYTES: usize = 16 * 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = 24 * 1024 * 1024;
-// Leave room for the email metadata and the MCP envelope under the shared 8 MiB bound.
+const WIDTH: f32 = 1024.0;
+const VIEWPORT_HEIGHT: f32 = 768.0;
+const SLICE_HEIGHT: f32 = 1600.0;
 const MAX_IMAGE_BASE64_BYTES: usize = 7 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = MAX_IMAGE_BASE64_BYTES + 16 * 1024;
-const MAX_INLINE_IMAGES: usize = 128;
-const VERSION: u8 = 3;
-const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
-static RENDER_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-const RENDER_CSS: &str = "html { background: white; } body { font-family: sans-serif; } \
-    *, *::before, *::after { animation: none !important; transition: none !important; }";
+const VERSION: u8 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct EmailCidResource {
+    pub content_id: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -45,111 +37,232 @@ struct ImageCursor {
     v: u8,
     mail_id: String,
     revision: String,
-    remote: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    resources_revision: Option<String>,
+    cache_id: String,
     next_slice: u32,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CacheManifest {
+    mail_id: String,
+    revision: String,
+    slices: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkerRequest {
     html: String,
-    slice: u32,
-    #[serde(default)]
-    discover: bool,
-    #[serde(default)]
-    resources: BTreeMap<String, String>,
+    cid_resources: Vec<WorkerCidResource>,
+    cache_dir: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkerCidResource {
+    content_id: String,
+    content_type: String,
+    data: String,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkerResponse {
-    data: String,
-    height: u32,
-    blocked_remote_images: usize,
-    #[serde(default)]
-    sources: Vec<String>,
+    slices: u32,
 }
 
-/// Render one image slice, with opt-in downloads owned by the parent process.
+/// Render the page once in a disposable worker and retain its PNG slices for
+/// cursor continuation. The HTML and CID bodies are supplied unchanged.
 pub(crate) async fn render(
+    cache_root: &Path,
     mail_id: &str,
     html: &str,
+    cid_resources: &[EmailCidResource],
     cursor: Option<&str>,
-    remote: bool,
 ) -> Result<Value, String> {
-    if html.len() > MAX_HTML_BYTES {
-        return Err("email_render_html_too_large".to_owned());
-    }
-    let revision = format!("{:x}", Sha256::digest(html.as_bytes()));
-    let (slice, expected_resources_revision) = match cursor {
-        Some(cursor) => {
-            if cursor.len() > 4096 {
-                return Err("email_cursor_invalid".to_owned());
-            }
-            let bytes = URL_SAFE_NO_PAD
-                .decode(cursor)
-                .map_err(|_| "email_cursor_invalid")?;
-            let decoded: ImageCursor =
-                serde_json::from_slice(&bytes).map_err(|_| "email_cursor_invalid")?;
-            if decoded.v != VERSION
-                || decoded.mail_id != mail_id
-                || decoded.revision != revision
-                || decoded.remote != remote
-                || decoded.next_slice == 0
-                || decoded.next_slice >= MAX_HEIGHT / SLICE_HEIGHT
-            {
-                return Err("email_cursor_invalid".to_owned());
-            }
-            (decoded.next_slice, decoded.resources_revision)
+    let revision = content_revision(html, cid_resources);
+    if let Some(cursor) = cursor {
+        let cursor = decode_cursor(cursor, mail_id, &revision)?;
+        let directory = cache_directory(cache_root, &cursor.cache_id)?;
+        let manifest: CacheManifest = read_json(&directory.join("manifest.json"))?;
+        if manifest.mail_id != mail_id
+            || manifest.revision != revision
+            || cursor.next_slice >= manifest.slices
+        {
+            return Err("email_cursor_invalid".to_owned());
         }
-        None => (0, None),
-    };
-    // One permit covers discovery, downloading/cache work and final rendering.
-    let _permit = RENDER_SLOTS
-        .try_acquire()
-        .map_err(|_| "email_renderer_busy")?;
-    let resources = if remote {
-        crate::email_remote::prepare(mail_id, html, cursor.is_some()).await?
-    } else {
-        BTreeMap::new()
-    };
-    let resources_revision = if remote {
-        let bytes = serde_json::to_vec(&resources).map_err(|_| "email_cursor_encoding_failed")?;
-        Some(format!("{:x}", Sha256::digest(bytes)))
-    } else {
-        None
-    };
-    if cursor.is_some() && expected_resources_revision != resources_revision {
-        return Err("email_render_cache_expired".to_owned());
+        let mut cache_guard = RenderCacheGuard::new(directory.clone());
+        let image = read_slice(&directory, cursor.next_slice)?;
+        let has_more = cursor.next_slice + 1 < manifest.slices;
+        let mut result = image_result(image, has_more);
+        if has_more {
+            result["nextCursor"] = json!(encode_cursor(&ImageCursor {
+                next_slice: cursor.next_slice + 1,
+                ..cursor
+            })?);
+            cache_guard.keep();
+        }
+        return Ok(result);
     }
-    let output = run_worker(&WorkerRequest {
+
+    let cache_id = Uuid::new_v4().simple().to_string();
+    let directory = create_cache_directory(cache_root, &cache_id)?;
+    let mut cache_guard = RenderCacheGuard::new(directory.clone());
+    let request = WorkerRequest {
         html: html.to_owned(),
-        slice,
-        discover: false,
-        resources,
-    })
-    .await?;
-    let has_more = (slice + 1) * SLICE_HEIGHT < output.height;
-    let mut result = json!({
-        "images": [{"mimeType": "image/png", "data": output.data}],
-        "blockedRemoteImages": output.blocked_remote_images,
-        "hasMore": has_more,
-    });
+        cid_resources: cid_resources
+            .iter()
+            .map(|resource| WorkerCidResource {
+                content_id: resource.content_id.clone(),
+                content_type: resource.content_type.clone(),
+                data: STANDARD.encode(&resource.bytes),
+            })
+            .collect(),
+        cache_dir: directory.clone(),
+    };
+    let output = run_worker(&request).await?;
+    if output.slices == 0 {
+        return Err("email_renderer_response_invalid".to_owned());
+    }
+    write_json(
+        &directory.join("manifest.json"),
+        &CacheManifest {
+            mail_id: mail_id.to_owned(),
+            revision: revision.clone(),
+            slices: output.slices,
+        },
+    )?;
+    let image = read_slice(&directory, 0)?;
+    let has_more = output.slices > 1;
+    let mut result = image_result(image, has_more);
     if has_more {
-        let next = ImageCursor {
+        result["nextCursor"] = json!(encode_cursor(&ImageCursor {
             v: VERSION,
             mail_id: mail_id.to_owned(),
             revision,
-            remote,
-            resources_revision,
-            next_slice: slice + 1,
-        };
-        let next = serde_json::to_vec(&next).map_err(|_| "email_cursor_encoding_failed")?;
-        result["nextCursor"] = Value::String(URL_SAFE_NO_PAD.encode(next));
+            cache_id,
+            next_slice: 1,
+        })?);
+        cache_guard.keep();
     }
     Ok(result)
+}
+
+fn image_result(image: Vec<u8>, has_more: bool) -> Value {
+    json!({
+        "images": [{"mimeType": "image/png", "data": STANDARD.encode(image)}],
+        "hasMore": has_more,
+    })
+}
+
+fn encode_cursor(cursor: &ImageCursor) -> Result<String, String> {
+    let bytes = serde_json::to_vec(cursor).map_err(|_| "email_cursor_invalid")?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn content_revision(html: &str, resources: &[EmailCidResource]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(html.as_bytes());
+    let mut resources = resources.iter().collect::<Vec<_>>();
+    resources.sort_by(|left, right| left.content_id.cmp(&right.content_id));
+    for resource in resources {
+        hasher.update(resource.content_id.as_bytes());
+        hasher.update(resource.content_type.as_bytes());
+        hasher.update(&resource.bytes);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn decode_cursor(cursor: &str, mail_id: &str, revision: &str) -> Result<ImageCursor, String> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| "email_cursor_invalid")?;
+    let decoded: ImageCursor =
+        serde_json::from_slice(&bytes).map_err(|_| "email_cursor_invalid")?;
+    if decoded.v != VERSION
+        || decoded.mail_id != mail_id
+        || decoded.revision != revision
+        || decoded.next_slice == 0
+        || Uuid::parse_str(&decoded.cache_id).is_err()
+    {
+        return Err("email_cursor_invalid".to_owned());
+    }
+    Ok(decoded)
+}
+
+fn cache_directory(cache_root: &Path, cache_id: &str) -> Result<PathBuf, String> {
+    let uuid = Uuid::parse_str(cache_id).map_err(|_| "email_cursor_invalid")?;
+    let directory = cache_root.join(uuid.simple().to_string());
+    if !directory.is_dir() {
+        return Err("email_cursor_invalid".to_owned());
+    }
+    Ok(directory)
+}
+
+fn create_cache_directory(cache_root: &Path, cache_id: &str) -> Result<PathBuf, String> {
+    let directory = cache_root.join(cache_id);
+    std::fs::create_dir(&directory).map_err(|_| "email_renderer_cache_unavailable")?;
+    Ok(directory)
+}
+
+struct RenderCacheGuard {
+    directory: PathBuf,
+    remove: bool,
+}
+
+impl RenderCacheGuard {
+    fn new(directory: PathBuf) -> Self {
+        Self {
+            directory,
+            remove: true,
+        }
+    }
+
+    fn keep(&mut self) {
+        self.remove = false;
+    }
+}
+
+impl Drop for RenderCacheGuard {
+    fn drop(&mut self) {
+        if self.remove {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
+fn write_cache_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| "email_renderer_cache_unavailable".to_owned())?;
+    file.write_all(bytes)
+        .map_err(|_| "email_renderer_cache_unavailable".to_owned())
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value).map_err(|_| "email_renderer_cache_unavailable")?;
+    write_cache_file(path, &bytes)
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+    let bytes = std::fs::read(path).map_err(|_| "email_cursor_invalid")?;
+    serde_json::from_slice(&bytes).map_err(|_| "email_cursor_invalid".to_owned())
+}
+
+fn slice_path(directory: &Path, slice: u32) -> PathBuf {
+    directory.join(format!("slice-{slice}.png"))
+}
+
+fn read_slice(directory: &Path, slice: u32) -> Result<Vec<u8>, String> {
+    let path = slice_path(directory, slice);
+    let image = std::fs::read(path).map_err(|_| "email_cursor_invalid")?;
+    let base64_len = image.len().div_ceil(3) * 4;
+    if base64_len > MAX_IMAGE_BASE64_BYTES {
+        return Err("email_render_image_too_large".to_owned());
+    }
+    Ok(image)
 }
 
 struct RenderChild(Option<Child>);
@@ -167,24 +280,8 @@ impl Drop for RenderChild {
     }
 }
 
-/// Discover image URLs through the same library callbacks as the final render.
-/// The caller already owns the rendering permit; this worker never performs I/O.
-pub(crate) async fn discover(html: &str) -> Result<Vec<String>, String> {
-    Ok(run_worker(&WorkerRequest {
-        html: html.to_owned(),
-        slice: 0,
-        discover: true,
-        resources: BTreeMap::new(),
-    })
-    .await?
-    .sources)
-}
-
 async fn run_worker(request: &WorkerRequest) -> Result<WorkerResponse, String> {
     let input = serde_json::to_vec(request).map_err(|_| "email_renderer_request_failed")?;
-    if input.len() > MAX_REQUEST_BYTES {
-        return Err("email_render_prepared_too_large".to_owned());
-    }
     let executable = std::env::current_exe().map_err(|_| "email_renderer_unavailable")?;
     let child = Command::new(executable)
         .arg("__email-render-worker")
@@ -199,7 +296,7 @@ async fn run_worker(request: &WorkerRequest) -> Result<WorkerResponse, String> {
     let child = guard.0.as_mut().ok_or("email_renderer_unavailable")?;
     let work = async {
         let mut stdin = child.stdin.take().ok_or("email_renderer_io_failed")?;
-        let stdout = child.stdout.take().ok_or("email_renderer_io_failed")?;
+        let mut stdout = child.stdout.take().ok_or("email_renderer_io_failed")?;
         stdin
             .write_all(&input)
             .await
@@ -207,13 +304,9 @@ async fn run_worker(request: &WorkerRequest) -> Result<WorkerResponse, String> {
         drop(stdin);
         let mut output = Vec::new();
         stdout
-            .take(MAX_RESPONSE_BYTES as u64 + 1)
             .read_to_end(&mut output)
             .await
             .map_err(|_| "email_renderer_io_failed")?;
-        if output.len() > MAX_RESPONSE_BYTES {
-            return Err("email_render_image_too_large".to_owned());
-        }
         let status = child
             .wait()
             .await
@@ -228,34 +321,27 @@ async fn run_worker(request: &WorkerRequest) -> Result<WorkerResponse, String> {
         }
         serde_json::from_value(value).map_err(|_| "email_renderer_response_invalid".to_owned())
     };
-    let result = tokio::time::timeout(WORKER_TIMEOUT, work)
-        .await
-        .unwrap_or_else(|_| Err("email_renderer_timeout".to_owned()));
-    // Explicitly reap on success, input/output failure and timeout. Drop handles
-    // cancellation of the caller, with kill_on_drop as a final fallback.
+    let result = work.await;
     if let Some(mut child) = guard.0.take() {
-        let _ = child.start_kill();
         let _ = child.wait().await;
     }
     result
 }
 
-/// Hidden command entrypoint. Call before normal Agent configuration/startup.
+/// Hidden command entrypoint. The current-thread runtime keeps Obscura page,
+/// V8 and their destruction on the same thread.
 pub(crate) fn worker() -> anyhow::Result<()> {
-    use std::io::{Read, Write};
-
-    set_resource_limits()?;
     let mut input = Vec::new();
-    std::io::stdin()
-        .take(MAX_REQUEST_BYTES as u64 + 1)
-        .read_to_end(&mut input)?;
-    let result = if input.len() > MAX_REQUEST_BYTES {
-        Err("email_render_html_too_large".to_owned())
-    } else {
-        serde_json::from_slice::<WorkerRequest>(&input)
-            .map_err(|_| "email_renderer_request_invalid".to_owned())
-            .and_then(render_document)
-    };
+    std::io::stdin().read_to_end(&mut input)?;
+    let result = serde_json::from_slice::<WorkerRequest>(&input)
+        .map_err(|_| "email_renderer_request_invalid".to_owned())
+        .and_then(|request| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "email_renderer_runtime_unavailable".to_owned())?
+                .block_on(render_document(request))
+        });
     let output = match result {
         Ok(output) => serde_json::to_vec(&output)?,
         Err(error) => serde_json::to_vec(&json!({"error": error}))?,
@@ -264,283 +350,76 @@ pub(crate) fn worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn set_resource_limits() -> anyhow::Result<()> {
-    for (resource, maximum) in [(libc::RLIMIT_AS, 512 * 1024 * 1024), (libc::RLIMIT_CPU, 20)] {
-        let limit = libc::rlimit {
-            rlim_cur: maximum,
-            rlim_max: maximum,
-        };
-        // SAFETY: `limit` is a valid rlimit. Limits affect this disposable worker only.
-        if unsafe { libc::setrlimit(resource, &limit) } != 0 {
-            anyhow::bail!("email_renderer_limit_failed");
-        }
-    }
-    Ok(())
-}
+async fn render_document(request: WorkerRequest) -> Result<WorkerResponse, String> {
+    let cid_resources = request
+        .cid_resources
+        .into_iter()
+        .map(|resource| {
+            Ok(CidResource {
+                content_id: resource.content_id,
+                content_type: resource.content_type,
+                bytes: STANDARD
+                    .decode(resource.data)
+                    .map_err(|_| "email_renderer_cid_invalid")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut context = BrowserContext::with_storage_and_network(
+        "email-render".to_owned(),
+        None,
+        false,
+        None,
+        None,
+        true,
+    );
+    context.set_allow_file_access(true);
+    let mut page = Page::new("email-render".to_owned(), Arc::new(context));
+    page.set_viewport((WIDTH, VIEWPORT_HEIGHT));
+    page.navigate_html(request.html.as_bytes(), None, cid_resources)
+        .await
+        .map_err(|error| error.to_string())?;
 
-fn render_document(request: WorkerRequest) -> Result<WorkerResponse, String> {
-    if request.html.len() > MAX_HTML_BYTES || request.slice >= MAX_HEIGHT / SLICE_HEIGHT {
-        return Err("email_renderer_request_invalid".to_owned());
+    // Navigation has its own readiness behavior. Drain renderer resources to
+    // completion as well, without imposing a screenshot-specific wait cutoff.
+    page.spawn_pending_render_resources();
+    while page.has_pending_render_resources() {
+        page.drain_render_resource_results();
+        if page.has_pending_render_resources() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
-    // Only an in-memory URI map is serviced. No URL fetcher, file loading or
-    // stylesheet imports are available in this disposable worker.
-    let html = normalize_image_attributes(&request.html)?;
-    let prepared = prepare_email_html(html.as_bytes(), None, None);
-    let mut container = PixbufContainer::new(WIDTH, SLICE_HEIGHT);
-    let mut loaded = HashSet::new();
-    let mut blocked = BTreeSet::new();
-    let mut pixels = 0;
-    for (uri, bytes) in request.resources {
-        let bytes = STANDARD
-            .decode(bytes)
-            .map_err(|_| "email_render_image_invalid")?;
-        load_inline_image(&mut container, &mut loaded, &mut pixels, uri, bytes)?;
-    }
-    for (uri, bytes) in prepared.images {
-        load_inline_image(&mut container, &mut loaded, &mut pixels, uri, bytes)?;
-    }
-    for _ in 0..4 {
-        let height = {
-            let mut document = Document::from_html(
-                &prepared.html,
-                &mut container,
-                // A custom master sheet replaces all built-in HTML defaults.
-                // EMAIL_MASTER_CSS is only a reset, so passing it here makes
-                // div/p/table inline and destroys long-email layout.
-                None,
-                Some(RENDER_CSS),
-            )
-            .map_err(|_| "email_render_html_invalid")?;
-            let _ = document.render(WIDTH as f32);
-            let height = document.height().ceil();
-            if !height.is_finite() || height < 0.0 || height > MAX_HEIGHT as f32 {
-                return Err("email_render_height_exceeded".to_owned());
-            }
-            let height = (height as u32).max(1);
-            document.draw(
-                DrawContext::default(),
-                0.0,
-                -(request.slice as f32 * SLICE_HEIGHT as f32),
-                Some(Position {
-                    x: 0.0,
-                    y: 0.0,
-                    width: WIDTH as f32,
-                    // Discovery must visit background images below the first
-                    // slice too. The fixed pixbuf clips writes independently.
-                    height: if request.discover {
-                        height as f32
-                    } else {
-                        SLICE_HEIGHT as f32
-                    },
-                }),
-            );
-            height
-        };
-        // Background images and attributes not recognized by the preprocessing
-        // helper are discovered by the real layout/drawing callbacks here.
-        let mut added = false;
-        for (uri, _) in container.take_pending_images() {
-            if uri.starts_with("data:") {
-                let bytes =
-                    litehtml::html::decode_data_uri(&uri).ok_or("email_render_image_invalid")?;
-                added |= load_inline_image(&mut container, &mut loaded, &mut pixels, uri, bytes)?;
-            } else if !uri.starts_with("cid:") {
-                blocked.insert(uri);
-            }
-        }
-        if added {
-            container.resize(WIDTH, SLICE_HEIGHT);
-            continue;
-        }
-        if request.discover {
-            return Ok(WorkerResponse {
-                data: String::new(),
-                height,
-                blocked_remote_images: blocked.len(),
-                sources: blocked
-                    .into_iter()
-                    .filter(|uri| {
-                        let lower = uri.to_ascii_lowercase();
-                        lower.starts_with("http:")
-                            || lower.starts_with("https:")
-                            || lower.starts_with("//")
-                    })
-                    .filter(|uri| uri.len() <= 4096)
-                    .take(16)
-                    .collect(),
-            });
-        }
-        if request.slice * SLICE_HEIGHT >= height {
-            return Err("email_cursor_invalid".to_owned());
-        }
-        let slice_height = (height - request.slice * SLICE_HEIGHT).min(SLICE_HEIGHT);
-        let mut rgba = container.pixels()[..(WIDTH * slice_height * 4) as usize].to_vec();
-        // litehtml's buffer is premultiplied RGBA. Composite onto opaque white
-        // before encoding, so transparent email backgrounds remain readable.
-        for pixel in rgba.as_chunks_mut::<4>().0 {
-            let white = 255 - pixel[3];
-            pixel[0] = pixel[0].saturating_add(white);
-            pixel[1] = pixel[1].saturating_add(white);
-            pixel[2] = pixel[2].saturating_add(white);
-            pixel[3] = 255;
-        }
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(&rgba, WIDTH, slice_height, image::ExtendedColorType::Rgba8)
-            .map_err(|_| "email_render_encoding_failed")?;
-        let data = STANDARD.encode(png);
-        if data.len() > MAX_IMAGE_BASE64_BYTES {
-            return Err("email_render_image_too_large".to_owned());
-        }
-        return Ok(WorkerResponse {
-            data,
-            height,
-            blocked_remote_images: blocked.len(),
-            sources: Vec::new(),
-        });
-    }
-    Err("email_render_resources_unstable".to_owned())
-}
+    page.drain_render_resource_results();
 
-fn load_inline_image(
-    container: &mut PixbufContainer,
-    loaded: &mut HashSet<String>,
-    pixels: &mut u64,
-    uri: String,
-    bytes: Vec<u8>,
-) -> Result<bool, String> {
-    if loaded.contains(&uri) {
-        return Ok(false);
+    let (_, measured_height) = page
+        .prepared_content_size()
+        .ok_or_else(|| "email_renderer_layout_unavailable".to_owned())?;
+    let height = measured_height.ceil().max(1.0);
+    if !height.is_finite() {
+        return Err("email_renderer_layout_unavailable".to_owned());
     }
-    if loaded.len() >= MAX_INLINE_IMAGES {
-        return Err("email_render_image_count_exceeded".to_owned());
-    }
-    let output =
-        crate::file_ops::read_image_bytes(&bytes, crate::file_ops::MAX_IMAGE_RESPONSE_BYTES)
-            .map_err(|_| "email_render_image_invalid")?
-            .ok_or("email_render_image_unsupported")?;
-    let image = &output.value["image"];
-    let width = image["width"]
-        .as_u64()
-        .ok_or("email_render_image_invalid")?;
-    let height = image["height"]
-        .as_u64()
-        .ok_or("email_render_image_invalid")?;
-    *pixels = pixels
-        .checked_add(
-            width
-                .checked_mul(height)
-                .ok_or("email_render_image_too_large")?,
-        )
-        .filter(|count| *count <= MAX_INLINE_PIXELS)
-        .ok_or("email_render_image_too_large")?;
-    // GIF validation produces bounded PNG samples. Freeze at the first sample
-    // instead of allowing animation to change a later cursor slice.
-    let first = output.images.first().ok_or("email_render_image_invalid")?;
-    container.load_image_data(&uri, &first.bytes);
-    loaded.insert(uri);
-    Ok(true)
-}
-
-/// litehtml does not select srcset candidates, and legacy background support
-/// differs across element types. Normalize these attributes once in the worker;
-/// the engine discovers and resolves every resulting CSS image itself.
-fn normalize_image_attributes(html: &str) -> Result<String, String> {
-    const MAX_NODES: usize = 100_000;
-    if html
-        .bytes()
-        .filter(|byte| *byte == b'<')
-        .take(MAX_NODES + 1)
-        .count()
-        > MAX_NODES
-    {
-        return Err("email_render_html_complexity_exceeded".to_owned());
-    }
-    let dom = parse_document(RcDom::default(), Default::default()).one(html);
-    let mut stack = vec![(dom.document.clone(), 0)];
-    let mut count = 0;
-    while let Some((node, depth)) = stack.pop() {
-        count += 1;
-        if count > MAX_NODES || depth > 128 {
-            return Err("email_render_html_complexity_exceeded".to_owned());
-        }
-        if let NodeData::Element { name, attrs, .. } = &node.data {
-            let mut attrs = attrs.borrow_mut();
-            let attribute = |key: &str| {
-                attrs
-                    .iter()
-                    .find(|attr| {
-                        attr.name.ns.as_ref().is_empty() && attr.name.local.as_ref() == key
-                    })
-                    .map(|attr| attr.value.as_ref().trim().to_owned())
-            };
-            if name.local.as_ref() == "img" && attribute("src").is_none_or(|src| src.is_empty()) {
-                if let Some(source) = attribute("srcset").and_then(|value| {
-                    value
-                        .trim_start_matches(|c: char| c.is_ascii_whitespace() || c == ',')
-                        .split_ascii_whitespace()
-                        .next()
-                        .map(|source| source.trim_end_matches(',').to_owned())
-                        .filter(|source| !source.is_empty())
-                }) {
-                    attrs.retain(|attr| attr.name.local.as_ref() != "src");
-                    attrs.push(Attribute {
-                        name: QualName::new(None, Default::default(), "src".into()),
-                        value: source.into(),
-                    });
-                }
+    let animation_time = page.live_animation_sample().time;
+    let mut y = 0.0;
+    let mut slice = 0u32;
+    while y < height {
+        let mut slice_height = SLICE_HEIGHT.min(height - y);
+        loop {
+            let png = page
+                .screenshot_region_at_animation_time(
+                    CaptureRegion::new(0.0, y, WIDTH, slice_height, 1.0),
+                    animation_time,
+                )
+                .map_err(|_| "email_renderer_screenshot_failed".to_owned())?;
+            if png.len().div_ceil(3) * 4 <= MAX_IMAGE_BASE64_BYTES {
+                write_cache_file(&slice_path(&request.cache_dir, slice), &png)?;
+                break;
             }
-            if matches!(name.local.as_ref(), "body" | "table" | "tr" | "td" | "th") {
-                let background = attrs
-                    .iter()
-                    .find(|attr| attr.name.local.as_ref() == "background")
-                    .map(|attr| attr.value.to_string());
-                if let Some(background) = background.filter(|source| !source.trim().is_empty()) {
-                    let mut quoted = String::new();
-                    for character in background.chars() {
-                        match character {
-                            '\\' | '"' => {
-                                quoted.push('\\');
-                                quoted.push(character);
-                            }
-                            '\n' | '\r' | '\u{c}' => quoted.push_str("\\a "),
-                            '\0' => quoted.push('\u{fffd}'),
-                            _ => quoted.push(character),
-                        }
-                    }
-                    let prefix = format!("background-image:url(\"{quoted}\");");
-                    if let Some(style) = attrs
-                        .iter_mut()
-                        .find(|attr| attr.name.local.as_ref() == "style")
-                    {
-                        style.value = format!("{prefix}{}", style.value).into();
-                    } else {
-                        attrs.push(Attribute {
-                            name: QualName::new(None, Default::default(), "style".into()),
-                            value: prefix.into(),
-                        });
-                    }
-                    attrs.retain(|attr| attr.name.local.as_ref() != "background");
-                }
+            if slice_height <= 1.0 {
+                return Err("email_render_image_too_large".to_owned());
             }
+            slice_height = (slice_height / 2.0).floor().max(1.0);
         }
-        stack.extend(
-            node.children
-                .borrow()
-                .iter()
-                .rev()
-                .map(|node| (node.clone(), depth + 1)),
-        );
+        y += slice_height;
+        slice += 1;
     }
-    let mut output = Vec::new();
-    serialize(
-        &mut output,
-        &SerializableHandle::from(dom.document.clone()),
-        Default::default(),
-    )
-    .map_err(|_| "email_render_html_invalid")?;
-    if output.len() > MAX_HTML_BYTES {
-        return Err("email_render_html_too_large".to_owned());
-    }
-    String::from_utf8(output).map_err(|_| "email_render_html_invalid".to_owned())
+    Ok(WorkerResponse { slices: slice })
 }

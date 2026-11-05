@@ -7,7 +7,7 @@
 按 `.github/workflows/ci.yml` 指定的顺序运行 Rust CI 检查：
 
 ```bash
-cargo fmt --all -- --check
+cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -p agentic-browser-host -- --check
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -39,7 +39,7 @@ loopback/私有主目录进程并在结束时清理；schema 验证与实时行�
 备份配置、数据库及 sidecar，并按该旧版本对应的版本化发布说明处理。不要把历史迁移步骤当作
 当前命令接口，也不要让新实例直接覆盖尚未核验的旧目录。
 
-邮件图片缓存位于 `~/.agentic_gpt/cache/email/`。图片渲染使用随包构建的 `litehtml-rs`，构建需 C++17，运行需合适字体，无需安装 Chrome 或 Python，也不要求启用项目 Browser。`read` 默认 text；image 离线，只有显式 imageWithRemote 才允许下载远程图片，两者均不执行脚本或加载远程 CSS。邮件本地内容受保存天数与容量上限控制；导出到 workspace 的附件不参与该清理。账户连接、图片视图的用法、首次导入与重启后的提醒行为见[Room 邮件使用指南](email.zh-CN.md)。服务器邮件编号变化导致 `recoveryRequired` 时，先停止 Agent，再使用 `agentic-gpt email --config PATH recover --notify-existing` 或 `--skip-existing-notifications` 显式选择恢复提醒方式；旧副本保留，新导入生成新 ID。远程图片缓存保留 24 小时且最多 64 MiB；详情和续读失效处理见[邮件恢复与读取](email.zh-CN.md)。
+邮件图片由 Obscura 渲染原始 HTML 页面，并按页面内容加载资源，包括远程资源和 CID 内嵌资源；运行需要可用系统字体。邮件本地内容受保存天数与容量上限控制；导出到 workspace 的附件不参与该清理。账户连接、图片视图的用法、首次导入与重启后的提醒行为见[Room 邮件使用指南](email.zh-CN.md)。服务器邮件编号变化导致 `recoveryRequired` 时，先停止 Agent，再使用 `agentic-gpt email --config PATH recover --notify-existing` 或 `--skip-existing-notifications` 显式选择恢复提醒方式；旧副本保留，新导入生成新 ID。详情和续读失效处理见[邮件恢复与读取](email.zh-CN.md)。
 
 ## 本地/Standalone 冒烟检查（主要路径）
 

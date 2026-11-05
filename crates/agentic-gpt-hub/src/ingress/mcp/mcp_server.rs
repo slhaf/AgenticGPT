@@ -1299,7 +1299,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.email.read",
-        description = "按稳定邮件 id 读取活动 Room 邮件；view 默认 text，返回规范化正文和 plain/markdown 格式；image 返回不联网的图片分片，imageWithRemote 仅额外下载邮件引用的远程图片，不加载远程 CSS，不执行脚本或提交表单。返回邮件详情、附件清单、hasMore 和可选 nextCursor；续读保持 id/view，不会标为已读。sent/unknown 等本地发送记录可回看；内容已清理或不存在时返回明确 error。不接受 agentId。"
+        description = "按稳定邮件 id 读取活动 Room 邮件；view 默认 text，返回规范化正文和 plain/markdown 格式；image 将邮件 HTML 页面渲染为图片分片，并按页面内容加载资源，包括远程资源和邮件中的 CID 内嵌资源。返回邮件详情、附件清单、hasMore 和可选 nextCursor；续读保持 id/view，不会标为已读。sent/unknown 等本地发送记录可回看；内容已清理或不存在时返回明确 error。不接受 agentId。"
     )]
     async fn room_email_read(
         &self,

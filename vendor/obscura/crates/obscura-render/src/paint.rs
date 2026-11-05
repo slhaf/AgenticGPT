@@ -7719,6 +7719,14 @@ fn resolve_resource_url(src: &str, base_url: Option<&str>) -> Option<String> {
     if src.starts_with("data:") {
         return Some(src.to_string());
     }
+    // CID references are absolute opaque URLs. They do not need (and usually
+    // have no) document base URL, but still pass through the same resource
+    // cache as other image URLs.
+    if let Ok(url) = url::Url::parse(src) {
+        if url.scheme() == "cid" {
+            return Some(url.to_string());
+        }
+    }
     // Resolve relative to the document's base URL: the overwhelming majority
     // of real markup uses relative image paths ("logo.svg", not
     // "https://example.com/logo.svg"), so without this every relative <img>

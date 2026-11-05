@@ -30,10 +30,9 @@ imap-proto = "0.16.1"
 lettre = { version = "=0.11.23", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 mailparse = "=0.18.0"
 htmd = "=0.5.6"
-html5ever = "=0.38.0"
-markup5ever_rcdom = "0.38"
 libc = "0.2"
-litehtml = { version = "=0.2.6", features = ["vendored", "email", "pixbuf"] }
+obscura-browser = { path = "../../vendor/obscura/crates/obscura-browser", features = ["render"] }
+obscura-js = { path = "../../vendor/obscura/crates/obscura-js", features = ["render"] }
 notify-rust = "4.11"
 zbus = "5.15"
 parking_lot = "0.12"
@@ -56,6 +55,7 @@ tokio-util = "0.7"
 url = "2"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tar = "0.4"
+tempfile = "3"
 urlencoding = "2.1"
 xz2 = "0.1"
 unicode-width.workspace = true

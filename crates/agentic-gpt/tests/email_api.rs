@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::fs;
-use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -66,16 +65,13 @@ fn local_email_api_preserves_native_images_cursors_and_attachment_writes() {
     // Enabling only mail must not create a Room document repository.
     assert!(!workspace.join("room").exists());
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let remote = format!("http://{}/must-not-connect", listener.local_addr().unwrap());
     let id = format!("mail_{}", Uuid::new_v4().simple());
     let text = format!(
         "Email fixture text. {} needle-final",
         "Long paragraph for cursor traversal. ".repeat(1800)
     );
     let html = format!(
-        r#"<html><body><img src="{remote}" width="20" height="20"><div style="height:1800px;background:#aa3322">first slice</div><div style="height:1800px;background:#225599">second slice</div></body></html>"#
+        r#"<html><body><div style="height:1800px;background:#aa3322">first slice</div><div style="height:1800px;background:#225599">second slice</div></body></html>"#
     );
     fixture.seed(&id, &text, &html);
 
@@ -155,73 +151,6 @@ fn local_email_api_preserves_native_images_cursors_and_attachment_writes() {
     assert!(second_pixels
         .pixels()
         .any(|pixel| pixel.0 == [34, 85, 153, 255]));
-
-    let remote_image = fixture.call("room.email.read", json!({"id":id,"view":"imageWithRemote"}));
-    assert!(data(&remote_image)["blockedRemoteImages"].as_u64().unwrap() >= 1);
-    let remote_cursor = data(&remote_image)["nextCursor"]
-        .as_str()
-        .expect("remote image continuation");
-    let cache = fs::read_dir(fixture.root.join("h/.agentic_gpt/cache/email"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .find(|path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("remote-")
-        })
-        .unwrap();
-    let cached = fs::read(&cache).unwrap();
-    let continued = fixture.call(
-        "room.email.read",
-        json!({"id":id,"view":"imageWithRemote","cursor":remote_cursor}),
-    );
-    assert_ne!(native_image(&remote_image), native_image(&continued));
-    assert_eq!(
-        cached,
-        fs::read(&cache).unwrap(),
-        "continuation regenerated the prepared page"
-    );
-    // A rebuilt snapshot can change image dimensions and page boundaries. An
-    // old cursor must not continue against different downloaded image bytes.
-    let mut replaced: Value = serde_json::from_slice(&cached).unwrap();
-    replaced["images"][&remote] = json!(native_image(&remote_image));
-    fs::write(&cache, serde_json::to_vec(&replaced).unwrap()).unwrap();
-    let changed = fixture.call(
-        "room.email.read",
-        json!({"id":id,"view":"imageWithRemote","cursor":remote_cursor}),
-    );
-    assert_eq!(
-        changed["structuredContent"]["error"]["code"],
-        "email_render_cache_expired"
-    );
-    fs::remove_file(&cache).unwrap();
-    let expired = fixture.call(
-        "room.email.read",
-        json!({"id":id,"view":"imageWithRemote","cursor":remote_cursor}),
-    );
-    assert_eq!(
-        expired["structuredContent"]["error"]["code"],
-        "email_render_cache_expired"
-    );
-    // A previous-version derived snapshot must rebuild from page one, while a
-    // continuation must never silently re-download resources or change layout.
-    fs::write(
-        &cache,
-        serde_json::to_vec(&json!({
-            "createdAt": chrono::Utc::now().timestamp() as u64,
-            "htmlBase64": STANDARD.encode(b"old cached HTML")
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::set_permissions(&cache, fs::Permissions::from_mode(0o600)).unwrap();
-    let rebuilt = fixture.call("room.email.read", json!({"id":id,"view":"imageWithRemote"}));
-    assert_eq!(native_image(&rebuilt), native_image(&remote_image));
-    assert!(
-        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
-        "remote mode connected to a forbidden local URL"
-    );
 
     let attachment = data(&first_text)["attachments"][0]["id"].as_str().unwrap();
     let download = json!({"id":id,"attachmentId":attachment,"path":"downloads/fixture.bin"});

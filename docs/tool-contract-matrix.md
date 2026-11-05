@@ -100,7 +100,7 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | 名称 | 用途与输入 | 结果与副作用 |
 | --- | --- | --- |
 | `room.email.list` | 可选 `cursor`、`limit`、`filter`；仅列当前 INBOX。 | 返回本地列表，不触发同步，不标为已读。 |
-| `room.email.read` | `id`；可选 `view=text/image/imageWithRemote`（默认 text）和 `cursor`。 | 分段正文或图片及附件清单；image 离线，imageWithRemote 仅额外下载远程图片；不执行脚本或加载远程 CSS，不标为已读。 |
+| `room.email.read` | `id`；可选 `view=text/image`（默认 text）和 `cursor`。 | 分段正文或图片及附件清单；image 渲染邮件 HTML 页面并按页面内容加载资源，包括远程资源与 CID 内嵌资源；不标为已读。 |
 | `room.email.search` | `query`；可选 `id`、`field`。提供 `id` 时固定搜索正文。 | `items` 使用 `ref`/`text`，超预算报告 `truncated`；可查本地 `sent`/`unknown`。 |
 | `room.email.attachment` | `id`、`attachmentId`；可选 `download`、`path`。提供 `path` 即下载。 | 内联安全内容或写入 workspace；拒绝越界和覆盖，并应用文件权限。 |
 | `room.email.send` | `to`、`subject`、`text`；可选 `cc`、`bcc`、`replyToId`。 | SMTP 外发并保存发送记录；按 `sendPolicy` 严格确认或拒绝，unknown 不自动重发。 |

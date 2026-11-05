@@ -19,7 +19,6 @@ pub enum RoomEmailView {
     #[default]
     Text,
     Image,
-    ImageWithRemote,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

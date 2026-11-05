@@ -44,8 +44,6 @@ mod confirmation;
 mod email;
 #[path = "room/email_files.rs"]
 mod email_files;
-#[path = "room/email_remote.rs"]
-mod email_remote;
 #[path = "room/email_render.rs"]
 mod email_render;
 #[path = "operations/event_notifications.rs"]
@@ -123,7 +121,7 @@ use anyhow::Result;
 pub(crate) use config::WorkerProfile;
 
 fn main() -> Result<()> {
-    // Render untrusted HTML in a process with limits before starting Tokio threads.
+    // Keep Obscura and V8 on a short-lived, single-threaded worker lifecycle.
     if std::env::args().nth(1).as_deref() == Some("__email-render-worker") {
         return email_render::worker();
     }

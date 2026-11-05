@@ -248,7 +248,7 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 `room.email.list`、`room.email.read`、`room.email.search`、`room.email.attachment`、`room.email.send` 和 `room.email.operate` 由 Agent 执行；Hub Full 通过活动 Room 路由，HTTP 为同名的 `/v1/room/email/<action>` POST 路由，请求不带 `agentId`。Coordinator 不提供这些操作。六项操作与后台同步统一受 `room.email` 工具集控制；启用只影响工具发现和准入，不要求账户完整。六项操作都要求完整账户，调用时检查账户完整性；后台同步只在账户配置完整时尝试，密码引用和外部连接在使用时判断。
 
-`list` 只列本地记录的当前 INBOX；`read` 提供默认 `text`、离线 `image` 和仅额外下载远程图片的 `imageWithRemote`；三种模式都不执行脚本或加载远程 CSS，续读保持原模式；`search` 可查本地收件及发送记录；`attachment` 可内联读取或受文件权限检查导出至 workspace；`send` 发送纯文本；`operate` 修改已读、标星或移入垃圾箱。发送和移入垃圾箱由各自 `allow/confirm/deny` 配置控制，`confirm` 失败时不执行。六项响应复用现有公共 `events` 面板。HTTP 保留 JSON 图片数据，MCP 将图片投影为原生图片内容块并保留文本及结构化结果中的 `events`。
+`list` 只列本地记录的当前 INBOX；`read` 提供默认 `text` 和图片视图 `image`，后者将邮件 HTML 页面渲染为图片并按页面内容加载资源，包括远程资源与 CID 内嵌资源；续读保持原模式；`search` 可查本地收件及发送记录；`attachment` 可内联读取或受文件权限检查导出至 workspace；`send` 发送纯文本；`operate` 修改已读、标星或移入垃圾箱。发送和移入垃圾箱由各自 `allow/confirm/deny` 配置控制，`confirm` 失败时不执行。六项响应复用现有公共 `events` 面板。HTTP 保留 JSON 图片数据，MCP 将图片投影为原生图片内容块并保留文本及结构化结果中的 `events`。
 
 输入示例、继续读取规则、同步/清理及不确定发送结果见[Room 邮件使用指南](email.zh-CN.md)；HTTP schema 以 [OpenAPI](../openapi/hub.yaml) 为准。
 

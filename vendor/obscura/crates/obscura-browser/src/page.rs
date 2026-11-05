@@ -3735,7 +3735,7 @@ impl Page {
 
         self.navigation_timing.record("fetchStart");
         let intercepted = if synthetic_response.is_some() {
-            None
+            Ok(None)
         } else {
             self.intercept_navigation(&url, method, body).await
         }

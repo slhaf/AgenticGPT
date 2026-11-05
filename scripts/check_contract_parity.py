@@ -7334,7 +7334,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         # Enabled mail content/render/export remains covered by the Local binary test.
         for request_id, (action, payload) in enumerate((
             ("list", {}),
-            ("read", {"id": "fixture", "view": "imageWithRemote"}),
+            ("read", {"id": "fixture", "view": "image"}),
             ("search", {"query": "fixture", "field": "body"}),
             ("attachment", {"id": "fixture", "attachmentId": "attachment_1"}),
             ("send", {"to": ["fixture@example.invalid"], "subject": "fixture", "text": "fixture"}),

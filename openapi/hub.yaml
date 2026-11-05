@@ -1275,7 +1275,7 @@ paths:
   /v1/room/email/read:
     post:
       operationId: roomEmailRead
-      description: 读取本地邮件详情，默认 view=text；image 离线渲染图片分片，imageWithRemote 仅额外下载远程图片，不加载远程 CSS，不执行脚本或提交表单。不会标为已读；续读保持 id/view。HTTP 图片使用 mimeType/data Base64；MCP 返回原生图片内容，structuredContent 不重复携带图片数据。
+      description: 读取本地邮件详情，默认 view=text；image 将邮件 HTML 页面渲染为图片分片，并按页面内容加载资源，包括远程资源和邮件中的 CID 内嵌资源。不会标为已读；续读保持 id/view。HTTP 图片使用 mimeType/data Base64；MCP 返回原生图片内容，structuredContent 不重复携带图片数据。
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -3422,7 +3422,7 @@ components:
     RoomEmailListRequest:
       {"type": "object", "additionalProperties": false, "properties": {"cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}, "filter": {"$ref": "#/components/schemas/RoomEmailFilter"}}}
     RoomEmailReadRequest:
-      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "view": {"type": "string", "enum": ["text", "image", "imageWithRemote"], "default": "text", "description": "text 为规范化正文；image 不联网；imageWithRemote 仅额外下载远程图片，不加载远程 CSS，不执行脚本或提交表单。"}, "cursor": {"type": "string"}}, "required": ["id"]}
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "view": {"type": "string", "enum": ["text", "image"], "default": "text", "description": "text 返回规范化正文；image 将邮件 HTML 渲染为图片分片，并按页面内容加载资源。"}, "cursor": {"type": "string"}}, "required": ["id"]}
     RoomEmailSearchRequest:
       {"type": "object", "additionalProperties": false, "properties": {"query": {"type": "string", "minLength": 1}, "id": {"type": "string"}, "field": {"type": "string", "enum": ["all", "subject", "body", "from"], "default": "all", "description": "提供 id 时统一按 body 搜索。"}}, "required": ["query"]}
     RoomEmailAttachmentRequest:
@@ -3444,7 +3444,7 @@ components:
     RoomEmailImage:
       {"type": "object", "additionalProperties": false, "properties": {"mimeType": {"type": "string"}, "data": {"type": "string", "contentEncoding": "base64"}}, "required": ["mimeType", "data"]}
     RoomEmailReadResponse:
-      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "array", "items": {"type": "string"}}, "cc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "receivedAt": {"type": "string", "format": "date-time"}, "status": {"type": "string", "enum": ["received", "pending", "sent", "unknown", "failed", "denied"]}, "body": {"type": "string"}, "format": {"type": "string", "enum": ["plain", "markdown"]}, "attachments": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailAttachmentInfo"}}, "hasMore": {"type": "boolean"}, "nextCursor": {"type": ["string", "null"]}, "blockedRemoteImages": {"type": "integer", "minimum": 0, "description": "被阻断或无法加载的不同图片来源数，包含远程 CSS 背景图片。"}, "images": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailImage"}}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["id", "from", "to", "cc", "subject", "receivedAt", "status", "attachments", "hasMore"]}
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "array", "items": {"type": "string"}}, "cc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "receivedAt": {"type": "string", "format": "date-time"}, "status": {"type": "string", "enum": ["received", "pending", "sent", "unknown", "failed", "denied"]}, "body": {"type": "string"}, "format": {"type": "string", "enum": ["plain", "markdown"]}, "attachments": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailAttachmentInfo"}}, "hasMore": {"type": "boolean"}, "nextCursor": {"type": ["string", "null"]}, "images": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailImage"}}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["id", "from", "to", "cc", "subject", "receivedAt", "status", "attachments", "hasMore"]}
     RoomEmailAttachmentResponse:
       {"oneOf": [{"type": "object", "additionalProperties": false, "properties": {"path": {"type": "string"}, "events": {"$ref": "#/components/schemas/EventPanel"}}, "required": ["path"]}, {"type": "object", "additionalProperties": false, "properties": {"body": {"type": "string"}, "format": {"type": "string", "enum": ["plain"]}, "images": {"type": "array", "items": {"$ref": "#/components/schemas/RoomEmailImage"}}, "events": {"$ref": "#/components/schemas/EventPanel"}}}]}
     RoomEmailSendResponse:
