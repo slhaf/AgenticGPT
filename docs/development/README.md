@@ -106,7 +106,7 @@ The table identifies existing test names and commands in the source; it does not
 Run this local verification flow from the repository root. The Rust steps match the current [CI workflow](../../.github/workflows/ci.yml); the Python steps use an isolated virtual environment rather than copying the CI commands verbatim:
 
 ```bash
-cargo fmt --all -- --check
+cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -p agentic-browser-host -- --check
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

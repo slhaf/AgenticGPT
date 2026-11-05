@@ -28,7 +28,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -p agentic-browser-host -- --check
 
       - name: Check workspace
         run: cargo check --workspace

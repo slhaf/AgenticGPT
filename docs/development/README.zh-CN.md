@@ -106,7 +106,7 @@ Rust 单元测试放模块 `#[cfg(test)]` 测试模块或现有测试文件，�
 以下是在仓库根目录运行的本地验证流程。Rust 步骤与当前 [CI 工作流](../../.github/workflows/ci.yml) 对齐；Python 部分采用隔离虚拟环境，不是 CI 命令的逐字复制：
 
 ```bash
-cargo fmt --all -- --check
+cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -p agentic-browser-host -- --check
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

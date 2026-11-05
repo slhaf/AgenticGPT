@@ -1,4 +1,4 @@
-# The 0.2.5 GNU images use GCC 5.4, while litehtml requires C++17.
+# The 0.2.5 GNU images use GCC 5.4, which is too old for the C++ dependencies.
 [target.x86_64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
 

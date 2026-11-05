@@ -30,6 +30,7 @@ for target in "${TARGETS[@]}"; do
   for bin in "${BINS[@]}"; do
     cp "$target_build_dir/$target/release/$bin" "dist/$target/$bin"
   done
+  scripts/stage-linux-licenses.sh "dist/$target"
 done
 
 printf 'release artifacts written to:\n'

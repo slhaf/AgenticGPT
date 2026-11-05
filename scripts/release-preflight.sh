@@ -35,7 +35,7 @@ for name in ("agentic-gpt", "agentic-gpt-hub"):
   echo "release tag $RELEASE_TAG matches agentic-gpt and agentic-gpt-hub Cargo versions $expected_version"
 fi
 
-cargo fmt --all -- --check
+cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -p agentic-browser-host -- --check
 cargo check --workspace
 cargo test --workspace
 cargo build -p agentic-gpt -p agentic-gpt-hub

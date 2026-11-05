@@ -18,7 +18,7 @@ The root Cargo workspace contains five Rust crates: `crates/agentic-gpt` (Linux 
 
 - `cargo check --workspace`: type-check all Rust crates quickly.
 - `cargo test --workspace`: run the full Rust test suite.
-- `cargo fmt --all -- --check`: enforce CI formatting.
+- `cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -p agentic-browser-host -- --check`: enforce formatting for the five repository crates.
 - `python3 scripts/check_contract_parity.py`: run the live cross-surface contract gate after building the Agent/Hub binaries and installing its Python dependencies; see `docs/operations.md` for the isolated environment setup.
 - `cargo run -p agentic-gpt-hub -- init`: initialize a development hub.
 - `cargo run -p agentic-gpt -- run`: launch the local agent.

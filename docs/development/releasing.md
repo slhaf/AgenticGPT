@@ -12,7 +12,7 @@ bash scripts/release-preflight.sh
 
 该[预检脚本](../../scripts/release-preflight.sh)不会创建 tag、构建 Linux 发行包或发布 GitHub Release。它会依次执行：
 
-1. 检查格式（`cargo fmt --all -- --check`）。
+1. 检查仓库五个 Rust crate 的格式（`cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -p agentic-browser-host -- --check`）。
 2. 检查并测试 Rust 工作区。
 3. 构建 `agentic-gpt` 与 `agentic-gpt-hub`。
 4. 运行 OpenAPI schema 和真实进程的跨端契约检查。
@@ -45,7 +45,7 @@ cargo install cross --git https://github.com/cross-rs/cross
 ./scripts/dist-linux.sh
 ```
 
-脚本对 `x86_64` 和 `aarch64` 的 GNU 与 musl 四个目标执行工作区的 release 构建，其中 musl 产物静态链接。脚本将三个二进制复制到各自 `dist/<target>/` 目录：`agentic-gpt`、`agentic-gpt-hub`、`agentic-browser-host`。
+脚本对 `x86_64` 和 `aarch64` 的 GNU 与 musl 四个目标执行工作区的 release 构建，其中 musl 产物静态链接。脚本将三个二进制以及 Agentic `LICENSE`、`THIRD_PARTY_NOTICES.md` 和第三方许可证全文复制到各自 `dist/<target>/` 目录。Obscura、V8/rusty_v8 与内置字体的声明随 Linux 发行包提供。
 
 构建镜像由 [`Cross.toml`](../../Cross.toml) 指定；首次构建需要下载镜像。各目标使用独立的构建缓存，避免不同镜像复用不兼容的构建中间文件。
 
@@ -61,7 +61,7 @@ rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unkn
 
 此命令会编译并写入或覆盖本地 `dist/` 产物，但不会创建 tag 或发布 GitHub Release。
 
-[`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述三个二进制，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布四个压缩包与校验和文件，并使用标签对应的 `docs/release-notes-<tag>.md` 作为 Release 正文。
+[`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述三个二进制、Agentic `LICENSE`、`THIRD_PARTY_NOTICES.md` 和 `licenses/`，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布四个压缩包与校验和文件，并使用标签对应的 `docs/release-notes-<tag>.md` 作为 Release 正文。
 
 ## 触发实际发布
 
