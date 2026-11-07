@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     fs,
     future::Future,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -201,10 +202,45 @@ pub(crate) async fn resolve_browser_runtime_with_sources(
 }
 
 fn browser_runtime_context(
-    _source: &str,
+    source: &str,
     descriptor: browser_runtime::BrowserRuntimeDescriptor,
 ) -> Result<Arc<BrowserRuntimeContext>> {
-    let launch_spec = browser_runtime::build_node_repl_launch_spec(&descriptor, &BTreeMap::new())?;
+    let mut launch_spec =
+        browser_runtime::build_node_repl_launch_spec(&descriptor, &BTreeMap::new())?;
+    if source.starts_with("managed-")
+        && std::env::var("BROWSER_USE_SECURITY_MODE").as_deref() == Ok("disabled-for-local-testing")
+        && std::env::var_os("CODEX_CLI_PATH").is_none()
+        && !std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| {
+                launch_spec
+                    .cwd
+                    .join(directory)
+                    .join("codex")
+                    .metadata()
+                    .is_ok_and(|metadata| {
+                        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                    })
+            })
+        })
+    {
+        let executable = std::env::current_exe()
+            .map_err(|error| anyhow!("browser_runtime_executable_unavailable:{error}"))?;
+        launch_spec.env_overrides.insert(
+            "CODEX_CLI_PATH".to_string(),
+            executable
+                .to_str()
+                .ok_or_else(|| anyhow!("browser_runtime_path_not_utf8:agentic_executable"))?
+                .to_string(),
+        );
+        launch_spec.env_overrides.insert(
+            "AGENTIC_BROWSER_CONFIG_ADAPTER".to_string(),
+            "1".to_string(),
+        );
+        launch_spec.env_overrides.insert(
+            "BROWSER_USE_DISABLE_AMBIENT_NETWORK".to_string(),
+            "1".to_string(),
+        );
+    }
     Ok(BrowserRuntimeContext::new(descriptor, launch_spec))
 }
 

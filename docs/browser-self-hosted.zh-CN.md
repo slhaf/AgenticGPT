@@ -4,7 +4,7 @@ Agentic 的 `browser.*` 工具通过持久 `node_repl` kernel 使用 OpenAI 官�
 
 Standalone、Local 和已连接 Hub 的 Agent 运行时、工具表面及配置行为见[Standalone 与本地 MCP 运行时参考](standalone-runtime.md)。
 
-这条路径面向受控的自托管 Linux 环境，也支持用 Neko 常驻一只可人工接管的 Chromium。Agentic 不提交、复制或修改 OpenAI 的专有 Browser runtime 和 Chrome 扩展。
+这条路径面向受控的自托管 Linux 环境，也支持用 Neko 常驻一只可人工接管的 Chromium。Agentic 不提交、随发行包分发或修改 OpenAI 的专有 Browser runtime 和 Chrome 扩展。
 
 > **证据状态：**下文标注为代码行为的内容来自仓库实现。Neko 镜像、绑定挂载、有效身份、共享 socket inode、ACL 以及隔离权限冒烟属于既有部署记录；本轮文档重建未访问该部署或重新运行验证，使用前须在实际环境核对。ARM64 的历史观察记录见 `.planning/2026-09-browser-host-runtime/progress.md`；标为**示例**的布局和数值不代表生产事实。
 
@@ -84,7 +84,7 @@ host 会在 `/tmp/codex-browser-use` 下创建后端 socket。Chrome/Chromium �
 
 ## 3. 启用托管 Browser 运行时
 
-Browser 运行时无需从 ChatGPT Desktop 复制。Agentic 可以从 OpenAI 官方签名 APT 分发中获取当前 Linux 运行时。若需在缓存为空时自动配置，请设置：
+Browser 运行时无需从 ChatGPT Desktop 复制。Agentic 可以从 OpenAI 官方签名 APT 分发中获取当前 Linux 运行时：下载完整安装包后，只提取 Browser 所需文件，并复用本地缓存。低于 `26.1027.51404` 的托管缓存不再使用；启用自动配置后会重新获取当前版本。若需自动配置，请设置：
 
 ```json
 {
@@ -103,7 +103,9 @@ Browser 运行时无需从 ChatGPT Desktop 复制。Agentic 可以从 OpenAI 官
 BROWSER_USE_SECURITY_MODE=disabled-for-local-testing agentic-gpt run
 ```
 
-不要将该变量全局导出给无关进程。Agentic 自身的 tool policy、confirmation、audit 与 Browser lease 仍然构成这条自托管链路的外层控制边界。
+不要将该变量全局导出给无关进程。Agentic 通过 Browser 工具集控制工具是否可用，记录操作审计，并通过 Browser lease 管理会话。
+
+在此模式下，如果没有指定 `CODEX_CLI_PATH` 且 `PATH` 中没有 Codex，Agentic 自己提供 Browser 所需的空配置，不需要安装 Codex。该接法不会读取 Codex 的配置或组织限制；启用 Browser 工具集后，调用方即可使用该运行时。
 
 ## Neko / 容器化 Chromium
 

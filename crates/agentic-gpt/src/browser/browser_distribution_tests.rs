@@ -583,7 +583,7 @@ fn package(root: &Path, bytes: &[u8]) -> VerifiedBrowserPackage {
     VerifiedBrowserPackage {
         deb_path: path,
         deb_sha256: sha256(bytes),
-        app_version: "1.2.3".into(),
+        app_version: "26.1027.51404".into(),
         channel: "prod".into(),
         target: current_target().into(),
         codex_home: root.join("codex"),

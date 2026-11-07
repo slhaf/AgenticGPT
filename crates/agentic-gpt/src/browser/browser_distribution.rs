@@ -46,6 +46,7 @@ const PINNED_REPOSITORY_FINGERPRINT: &str = "3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4
 const PINNED_REPOSITORY_KEY: &str = include_str!("../../assets/browser/openai-linux-repo-key.asc");
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PROVISION_OVERALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -270,6 +271,7 @@ async fn stream_http_file(
     let url = fixed_repository_url(&path)?;
     let response = client
         .get(url)
+        .timeout(HTTP_DOWNLOAD_TIMEOUT)
         .send()
         .await
         .map_err(|_| error("browser_runtime_acquisition_http_failed"))?;
@@ -464,6 +466,9 @@ async fn acquire_verified_package(
         &index,
         architecture,
     )?;
+    if !managed_runtime_version_supported(&selected.version) {
+        return Err(error("browser_runtime_acquisition_version_outdated"));
+    }
     fixed_repository_url(&selected.filename)?;
 
     let staging = root.join(".staging");
@@ -1081,8 +1086,20 @@ pub(crate) fn discover_managed_browser_runtime(
         target: target.to_string(),
         codex_home: codex_home.to_path_buf(),
     };
-    validate_artifact(&artifact, &package)
-        .map_err(|_| error("browser_runtime_cache_active_invalid"))
+    let descriptor = validate_artifact(&artifact, &package)
+        .map_err(|_| error("browser_runtime_cache_active_invalid"))?;
+    if !managed_runtime_version_supported(&descriptor.app_version) {
+        return Err(error("browser_runtime_cache_active_outdated"));
+    }
+    Ok(descriptor)
+}
+
+fn managed_runtime_version_supported(version: &str) -> bool {
+    let parts = version
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>();
+    matches!(parts, Ok(parts) if parts.as_slice() >= &[26, 1027, 51404])
 }
 
 fn activate(root: &Path, target: &str, version: &str, digest: &str) -> Result<()> {
