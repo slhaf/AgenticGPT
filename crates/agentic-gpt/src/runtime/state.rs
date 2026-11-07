@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak};
 
 use agentic_gpt_protocol::{AgentMessage, AgentRole};
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 
 use crate::{browser_manager::BrowserRuntimeManager, browser_runtime::BrowserRuntimeDescriptor};
 use crate::{config::Config, confirmation, process, skills};
@@ -172,16 +172,24 @@ impl BrowserRuntimeContext {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct BrowserRuntimeSlot {
     pub(crate) inner: Mutex<Option<Arc<BrowserRuntimeContext>>>,
+    pub(crate) changed: watch::Sender<()>,
 }
 
 impl BrowserRuntimeSlot {
     pub(crate) fn new(initial: Option<Arc<BrowserRuntimeContext>>) -> Self {
+        let (changed, _) = watch::channel(());
         Self {
             inner: Mutex::new(initial),
+            changed,
         }
+    }
+}
+
+impl Default for BrowserRuntimeSlot {
+    fn default() -> Self {
+        Self::new(None)
     }
 }
 

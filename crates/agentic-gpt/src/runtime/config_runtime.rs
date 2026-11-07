@@ -172,6 +172,7 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     }
 
     let mut browser_guard = None;
+    let mut browser_changed = false;
     if differs(&old.browser, &next.browser)
         || old
             .toolsets
@@ -180,47 +181,33 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
                 .toolsets
                 .is_enabled(crate::config::ToolNamespace::Browser)
     {
-        // Serialize lazy initialization with replacement. A failed preparation leaves the
-        // old owner alive; shutdown never replays browser actions.
+        // Keep the current owner closed until the new configuration is published.
         errors.remove("browser");
         let mut slot = state.browser_runtime.inner.lock().await;
         let enabled = next
             .toolsets
             .is_enabled(crate::config::ToolNamespace::Browser);
-        let prepared = if enabled {
-            tokio::time::timeout(
-                Duration::from_secs(30),
-                crate::browser_discovery::resolve_browser_runtime(&next),
-            )
-            .await
-            .ok()
-            .flatten()
+        let stopped = if let Some(context) = slot.as_ref() {
+            context.manager.shutdown().await
         } else {
-            None
+            Ok(())
         };
-        if enabled && prepared.is_none() {
-            if slot.is_some() {
-                next.browser = old.browser.clone();
+        match stopped {
+            Ok(()) => {
+                *slot = None;
+                if enabled {
+                    errors.insert("browser".into(), "browser_runtime_unavailable".into());
+                }
+                browser_changed = true;
             }
-            errors.insert("browser".into(), "browser_runtime_unavailable".into());
-        } else {
-            let stopped = if let Some(context) = slot.as_ref() {
-                context.manager.shutdown().await
-            } else {
-                Ok(())
-            };
-            match stopped {
-                Ok(()) => {
-                    *slot = prepared;
+            Err(error) => {
+                let code = crate::startup::error_code(&error.to_string());
+                if code != "browser_runtime_busy" {
+                    *slot = None;
+                    browser_changed = true;
                 }
-                Err(error) => {
-                    let code = crate::startup::error_code(&error.to_string());
-                    if code != "browser_runtime_busy" {
-                        *slot = None;
-                    }
-                    next.browser = old.browser.clone();
-                    errors.insert("browser".into(), code);
-                }
+                next.browser = old.browser.clone();
+                errors.insert("browser".into(), code);
             }
         }
         if let Some(error) = errors
@@ -268,7 +255,7 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
             .skill_installs
             .reconfigure(next.skills.max_concurrent_installs);
     }
-    // Lazy discovery also clears the Browser error. Keep its slot locked while
+    // Background preparation clears the Browser error. Keep its slot locked while
     // publishing the error table so an old snapshot cannot resurrect that error.
     let unchanged_browser = if browser_guard.is_none() {
         Some(state.browser_runtime.inner.lock().await)
@@ -282,6 +269,9 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
         errors.remove("browser");
     }
     *state.config_runtime.errors.write().await = errors;
+    if browser_changed {
+        state.browser_runtime.changed.send_replace(());
+    }
     drop(unchanged_browser);
     drop(browser_guard);
     drop(email_guard);

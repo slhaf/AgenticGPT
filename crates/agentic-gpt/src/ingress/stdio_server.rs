@@ -1449,10 +1449,7 @@ impl AgentMcpServer {
         Ok(())
     }
     async fn browser_runtime(&self) -> Option<Arc<crate::state::BrowserRuntimeContext>> {
-        // Configuration application holds this same slot until it publishes the
-        // matching config. Lock it first so delayed discovery cannot win a race
-        // against replacement with a runtime built from newer settings.
-        let mut slot = self.state.browser_runtime.inner.lock().await;
+        let slot = self.state.browser_runtime.inner.lock().await;
         let config = self.state.config.read().await.clone();
         if !config
             .toolsets
@@ -1460,15 +1457,7 @@ impl AgentMcpServer {
         {
             return None;
         }
-        if let Some(runtime) = slot.as_ref() {
-            return Some(runtime.clone());
-        }
-        let runtime = crate::browser_discovery::resolve_browser_runtime(&config).await;
-        if let Some(runtime) = &runtime {
-            *slot = Some(runtime.clone());
-            self.state.config_runtime.browser_ready().await;
-        }
-        runtime
+        slot.clone()
     }
 
     async fn dispatch_browser_manual(&self, arguments: Value) -> Result<Value> {

@@ -9,7 +9,6 @@ use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    browser_discovery::resolve_browser_runtime,
     config::{self, Config, RuntimeMode},
     http_server, hub, instance_lock, local_control, private_state, process, process_history,
     room_repository, skill_installs, skills,
@@ -59,23 +58,18 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
         },
         initial.limits.max_active_processes.resolve().diagnostic()
     ));
-    let browser_runtime = resolve_browser_runtime(&initial).await;
-    let state = build_app_state(
-        config_path.clone(),
-        initial,
-        runtime,
-        false,
-        browser_runtime,
-    )?;
+    let state = build_app_state(config_path.clone(), initial, runtime, false, None)?;
     state.skill_installs.recover(state.clone()).await?;
     crate::event_notifications::recover_event_notifications(&state).await?;
     tokio::spawn(watch_live_config(state.clone(), false, None));
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
+    let browser = BrowserBackground::start(state.clone());
     let result = tokio::select! {
         result = hub::connect_loop(state) => result,
         result = wait_for_local_shutdown_signal() => result,
     };
+    browser.stop().await;
     email.stop().await;
     secret.shutdown().await;
     result
@@ -114,13 +108,12 @@ pub(crate) async fn run_stdio_worker(
     ));
     let hub_enabled = config.auxiliary_hub_enabled();
     let agent_id = config.agent_id.clone();
-    let browser_runtime = resolve_browser_runtime(&config).await;
     let state = build_app_state(
         config_path,
         config,
         RuntimeModel::tunnel(profile, hub_enabled),
         supervised,
-        browser_runtime,
+        None,
     )?;
     state.skill_installs.recover(state.clone()).await?;
     crate::event_notifications::recover_event_notifications(&state).await?;
@@ -147,6 +140,7 @@ pub(crate) async fn run_stdio_worker(
     ));
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
+    let browser = BrowserBackground::start(state.clone());
     let stdio = stdio_server::serve_stdio(state);
     tokio::pin!(stdio);
     let result = tokio::select! {
@@ -173,6 +167,7 @@ pub(crate) async fn run_stdio_worker(
             }
         }
     };
+    browser.stop().await;
     email.stop().await;
     secret.shutdown().await;
     result
@@ -181,6 +176,29 @@ pub(crate) async fn run_stdio_worker(
 struct EmailBackground {
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<Result<()>>,
+}
+
+struct BrowserBackground {
+    shutdown: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl BrowserBackground {
+    fn start(state: AppState) -> Self {
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(crate::browser_discovery::run_background(
+            state,
+            shutdown.clone(),
+        ));
+        Self { shutdown, task }
+    }
+
+    async fn stop(self) {
+        self.shutdown.cancel();
+        if let Err(error) = self.task.await {
+            log_warn(format!("browser preparation task failed: {error}"));
+        }
+    }
 }
 
 impl EmailBackground {
@@ -300,13 +318,12 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
     ensure_tmux_session_if_enabled(&config).await;
     let agent_id = config.agent_id.clone();
     let hub_enabled = config.auxiliary_hub_enabled();
-    let browser_runtime = resolve_browser_runtime(&config).await;
     let state = build_app_state(
         config_path,
         config,
         RuntimeModel::local_with_hub(profile, hub_enabled),
         false,
-        browser_runtime,
+        None,
     )?;
     state.skill_installs.recover(state.clone()).await?;
     crate::event_notifications::recover_event_notifications(&state).await?;
@@ -319,6 +336,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
     let hub_task = Some(tokio::spawn(hub::connect_loop(state.clone())));
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
+    let browser = BrowserBackground::start(state.clone());
     let mut local_task = tokio::spawn(listener.serve(state));
     let result = tokio::select! {
         result = &mut local_task => match result {
@@ -335,6 +353,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         task.abort();
         let _ = task.await;
     }
+    browser.stop().await;
     email.stop().await;
     secret.shutdown().await;
     result

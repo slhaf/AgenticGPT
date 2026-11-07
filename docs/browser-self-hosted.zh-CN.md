@@ -84,7 +84,11 @@ host 会在 `/tmp/codex-browser-use` 下创建后端 socket。Chrome/Chromium �
 
 ## 3. 启用托管 Browser 运行时
 
-Browser 运行时无需从 ChatGPT Desktop 复制。Agentic 可以从 OpenAI 官方签名 APT 分发中获取当前 Linux 运行时：下载完整安装包后，只提取 Browser 所需文件，并复用本地缓存。低于 `26.1027.51404` 的托管缓存不再使用；启用自动配置后会重新获取当前版本。若需自动配置，请设置：
+Browser 运行时无需从 ChatGPT Desktop 复制。Agentic 可以从 OpenAI 官方签名 APT 分发中获取当前 Linux 运行时：下载完整安装包到临时位置，校验后只提取 Browser 所需文件到 `~/.agentic_gpt/cache/browser-runtime/`，不会把桌面安装包安装到系统中。已准备好的当前版本会复用；低于 `26.1027.51404` 的托管缓存不再使用，自动配置启用时会重新获取当前版本。新版本准备并切换成功后，才清理不再使用的旧版本缓存，当前版本继续保留。
+
+启动 Agent 或在运行中重新配置 Browser 时，运行时准备都在后台进行，不会等下载和提取结束才启动或继续运行 Agent。准备完成前，Browser 工具仍会出现在工具集中；`browser.list` 会报告 `runtimeAvailable=false`，其他需要运行时的 Browser 操作会返回 `browser_runtime_unavailable`。准备成功后 Browser 自动可用。下载、校验或提取遇到错误时，本次获取会终止；若没有其他可用运行时，Browser 保持不可用，Agent 继续运行。下载和提取不设人为超时。
+
+自动获取托管运行时需要显式启用 `browser.managed.autoProvision`；该项默认 `false`。配置示例：
 
 ```json
 {
@@ -103,9 +107,9 @@ Browser 运行时无需从 ChatGPT Desktop 复制。Agentic 可以从 OpenAI 官
 BROWSER_USE_SECURITY_MODE=disabled-for-local-testing agentic-gpt run
 ```
 
-不要将该变量全局导出给无关进程。Agentic 通过 Browser 工具集控制工具是否可用，记录操作审计，并通过 Browser lease 管理会话。
+不要将该变量全局导出给无关进程。Agentic 通过 Browser 工具集控制工具是否启用，记录操作审计，并通过 Browser lease 管理会话；运行时尚未准备好时，`browser.list` 报告 `runtimeAvailable=false`，其他需要运行时的操作会返回不可用错误。
 
-在此模式下，如果没有指定 `CODEX_CLI_PATH` 且 `PATH` 中没有 Codex，Agentic 自己提供 Browser 所需的空配置，不需要安装 Codex。该接法不会读取 Codex 的配置或组织限制；启用 Browser 工具集后，调用方即可使用该运行时。
+在此模式下，如果没有指定 `CODEX_CLI_PATH` 且 `PATH` 中没有 Codex，Agentic 自己提供 Browser 所需的空配置，不需要安装 Codex。该接法不会读取 Codex 的配置或组织限制。调用方需等到运行时准备成功后才能使用 Browser。
 
 ## Neko / 容器化 Chromium
 

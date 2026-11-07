@@ -12,11 +12,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 #[cfg(not(unix))]
 use std::time::SystemTime;
-use std::time::{Duration, Instant};
 use tar::EntryType;
 use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 use xz2::read::XzDecoder;
 
 use crate::browser_runtime::{
@@ -28,7 +29,6 @@ const MAX_TOTAL: u64 = 768 * 1024 * 1024;
 const MAX_FILE: u64 = 256 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 const AR_MAGIC: &[u8] = b"!<arch>\n";
-const LOCK_WAIT_TOTAL: Duration = Duration::from_secs(10 * 60);
 const LOCK_POLL: Duration = Duration::from_millis(50);
 #[cfg(not(unix))]
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
@@ -44,10 +44,6 @@ const INRELEASE_PATH: &str = "dists/stable/InRelease";
 const STABLE_DISTRIBUTION_PREFIX: &str = "dists/stable/";
 const PINNED_REPOSITORY_FINGERPRINT: &str = "3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4";
 const PINNED_REPOSITORY_KEY: &str = include_str!("../../assets/browser/openai-linux-repo-key.asc");
-const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const PROVISION_OVERALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VerifiedBrowserPackage {
@@ -148,10 +144,12 @@ struct ReqwestBrowserDistributionFetcher {
 
 impl ReqwestBrowserDistributionFetcher {
     fn new() -> Result<Arc<Self>> {
-        let client = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(HTTP_CONNECT_TIMEOUT)
-            .timeout(HTTP_REQUEST_TIMEOUT)
+            .tcp_keepalive(None);
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        let builder = builder.tcp_user_timeout(None);
+        let client = builder
             .build()
             .map_err(|_| error("browser_runtime_acquisition_http_unavailable"))?;
         Ok(Arc::new(Self { client }))
@@ -271,7 +269,6 @@ async fn stream_http_file(
     let url = fixed_repository_url(&path)?;
     let response = client
         .get(url)
-        .timeout(HTTP_DOWNLOAD_TIMEOUT)
         .send()
         .await
         .map_err(|_| error("browser_runtime_acquisition_http_failed"))?;
@@ -507,7 +504,11 @@ async fn provision_managed_browser_runtime_inner(
     codex_home: PathBuf,
     target: String,
     fetcher: Arc<dyn BrowserDistributionFetcher>,
+    cancellation: CancellationToken,
 ) -> Result<BrowserRuntimeDescriptor> {
+    if cancellation.is_cancelled() {
+        return Err(error("browser_runtime_acquisition_cancelled"));
+    }
     ensure_cache_root(&root)?;
     identity(&target, "browser_runtime_cache_target_invalid")?;
     if !host_target(&target) {
@@ -520,42 +521,66 @@ async fn provision_managed_browser_runtime_inner(
     let architecture = apt_architecture(&target)?;
 
     if let Ok(descriptor) = discover_managed_browser_runtime(&root, &target, &codex_home) {
+        if cancellation.is_cancelled() {
+            return Err(error("browser_runtime_acquisition_cancelled"));
+        }
         return Ok(descriptor);
     }
     let locks = root.join(".locks");
     fs::create_dir_all(&locks)
         .map_err(|_| error("browser_runtime_acquisition_lock_unavailable"))?;
     let lock_path = locks.join(format!("{target}.provision.lock"));
-    let _provision_lock = Lock::acquire_async(&lock_path).await?;
+    let _provision_lock = Lock::acquire_async(&lock_path, &cancellation).await?;
     if let Ok(descriptor) = discover_managed_browser_runtime(&root, &target, &codex_home) {
+        if cancellation.is_cancelled() {
+            return Err(error("browser_runtime_acquisition_cancelled"));
+        }
         return Ok(descriptor);
     }
 
-    let acquisition = tokio::time::timeout(
-        PROVISION_OVERALL_TIMEOUT,
-        acquire_verified_package(&root, &codex_home, &target, architecture, fetcher),
-    )
-    .await
-    .map_err(|_| error("browser_runtime_acquisition_timeout"))?;
-    let (temporary_guard, package) = acquisition?;
+    let (temporary_guard, package) = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(error("browser_runtime_acquisition_cancelled"));
+        }
+        acquisition = acquire_verified_package(&root, &codex_home, &target, architecture, fetcher) => {
+            acquisition?
+        }
+    };
+    if cancellation.is_cancelled() {
+        return Err(error("browser_runtime_acquisition_cancelled"));
+    }
     let materializer_root = root.clone();
+    let materializer_cancellation = cancellation.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let result = materialize_browser_runtime_at(&materializer_root, package);
+        let result =
+            materialize_browser_runtime_at(&materializer_root, package, &materializer_cancellation);
         drop(temporary_guard);
         result
     })
     .await
     .map_err(|_| error("browser_runtime_acquisition_materializer_failed"))?;
+    if cancellation.is_cancelled() {
+        return Err(error("browser_runtime_acquisition_cancelled"));
+    }
     result.map_err(|_| error("browser_runtime_acquisition_materializer_failed"))
 }
 
 pub(crate) async fn provision_managed_browser_runtime(
     target: &str,
+    cancellation: CancellationToken,
 ) -> Result<BrowserRuntimeDescriptor> {
     let root = managed_browser_cache_root()?;
     let codex_home = managed_browser_codex_home()?;
     let fetcher = ReqwestBrowserDistributionFetcher::new()?;
-    provision_managed_browser_runtime_with_fetcher(&root, &codex_home, target, fetcher).await
+    provision_managed_browser_runtime_with_fetcher(
+        &root,
+        &codex_home,
+        target,
+        fetcher,
+        cancellation,
+    )
+    .await
 }
 
 pub(crate) async fn provision_managed_browser_runtime_with_fetcher(
@@ -563,12 +588,14 @@ pub(crate) async fn provision_managed_browser_runtime_with_fetcher(
     codex_home: &Path,
     target: &str,
     fetcher: Arc<dyn BrowserDistributionFetcher>,
+    cancellation: CancellationToken,
 ) -> Result<BrowserRuntimeDescriptor> {
     provision_managed_browser_runtime_inner(
         root.to_path_buf(),
         codex_home.to_path_buf(),
         target.to_owned(),
         fetcher,
+        cancellation,
     )
     .await
 }
@@ -576,6 +603,7 @@ pub(crate) async fn provision_managed_browser_runtime_with_fetcher(
 pub(crate) fn materialize_browser_runtime_at(
     root: &Path,
     package: VerifiedBrowserPackage,
+    cancellation: &CancellationToken,
 ) -> Result<BrowserRuntimeDescriptor> {
     ensure_cache_root(root)?;
     identity(&package.target, "browser_runtime_cache_target_invalid")?;
@@ -598,7 +626,10 @@ pub(crate) fn materialize_browser_runtime_at(
     let paths = CachePaths::new(root, &package.target, &package.app_version, &digest)?;
     fs::create_dir_all(root.join(".locks"))
         .map_err(|_| error("browser_runtime_cache_unavailable"))?;
-    let _lock = Lock::acquire(&root.join(".locks").join(format!("{}.lock", package.target)))?;
+    let _lock = Lock::acquire(
+        &root.join(".locks").join(format!("{}.lock", package.target)),
+        cancellation,
+    )?;
     if let Ok(descriptor) = validate_artifact(&paths.final_dir, &package) {
         activate(root, &package.target, &package.app_version, &digest)?;
         return Ok(descriptor);
@@ -1094,6 +1125,97 @@ pub(crate) fn discover_managed_browser_runtime(
     Ok(descriptor)
 }
 
+/// Removes stale artifacts for this target after the active runtime's manager
+/// has been stopped. The active manifest is revalidated under the install lock
+/// so this only retains the artifact currently selected by the cache.
+pub(crate) async fn clean_managed_browser_runtime_cache(
+    root: &Path,
+    target: &str,
+    codex_home: &Path,
+    active_runtime: &BrowserRuntimeDescriptor,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    if cancellation.is_cancelled() {
+        return Err(error("browser_runtime_acquisition_cancelled"));
+    }
+    identity(target, "browser_runtime_cache_target_invalid")?;
+    if !host_target(target) {
+        return Err(error("browser_runtime_cache_target_unsupported"));
+    }
+    ensure_cache_root(root)?;
+    fs::create_dir_all(root.join(".locks"))
+        .map_err(|_| error("browser_runtime_cache_lock_unavailable"))?;
+    checked_descendant(root, ".locks", RequiredKind::Directory)?;
+    let lock_path = root.join(".locks").join(format!("{target}.lock"));
+    let lock = Lock::acquire_async(&lock_path, &cancellation).await?;
+    if cancellation.is_cancelled() {
+        return Err(error("browser_runtime_acquisition_cancelled"));
+    }
+
+    let root = root.to_path_buf();
+    let target = target.to_owned();
+    let codex_home = codex_home.to_path_buf();
+    let active_runtime = active_runtime.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _lock = lock;
+        clean_managed_browser_runtime_cache_locked(&root, &target, &codex_home, &active_runtime)
+    })
+    .await
+    .map_err(|_| error("browser_runtime_cache_cleanup_failed"))?;
+    if cancellation.is_cancelled() {
+        return Err(error("browser_runtime_acquisition_cancelled"));
+    }
+    result
+}
+
+fn clean_managed_browser_runtime_cache_locked(
+    root: &Path,
+    target: &str,
+    codex_home: &Path,
+    active_runtime: &BrowserRuntimeDescriptor,
+) -> Result<()> {
+    let validated = discover_managed_browser_runtime(root, target, codex_home)?;
+    if validated != *active_runtime {
+        return Err(error("browser_runtime_cache_active_invalid"));
+    }
+    let active_artifact = active_runtime
+        .node_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| error("browser_runtime_cache_active_invalid"))?;
+    let active_version = active_artifact
+        .parent()
+        .ok_or_else(|| error("browser_runtime_cache_active_invalid"))?;
+    let target_dir = checked_descendant(
+        root,
+        &format!("artifacts/{target}"),
+        RequiredKind::Directory,
+    )?;
+    for version_entry in
+        fs::read_dir(&target_dir).map_err(|_| error("browser_runtime_cache_cleanup_failed"))?
+    {
+        let version_entry =
+            version_entry.map_err(|_| error("browser_runtime_cache_cleanup_failed"))?;
+        let version_path = version_entry.path();
+        if version_path != active_version {
+            remove_any(&version_path).map_err(|_| error("browser_runtime_cache_cleanup_failed"))?;
+            continue;
+        }
+        for digest_entry in fs::read_dir(&version_path)
+            .map_err(|_| error("browser_runtime_cache_cleanup_failed"))?
+        {
+            let digest_entry =
+                digest_entry.map_err(|_| error("browser_runtime_cache_cleanup_failed"))?;
+            if digest_entry.path() != active_artifact {
+                remove_any(&digest_entry.path())
+                    .map_err(|_| error("browser_runtime_cache_cleanup_failed"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn managed_runtime_version_supported(version: &str) -> bool {
     let parts = version
         .split('.')
@@ -1296,12 +1418,14 @@ fn try_lock_file(path: &Path) -> std::io::Result<Option<File>> {
 #[cfg(unix)]
 fn acquire_unix(
     path: &Path,
-    timeout_code: &'static str,
     unavailable_code: &'static str,
+    cancellation: &CancellationToken,
 ) -> Result<Lock> {
-    let deadline = Instant::now() + LOCK_WAIT_TOTAL;
     let token = lock_token();
     loop {
+        if cancellation.is_cancelled() {
+            return Err(error("browser_runtime_acquisition_cancelled"));
+        }
         match try_lock_file(path) {
             Ok(Some(mut file)) => {
                 write_lock_token(&mut file, &token, unavailable_code)?;
@@ -1312,9 +1436,6 @@ fn acquire_unix(
                 });
             }
             Ok(None) => {
-                if Instant::now() >= deadline {
-                    return Err(error(timeout_code));
-                }
                 std::thread::sleep(LOCK_POLL);
             }
             Err(_) => return Err(error(unavailable_code)),
@@ -1325,12 +1446,14 @@ fn acquire_unix(
 #[cfg(unix)]
 async fn acquire_unix_async(
     path: &Path,
-    timeout_code: &'static str,
     unavailable_code: &'static str,
+    cancellation: &CancellationToken,
 ) -> Result<Lock> {
-    let deadline = Instant::now() + LOCK_WAIT_TOTAL;
     let token = lock_token();
     loop {
+        if cancellation.is_cancelled() {
+            return Err(error("browser_runtime_acquisition_cancelled"));
+        }
         match try_lock_file(path) {
             Ok(Some(mut file)) => {
                 write_lock_token(&mut file, &token, unavailable_code)?;
@@ -1341,10 +1464,12 @@ async fn acquire_unix_async(
                 });
             }
             Ok(None) => {
-                if Instant::now() >= deadline {
-                    return Err(error(timeout_code));
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        return Err(error("browser_runtime_acquisition_cancelled"));
+                    }
+                    _ = tokio::time::sleep(LOCK_POLL) => {}
                 }
-                tokio::time::sleep(LOCK_POLL).await;
             }
             Err(_) => return Err(error(unavailable_code)),
         }
@@ -1354,12 +1479,14 @@ async fn acquire_unix_async(
 #[cfg(not(unix))]
 fn acquire_portable(
     path: &Path,
-    timeout_code: &'static str,
     unavailable_code: &'static str,
+    cancellation: &CancellationToken,
 ) -> Result<Lock> {
-    let deadline = Instant::now() + LOCK_WAIT_TOTAL;
     let token = lock_token();
     loop {
+        if cancellation.is_cancelled() {
+            return Err(error("browser_runtime_acquisition_cancelled"));
+        }
         match OpenOptions::new().write(true).create_new(true).open(path) {
             Ok(mut file) => {
                 write_lock_token(&mut file, &token, unavailable_code)?;
@@ -1371,9 +1498,6 @@ fn acquire_portable(
             Err(io_error) if io_error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if reclaim_stale_lock(path) {
                     continue;
-                }
-                if Instant::now() >= deadline {
-                    return Err(error(timeout_code));
                 }
                 std::thread::sleep(LOCK_POLL);
             }
@@ -1385,12 +1509,14 @@ fn acquire_portable(
 #[cfg(not(unix))]
 async fn acquire_portable_async(
     path: &Path,
-    timeout_code: &'static str,
     unavailable_code: &'static str,
+    cancellation: &CancellationToken,
 ) -> Result<Lock> {
-    let deadline = Instant::now() + LOCK_WAIT_TOTAL;
     let token = lock_token();
     loop {
+        if cancellation.is_cancelled() {
+            return Err(error("browser_runtime_acquisition_cancelled"));
+        }
         match OpenOptions::new().write(true).create_new(true).open(path) {
             Ok(mut file) => {
                 write_lock_token(&mut file, &token, unavailable_code)?;
@@ -1403,10 +1529,12 @@ async fn acquire_portable_async(
                 if reclaim_stale_lock(path) {
                     continue;
                 }
-                if Instant::now() >= deadline {
-                    return Err(error(timeout_code));
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        return Err(error("browser_runtime_acquisition_cancelled"));
+                    }
+                    _ = tokio::time::sleep(LOCK_POLL) => {}
                 }
-                tokio::time::sleep(LOCK_POLL).await;
             }
             Err(_) => return Err(error(unavailable_code)),
         }
@@ -1414,32 +1542,24 @@ async fn acquire_portable_async(
 }
 
 impl Lock {
-    fn acquire(path: &Path) -> Result<Self> {
+    fn acquire(path: &Path, cancellation: &CancellationToken) -> Result<Self> {
         #[cfg(unix)]
         {
-            acquire_unix(
-                path,
-                "browser_runtime_cache_lock_timeout",
-                "browser_runtime_cache_lock_unavailable",
-            )
+            acquire_unix(path, "browser_runtime_cache_lock_unavailable", cancellation)
         }
         #[cfg(not(unix))]
         {
-            acquire_portable(
-                path,
-                "browser_runtime_cache_lock_timeout",
-                "browser_runtime_cache_lock_unavailable",
-            )
+            acquire_portable(path, "browser_runtime_cache_lock_unavailable", cancellation)
         }
     }
 
-    async fn acquire_async(path: &Path) -> Result<Self> {
+    async fn acquire_async(path: &Path, cancellation: &CancellationToken) -> Result<Self> {
         #[cfg(unix)]
         {
             return acquire_unix_async(
                 path,
-                "browser_runtime_acquisition_lock_timeout",
                 "browser_runtime_acquisition_lock_unavailable",
+                cancellation,
             )
             .await;
         }
@@ -1447,8 +1567,8 @@ impl Lock {
         {
             acquire_portable_async(
                 path,
-                "browser_runtime_acquisition_lock_timeout",
                 "browser_runtime_acquisition_lock_unavailable",
+                cancellation,
             )
             .await
         }

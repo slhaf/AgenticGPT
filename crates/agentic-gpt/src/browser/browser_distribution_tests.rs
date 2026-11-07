@@ -326,7 +326,7 @@ async fn provisioning_lock_rechecks_cache_after_waiting() {
     let lock_path = cache
         .join(".locks")
         .join(format!("{}.provision.lock", current_target()));
-    let held = Lock::acquire(&lock_path).unwrap();
+    let held = Lock::acquire(&lock_path, &CancellationToken::new()).unwrap();
     let fetcher = Arc::new(TestFetcher::default());
     let waiting_cache = cache.clone();
     let waiting_codex_home = codex_home.clone();
@@ -338,6 +338,7 @@ async fn provisioning_lock_rechecks_cache_after_waiting() {
             &waiting_codex_home,
             &waiting_target,
             waiting_fetcher,
+            CancellationToken::new(),
         )
         .await
     });
@@ -345,11 +346,73 @@ async fn provisioning_lock_rechecks_cache_after_waiting() {
 
     let bytes = deb();
     let package = package(&root, &bytes);
-    let expected = materialize_browser_runtime_at(&cache, package).unwrap();
+    let expected =
+        materialize_browser_runtime_at(&cache, package, &CancellationToken::new()).unwrap();
     drop(held);
 
     let actual = waiting.await.unwrap().unwrap();
     assert_eq!(actual, expected);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn provisioning_cancellation_stops_waiting_for_lock() {
+    let root = temp();
+    let cache = root.join("cache");
+    let codex_home = root.join("codex");
+    fs::create_dir_all(cache.join(".locks")).unwrap();
+    let lock_path = cache
+        .join(".locks")
+        .join(format!("{}.provision.lock", current_target()));
+    let held = Lock::acquire(&lock_path, &CancellationToken::new()).unwrap();
+    let cancellation = CancellationToken::new();
+    let waiting_cache = cache.clone();
+    let waiting_codex_home = codex_home.clone();
+    let waiting_cancellation = cancellation.clone();
+    let waiting = tokio::spawn(async move {
+        provision_managed_browser_runtime_with_fetcher(
+            &waiting_cache,
+            &waiting_codex_home,
+            current_target(),
+            Arc::new(TestFetcher::default()),
+            waiting_cancellation,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancellation.cancel();
+    assert_eq!(
+        waiting.await.unwrap().unwrap_err().to_string(),
+        "browser_runtime_acquisition_cancelled"
+    );
+    drop(held);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn materialization_cancellation_stops_waiting_for_install_lock() {
+    let root = temp();
+    let cache = root.join("cache");
+    let package = package(&root, &deb());
+    fs::create_dir_all(cache.join(".locks")).unwrap();
+    let lock_path = cache
+        .join(".locks")
+        .join(format!("{}.lock", current_target()));
+    let held = Lock::acquire(&lock_path, &CancellationToken::new()).unwrap();
+    let cancellation = CancellationToken::new();
+    let waiting_cache = cache.clone();
+    let waiting_cancellation = cancellation.clone();
+    let waiting = tokio::task::spawn_blocking(move || {
+        materialize_browser_runtime_at(&waiting_cache, package, &waiting_cancellation)
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancellation.cancel();
+    assert_eq!(
+        waiting.await.unwrap().unwrap_err().to_string(),
+        "browser_runtime_acquisition_cancelled"
+    );
+    assert!(!cache.join("active").exists());
+    drop(held);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -372,7 +435,7 @@ fn acquisition_temp_cleanup_handles_materializer_success_and_failure() {
         target: current_target().into(),
         codex_home: root.join("codex"),
     };
-    assert!(materialize_browser_runtime_at(&cache, package).is_ok());
+    assert!(materialize_browser_runtime_at(&cache, package, &CancellationToken::new()).is_ok());
     drop(guard);
     assert!(!successful.exists());
 
@@ -389,7 +452,7 @@ fn acquisition_temp_cleanup_handles_materializer_success_and_failure() {
         codex_home: root.join("codex"),
     };
     assert_eq!(
-        materialize_browser_runtime_at(&cache, package)
+        materialize_browser_runtime_at(&cache, package, &CancellationToken::new())
             .unwrap_err()
             .to_string(),
         "browser_runtime_package_hash_mismatch"
@@ -434,7 +497,8 @@ fn real_package_materializes_from_explicit_fixture_path() {
         target: current_target().into(),
         codex_home: scratch.join("codex-home"),
     };
-    let descriptor = materialize_browser_runtime_at(&cache_root, package).unwrap();
+    let descriptor =
+        materialize_browser_runtime_at(&cache_root, package, &CancellationToken::new()).unwrap();
     assert_eq!(descriptor.app_version, app_version);
     assert_eq!(descriptor.channel, "prod");
     assert!(descriptor.node_repl_path.is_file());
@@ -620,7 +684,7 @@ fn package_consumers_reject_invalid_path_components_and_hashes() {
     let mut package = package(&root, &deb());
     package.deb_sha256 = "A".repeat(64);
     assert_eq!(
-        materialize_browser_runtime_at(&root.join("cache"), package)
+        materialize_browser_runtime_at(&root.join("cache"), package, &CancellationToken::new())
             .unwrap_err()
             .to_string(),
         "browser_runtime_package_hash_invalid"
@@ -632,7 +696,8 @@ fn package_consumers_reject_invalid_path_components_and_hashes() {
 fn synthetic_deb_materializes_only_selected_resources() {
     let root = temp();
     let p = package(&root, &deb());
-    let descriptor = materialize_browser_runtime_at(&root.join("cache"), p).unwrap();
+    let descriptor =
+        materialize_browser_runtime_at(&root.join("cache"), p, &CancellationToken::new()).unwrap();
     assert_eq!(descriptor.codex_cli_path, None);
     assert!(descriptor.node_path.exists());
     assert!(descriptor.browser_client_path.exists());
@@ -701,7 +766,7 @@ fn hash_mismatch_is_rejected_before_archive_processing() {
     let mut p = package(&root, &deb());
     p.deb_sha256 = "0".repeat(64);
     assert_eq!(
-        materialize_browser_runtime_at(&root.join("cache"), p)
+        materialize_browser_runtime_at(&root.join("cache"), p, &CancellationToken::new())
             .unwrap_err()
             .to_string(),
         "browser_runtime_package_hash_mismatch"
@@ -721,7 +786,7 @@ fn duplicate_data_member_is_rejected() {
     let mut p = package(&root, &bytes);
     p.deb_sha256 = sha256(&bytes);
     assert_eq!(
-        materialize_browser_runtime_at(&root.join("cache"), p)
+        materialize_browser_runtime_at(&root.join("cache"), p, &CancellationToken::new())
             .unwrap_err()
             .to_string(),
         "browser_runtime_package_duplicate"
@@ -786,7 +851,7 @@ fn selected_links_special_types_and_duplicate_files_are_rejected() {
         bytes.extend(ar_member("data.tar.xz", &tar));
         let p = package(&root, &bytes);
         assert_eq!(
-            materialize_browser_runtime_at(&root.join("cache"), p)
+            materialize_browser_runtime_at(&root.join("cache"), p, &CancellationToken::new())
                 .unwrap_err()
                 .to_string(),
             "browser_runtime_package_entry_type_rejected"
@@ -814,7 +879,7 @@ fn selected_links_special_types_and_duplicate_files_are_rejected() {
     bytes.extend(ar_member("data.tar.xz", &duplicate));
     let p = package(&root, &bytes);
     assert_eq!(
-        materialize_browser_runtime_at(&root.join("cache"), p)
+        materialize_browser_runtime_at(&root.join("cache"), p, &CancellationToken::new())
             .unwrap_err()
             .to_string(),
         "browser_runtime_package_duplicate"
@@ -828,7 +893,8 @@ fn identical_install_is_idempotent_and_corrupt_artifact_repairs() {
     let cache = root.join("cache");
     let bytes = deb();
     let p = package(&root, &bytes);
-    let first = materialize_browser_runtime_at(&cache, p.clone()).unwrap();
+    let first =
+        materialize_browser_runtime_at(&cache, p.clone(), &CancellationToken::new()).unwrap();
     let artifact = first
         .node_path
         .parent()
@@ -839,12 +905,102 @@ fn identical_install_is_idempotent_and_corrupt_artifact_repairs() {
         .unwrap();
     let before = fs::read(artifact.join("runtime.json")).unwrap();
     assert_eq!(
-        materialize_browser_runtime_at(&cache, p.clone()).unwrap(),
+        materialize_browser_runtime_at(&cache, p.clone(), &CancellationToken::new()).unwrap(),
         first
     );
     assert_eq!(fs::read(artifact.join("runtime.json")).unwrap(), before);
     fs::remove_file(&first.browser_client_path).unwrap();
-    assert!(materialize_browser_runtime_at(&cache, p).is_ok());
+    assert!(materialize_browser_runtime_at(&cache, p, &CancellationToken::new()).is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn cache_cleanup_keeps_only_the_validated_active_artifact_for_target() {
+    let root = temp();
+    let cache = root.join("cache");
+    let p = package(&root, &deb());
+    let active = materialize_browser_runtime_at(&cache, p, &CancellationToken::new()).unwrap();
+    let target_dir = cache.join("artifacts").join(current_target());
+    let stale_version = target_dir.join("26.908.70816");
+    let active_version = target_dir.join(&active.app_version);
+    let stale_digest = active_version.join("a".repeat(64));
+    let other_target = cache.join("artifacts/other-target/old-version/old-digest");
+    fs::create_dir_all(&stale_version).unwrap();
+    fs::create_dir_all(&stale_digest).unwrap();
+    fs::create_dir_all(&other_target).unwrap();
+
+    let mut stale_descriptor = active.clone();
+    stale_descriptor.app_version = "26.908.70816".into();
+    assert_eq!(
+        clean_managed_browser_runtime_cache(
+            &cache,
+            current_target(),
+            &active.codex_home,
+            &stale_descriptor,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err()
+        .to_string(),
+        "browser_runtime_cache_active_invalid"
+    );
+    assert!(stale_version.exists());
+
+    clean_managed_browser_runtime_cache(
+        &cache,
+        current_target(),
+        &active.codex_home,
+        &active,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(discover_managed_browser_runtime(&cache, current_target(), &active.codex_home).is_ok());
+    assert!(!stale_version.exists());
+    assert!(!stale_digest.exists());
+    assert!(other_target.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn cache_cleanup_cancellation_stops_waiting_for_install_lock() {
+    let root = temp();
+    let cache = root.join("cache");
+    let active =
+        materialize_browser_runtime_at(&cache, package(&root, &deb()), &CancellationToken::new())
+            .unwrap();
+    let stale = cache
+        .join("artifacts")
+        .join(current_target())
+        .join("26.908.70816");
+    fs::create_dir_all(&stale).unwrap();
+    let lock_path = cache
+        .join(".locks")
+        .join(format!("{}.lock", current_target()));
+    let held = Lock::acquire(&lock_path, &CancellationToken::new()).unwrap();
+    let cancellation = CancellationToken::new();
+    let waiting_cache = cache.clone();
+    let waiting_codex_home = active.codex_home.clone();
+    let waiting_active = active.clone();
+    let waiting_cancellation = cancellation.clone();
+    let waiting = tokio::spawn(async move {
+        clean_managed_browser_runtime_cache(
+            &waiting_cache,
+            current_target(),
+            &waiting_codex_home,
+            &waiting_active,
+            waiting_cancellation,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancellation.cancel();
+    assert_eq!(
+        waiting.await.unwrap().unwrap_err().to_string(),
+        "browser_runtime_acquisition_cancelled"
+    );
+    assert!(stale.exists());
+    drop(held);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -854,7 +1010,7 @@ fn active_manifest_corruption_fails_closed() {
     let cache = root.join("cache");
     let bytes = deb();
     let p = package(&root, &bytes);
-    materialize_browser_runtime_at(&cache, p).unwrap();
+    materialize_browser_runtime_at(&cache, p, &CancellationToken::new()).unwrap();
     let active = cache
         .join("active")
         .join(format!("{}.json", current_target()));
@@ -918,7 +1074,7 @@ fn symlinked_critical_parent_in_cached_artifact_fails_closed() {
     let root = temp();
     let cache = root.join("cache");
     let p = package(&root, &deb());
-    let descriptor = materialize_browser_runtime_at(&cache, p).unwrap();
+    let descriptor = materialize_browser_runtime_at(&cache, p, &CancellationToken::new()).unwrap();
     let artifact = descriptor
         .node_path
         .parent()
@@ -946,9 +1102,10 @@ fn target_locks_serialize_without_global_lock() {
     let root = temp();
     let first_path = root.join("same.lock");
     let other_path = root.join("other.lock");
-    let first = Lock::acquire(&first_path).unwrap();
-    assert!(Lock::acquire(&other_path).is_ok());
-    let blocked = std::thread::spawn(move || Lock::acquire(&first_path).is_ok());
+    let first = Lock::acquire(&first_path, &CancellationToken::new()).unwrap();
+    assert!(Lock::acquire(&other_path, &CancellationToken::new()).is_ok());
+    let blocked =
+        std::thread::spawn(move || Lock::acquire(&first_path, &CancellationToken::new()).is_ok());
     std::thread::sleep(std::time::Duration::from_millis(10));
     drop(first);
     assert!(blocked.join().unwrap());
@@ -961,7 +1118,7 @@ fn unix_lock_reuses_existing_path_with_stale_owner_metadata() {
     let root = temp();
     let path = root.join("dead.lock");
     fs::write(&path, b"pid=4294967295\n").unwrap();
-    let lock = Lock::acquire(&path).unwrap();
+    let lock = Lock::acquire(&path, &CancellationToken::new()).unwrap();
     assert!(path.exists());
     drop(lock);
     assert!(!path.exists());

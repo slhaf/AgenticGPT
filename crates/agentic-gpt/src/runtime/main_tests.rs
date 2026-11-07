@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 fn explicit_browser_runtime_config() -> config::ExplicitBrowserRuntimeConfig {
@@ -155,9 +156,13 @@ async fn managed_cache_precedes_desktop_and_preserves_descriptor_fields() {
         desktop_calls.clone(),
     );
 
-    let context = resolve_browser_runtime_with_sources(&managed_config(false), &sources)
-        .await
-        .expect("managed cache selected");
+    let context = resolve_browser_runtime_with_sources(
+        &managed_config(false),
+        &sources,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("managed cache selected");
     assert_eq!(context.descriptor.app_version, "test-cache");
     assert_eq!(context.descriptor.channel, "prod");
     assert_eq!(context.descriptor.codex_home, codex_home);
@@ -197,9 +202,13 @@ async fn auto_provision_is_gated_and_failures_fall_back_to_desktop() {
         provision_calls.clone(),
         desktop_calls.clone(),
     );
-    let context = resolve_browser_runtime_with_sources(&managed_config(true), &enabled_sources)
-        .await
-        .expect("managed provision selected");
+    let context = resolve_browser_runtime_with_sources(
+        &managed_config(true),
+        &enabled_sources,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("managed provision selected");
     assert_eq!(context.descriptor.app_version, "test-provision");
     assert_eq!(provision_calls.load(Ordering::SeqCst), 1);
     assert_eq!(desktop_calls.load(Ordering::SeqCst), 0);
@@ -217,9 +226,13 @@ async fn auto_provision_is_gated_and_failures_fall_back_to_desktop() {
         provision_calls.clone(),
         desktop_calls.clone(),
     );
-    let context = resolve_browser_runtime_with_sources(&managed_config(false), &disabled_sources)
-        .await
-        .expect("desktop fallback selected");
+    let context = resolve_browser_runtime_with_sources(
+        &managed_config(false),
+        &disabled_sources,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("desktop fallback selected");
     assert_eq!(context.descriptor.app_version, "test-desktop");
     assert_eq!(provision_calls.load(Ordering::SeqCst), 1);
     assert_eq!(desktop_calls.load(Ordering::SeqCst), 1);
@@ -233,9 +246,13 @@ async fn auto_provision_is_gated_and_failures_fall_back_to_desktop() {
         provision_calls.clone(),
         desktop_calls.clone(),
     );
-    let context = resolve_browser_runtime_with_sources(&managed_config(true), &failed_sources)
-        .await
-        .expect("desktop fallback after provisioning failure");
+    let context = resolve_browser_runtime_with_sources(
+        &managed_config(true),
+        &failed_sources,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("desktop fallback after provisioning failure");
     assert_eq!(context.descriptor.app_version, "test-failed-desktop");
     assert_eq!(provision_calls.load(Ordering::SeqCst), 2);
     assert_eq!(desktop_calls.load(Ordering::SeqCst), 2);
@@ -257,11 +274,13 @@ async fn unavailable_sources_fail_open_without_host_io() {
         provision_calls.clone(),
         desktop_calls.clone(),
     );
-    assert!(
-        resolve_browser_runtime_with_sources(&managed_config(true), &sources)
-            .await
-            .is_none()
-    );
+    assert!(resolve_browser_runtime_with_sources(
+        &managed_config(true),
+        &sources,
+        &CancellationToken::new()
+    )
+    .await
+    .is_none());
     assert_eq!(provision_calls.load(Ordering::SeqCst), 1);
     assert_eq!(desktop_calls.load(Ordering::SeqCst), 1);
     let _ = fs::remove_dir_all(root);
@@ -285,7 +304,8 @@ async fn disabled_browser_toolset_skips_discovery_provisioning_and_manager_creat
     let mut config = managed_config(true);
     config.toolsets.disable(ToolNamespace::Browser);
 
-    let context = resolve_browser_runtime_with_sources(&config, &sources).await;
+    let context =
+        resolve_browser_runtime_with_sources(&config, &sources, &CancellationToken::new()).await;
 
     assert!(context.is_none());
     assert!(!codex_home.exists());

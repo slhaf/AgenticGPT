@@ -9,9 +9,12 @@ use std::{
     pin::Pin,
     sync::Arc,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    browser_distribution, browser_runtime, config::Config, state::BrowserRuntimeContext,
+    browser_distribution, browser_runtime,
+    config::Config,
+    state::{AppState, BrowserRuntimeContext},
     utils::log_info,
 };
 
@@ -40,15 +43,16 @@ pub(crate) struct BrowserRuntimeSources {
     pub(crate) desktop_discover: Arc<DesktopBrowserRuntimeDiscover>,
 }
 
-fn production_browser_runtime_sources() -> BrowserRuntimeSources {
+fn production_browser_runtime_sources(cancellation: CancellationToken) -> BrowserRuntimeSources {
     BrowserRuntimeSources {
         managed_cache_root: Arc::new(browser_distribution::managed_browser_cache_root),
         managed_codex_home: Arc::new(browser_distribution::managed_browser_codex_home),
         managed_target: Arc::new(browser_distribution::current_managed_target),
         managed_discover: Arc::new(browser_distribution::discover_managed_browser_runtime),
-        managed_provision: Arc::new(|target| {
+        managed_provision: Arc::new(move |target| {
+            let cancellation = cancellation.clone();
             Box::pin(async move {
-                browser_distribution::provision_managed_browser_runtime(&target).await
+                browser_distribution::provision_managed_browser_runtime(&target, cancellation).await
             })
         }),
         desktop_registry_path: Arc::new(browser_runtime::default_desktop_registry_path),
@@ -56,14 +60,98 @@ fn production_browser_runtime_sources() -> BrowserRuntimeSources {
     }
 }
 
-pub(crate) async fn resolve_browser_runtime(config: &Config) -> Option<Arc<BrowserRuntimeContext>> {
-    let sources = production_browser_runtime_sources();
-    resolve_browser_runtime_with_sources(config, &sources).await
+pub(crate) async fn resolve_browser_runtime(
+    config: &Config,
+    cancellation: CancellationToken,
+) -> Option<Arc<BrowserRuntimeContext>> {
+    let sources = production_browser_runtime_sources(cancellation.clone());
+    let result = resolve_browser_runtime_with_sources(config, &sources, &cancellation).await;
+    if let Some(runtime) = &result {
+        if config.browser.runtime.is_none() && config.browser.managed.enabled {
+            if let (Ok(root), Ok(target)) = (
+                browser_distribution::managed_browser_cache_root(),
+                browser_distribution::current_managed_target(),
+            ) {
+                if runtime
+                    .descriptor
+                    .node_path
+                    .starts_with(root.join("artifacts").join(target))
+                {
+                    if let Err(error) = browser_distribution::clean_managed_browser_runtime_cache(
+                        &root,
+                        target,
+                        &runtime.descriptor.codex_home,
+                        &runtime.descriptor,
+                        cancellation.clone(),
+                    )
+                    .await
+                    {
+                        if !cancellation.is_cancelled() {
+                            log_browser_runtime_unavailable("managed-cache", "cleanup", &error);
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+    if cancellation.is_cancelled() {
+        None
+    } else {
+        result
+    }
+}
+
+pub(crate) async fn run_background(state: AppState, shutdown: CancellationToken) {
+    let mut changes = state.browser_runtime.changed.subscribe();
+    loop {
+        changes.borrow_and_update();
+        let config = state.config.read().await.clone();
+        if config
+            .toolsets
+            .is_enabled(crate::config::ToolNamespace::Browser)
+        {
+            let cancellation = CancellationToken::new();
+            let preparation = resolve_browser_runtime(&config, cancellation.clone());
+            tokio::pin!(preparation);
+            let runtime = tokio::select! {
+                _ = shutdown.cancelled() => {
+                    cancellation.cancel();
+                    let _ = preparation.await;
+                    return;
+                }
+                _ = changes.changed() => {
+                    cancellation.cancel();
+                    let _ = preparation.await;
+                    continue;
+                }
+                result = &mut preparation => result,
+            };
+            if let Some(runtime) = runtime {
+                let mut slot = state.browser_runtime.inner.lock().await;
+                let current = state.config.read().await;
+                if current.browser == config.browser
+                    && current
+                        .toolsets
+                        .is_enabled(crate::config::ToolNamespace::Browser)
+                    && !shutdown.is_cancelled()
+                {
+                    *slot = Some(runtime);
+                    state.config_runtime.browser_ready().await;
+                }
+            }
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = changes.changed() => {}
+        }
+    }
 }
 
 pub(crate) async fn resolve_browser_runtime_with_sources(
     config: &Config,
     sources: &BrowserRuntimeSources,
+    cancellation: &CancellationToken,
 ) -> Option<Arc<BrowserRuntimeContext>> {
     if !config
         .toolsets
@@ -148,7 +236,11 @@ pub(crate) async fn resolve_browser_runtime_with_sources(
                 }
 
                 if config.browser.managed.auto_provision {
-                    match (sources.managed_provision)(target.to_owned()).await {
+                    let provision = (sources.managed_provision)(target.to_owned()).await;
+                    if cancellation.is_cancelled() {
+                        return None;
+                    }
+                    match provision {
                         Ok(descriptor) => {
                             if let Err(error) = validate_managed_browser_descriptor(&descriptor) {
                                 log_browser_runtime_unavailable(

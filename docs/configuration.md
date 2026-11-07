@@ -238,7 +238,7 @@ agentic-gpt run
 | `room` | Room 仓库根目录、时区、日记日界线、维护策略及可选 Vaultwarden 密钥服务。 |
 | `email` | 单账户 IMAP/SMTP、同步间隔、本地内容保存限制和发送/垃圾箱策略；见[邮件使用指南](email.zh-CN.md)。 |
 | `tunnel` | Standalone tunnel-client 路径、secret 引用与可选 reporting。 |
-| `browser` | 可选的高级 Browser runtime 覆盖；Browser runtime 自动 discovery 受 Browser 工具集开关控制。启用工具集但未发现可用 runtime 时，Browser 工具仍保留在能力列表中，需要 runtime 的调用返回 `browser_runtime_unavailable`；`browser.list` 报告 runtime 状态。managed runtime 自动 provisioning 需显式启用 `browser.managed.autoProvision`，默认 `false`。 |
+| `browser` | 可选的高级 Browser runtime 覆盖；Browser runtime 准备受 Browser 工具集开关控制。启用工具集且托管 runtime 自动 provisioning 已开启时，Agent 启动或运行中重新配置 Browser 后会在后台准备运行时；准备期间 Browser 工具仍保留，`browser.list` 报告 `runtimeAvailable=false`，其他需要运行时的操作返回 `browser_runtime_unavailable`。准备成功后自动可用；若没有可用的运行时，Agent 继续运行，Browser 保持不可用。`browser.managed.autoProvision` 默认 `false`。托管缓存位于 `~/.agentic_gpt/cache/browser-runtime/`；新版本准备并切换成功后清理不再使用的旧版本缓存。 |
 | `hub` | `enabled` 在 Standalone/Local 启用 Hub 辅助连接，默认 `false`；Hub 模式仍始终使用命令连接。Standalone 的上报由 `tunnel.hubReporting.enabled` 独立控制，但需要辅助连接开启才会发送。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
 | `events` | 持久事件收件箱中 `low` 严重级别事件的保留时长，以及内部事件严重级别覆盖。 |
