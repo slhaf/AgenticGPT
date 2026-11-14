@@ -125,9 +125,6 @@ pub(crate) fn preflight(
     program: &str,
     args: &[String],
 ) -> std::result::Result<(), String> {
-    if program == "sudo" {
-        return Err("interactive_credential_required".to_string());
-    }
     if matches!(program, "passwd" | "su" | "login") {
         return Err("interactive_credential_required".to_string());
     }
