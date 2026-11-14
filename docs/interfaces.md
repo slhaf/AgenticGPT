@@ -80,7 +80,7 @@ Tmux 与 Browser 工具集关闭时，启动不创建默认 tmux 会话，也不
 
 路径访问仅在操作系统明确返回 `NotFound` 时归为不存在；权限拒绝、非目录和其他检查失败分别报告。文件提交或授权后复查无法完成时返回实际检查错误，只有观察到身份或路径变化才返回冲突／`file_path_changed`；无法检查符号链接不等于发现了符号链接。
 
-命令路径预检允许尚未创建的目标，目标存在性由实际执行判断；`echo`、`printf`、`true`、`false` 的字符串参数不推断为文件访问。包含 `cd`、`pushd`、`popd` 的脚本在启用策略时需要确认，不按初始工作目录推断或隐式授权相对参数路径，绝对路径仍接受路径策略检查。确认不能替代操作系统访问权限或 Bubblewrap 挂载范围；显式 read/write 授权范围仍须指向现有目标。
+命令路径预检允许尚未创建的目标，目标存在性由实际执行判断；`echo`、`printf`、`true`、`false` 的字符串参数不推断为文件访问。包含 `cd`、`pushd`、`popd` 的脚本在启用策略时需要确认，不按初始工作目录推断或隐式授权相对参数路径，绝对路径仍接受路径策略检查。Process 主动确认先于目标路径检查；主动确认或策略触发的确认获准后，执行原命令，不再进行目标路径授权预检或身份复查。未主动确认以及主动确认失败后的策略回退仍按原路径策略检查。确认不能替代操作系统访问权限或 Bubblewrap 挂载范围；仅在构造启用的 Bubblewrap 挂载时，临时范围须指向可解析的现有目标，准备失败仍导致执行失败。
 
 Hub 派发错误保留原因：`agent_offline`、`agent_not_ready` 对应 HTTP 503，连接／角色变化和 reporting-only 状态对应 409；真正等待下游到期使用 `agent_request_timeout`（504），响应通道异常关闭使用 `agent_response_channel_closed`（502），Hub 内部故障使用 `agent_request_failed`（500）。过程读取保留既有 unavailable／缓存封套，列表的内部故障不降级为缓存成功。Agent 历史读取失败使用 `process_history_read_failed`，不报进程不存在；历史列表不静默返回缺少历史部分的成功结果。
 
@@ -112,7 +112,7 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
     可应用配置动作。具体语法与边界见
     [配置说明](configuration.zh-CN.md#bash-命令与-shell-初始化文件)。
   - 响应为扁平的 `ProcessResponse`，统一受 `limits.processResponseBytes` 预算约束。
-- `POST /v1/process/batch`：原子准入一批受管理 Bash 命令。请求必须提供 `agentId`、`elements`（每项含 `command`）；可选 `acquireConfirmation` 和批次级 `cwd`，元素可覆盖工作目录，以及由子进程继承的可选 `group` 和 `waitSeconds`（默认 5 秒，最多 30 秒）。全部元素先完成预检，再通过一次聚合确认；准入后不回滚已启动命令。响应为 `ProcessBatchResponse`，整个批次共用统一响应预算。
+- `POST /v1/process/batch`：原子准入一批受管理 Bash 命令。请求必须提供 `agentId`、`elements`（每项含 `command`）；可选 `acquireConfirmation` 和批次级 `cwd`，元素可覆盖工作目录，以及由子进程继承的可选 `group` 和 `waitSeconds`（默认 5 秒，最多 30 秒）。整批使用一次聚合确认；主动请求确认时，工作目录和运行能力预检通过后先取得确认，再准备启用的沙箱挂载。未主动请求确认时仍按原策略检查目标路径。获准后仍须通过整批资源准入，准入后不回滚已启动命令。响应为 `ProcessBatchResponse`，整个批次共用统一响应预算。
 - `GET /v1/process?agentId=...`：列出活动或近期保留的进程元数据，可选用 `group`、kind、state、limit 和 cursor 筛选。`limit` 默认值为 50，上限为 100。Agent 不可用时，Hub 可以为第一页返回缓存元数据，但不会从缓存继续使用 Agent 发出的 cursor。
 - `GET /v1/process/{processId}/read?agentId=...&waitSeconds=...&view=auto|status&cursor=...&maxBytes=...`：
   统一读取进程状态和捕获输出。

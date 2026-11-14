@@ -30,6 +30,9 @@ impl From<AcquireConfirmationMethodArgs> for AcquireConfirmationMethod {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(
+    description = "提供对象即主动请求本次完整命令的确认；reason 必填。获准后不再做目标路径授权预检或身份复查；read/write 用于本次启用沙箱的临时挂载，不改变持久配置。"
+)]
 pub(super) struct AcquireConfirmationArgs {
     #[schemars(
         with = "String",
@@ -41,10 +44,12 @@ pub(super) struct AcquireConfirmationArgs {
     #[schemars(description = "确认提供方；省略沿用 Agent 配置。")]
     method: Option<AcquireConfirmationMethodArgs>,
     #[serde(default)]
-    #[schemars(description = "本次命令的临时读取路径范围；只在本次命令执行期间生效。")]
+    #[schemars(
+        description = "获准后追加到本次已启用沙箱的读取范围；保留原有读写挂载规则，不改变持久配置。"
+    )]
     read: Vec<String>,
     #[serde(default)]
-    #[schemars(description = "本次命令的临时写入路径范围；只在本次命令执行期间生效。")]
+    #[schemars(description = "获准后追加到本次已启用沙箱的可写挂载范围，不改变持久配置。")]
     write: Vec<String>,
 }
 

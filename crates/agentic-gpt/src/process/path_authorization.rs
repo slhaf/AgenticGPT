@@ -75,6 +75,38 @@ fn literal_commands(execution: &ExecutionSpec) -> Vec<(String, Vec<String>)> {
     }
 }
 
+pub(crate) fn execution_program_preflight(
+    execution: &ExecutionSpec,
+) -> std::result::Result<(), String> {
+    for (program, _) in literal_commands(execution) {
+        preflight_program(&program)?;
+    }
+    Ok(())
+}
+
+// Process confirmation approves the submitted command, not a filesystem snapshot.
+pub(crate) fn command_approval_preview(
+    cwd: &Path,
+    execution: &ExecutionSpec,
+    acquisition: Option<&agentic_gpt_protocol::AcquireConfirmation>,
+) -> Vec<String> {
+    vec![
+        format!("cwd: {}", cwd.display()),
+        format!(
+            "declared read: {}",
+            acquisition.map(|a| a.read.join(", ")).unwrap_or_default()
+        ),
+        format!(
+            "declared write: {}",
+            acquisition.map(|a| a.write.join(", ")).unwrap_or_default()
+        ),
+        match execution {
+            ExecutionSpec::Shell { command } => command.clone(),
+            ExecutionSpec::Argv { program, args } => crate::utils::command_preview(program, args),
+        },
+    ]
+}
+
 pub(crate) fn execution_path_decision(
     config: &Config,
     cwd: &Path,

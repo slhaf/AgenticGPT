@@ -4774,7 +4774,7 @@ components:
       type: object
       additionalProperties: false
       required: [reason]
-      description: 提供对象即主动请求单次确认；获准可覆盖本次命令策略和所请求路径范围，不改变持久配置。明确拒绝中止；超时、过期或不可用回退配置策略，未获准范围不生效。
+      description: 提供对象即主动请求本次完整命令的确认；获准后不再做目标路径授权预检或身份复查，read/write 用于本次启用沙箱的临时挂载，不改变持久配置。明确拒绝中止；超时、过期或不可用回退配置策略，未获准范围不生效。
       properties:
         reason:
           type: string
@@ -4790,13 +4790,13 @@ components:
           default: []
           items:
             type: string
-          description: 仅在本次命令执行期间生效的临时读取路径范围。
+          description: 获准后追加到本次已启用沙箱的读取范围；保留原有读写挂载规则，不改变持久配置。
         write:
           type: array
           default: []
           items:
             type: string
-          description: 仅在本次命令执行期间生效的临时写入路径范围。
+          description: 获准后追加到本次已启用沙箱的可写挂载范围，不改变持久配置。
     AcquireConfirmationNoScope:
       type: object
       additionalProperties: false

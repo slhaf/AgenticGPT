@@ -1668,18 +1668,16 @@ pub(crate) async fn start_process_batch(
         let execution = exec::ExecutionSpec::Shell {
             command: element.command.clone(),
         };
-        let decision = decision
-            .max(exec::execution_path_decision(
+        let decision = if request.acquire_confirmation.is_some() {
+            exec::execution_program_preflight(&execution)?;
+            decision
+        } else {
+            decision.max(exec::execution_path_decision(
                 &config,
                 &resolved_working_directory,
                 &execution,
             )?)
-            .max(exec::declared_scope_decision(
-                &config,
-                &resolved_working_directory,
-                &execution,
-                request.acquire_confirmation.as_ref(),
-            )?);
+        };
         prepared.push(exec::PreparedBatchElement {
             index,
             command: element.command,
@@ -1694,23 +1692,15 @@ pub(crate) async fn start_process_batch(
         .max()
         .unwrap_or(PolicyDecision::Allow);
     let mut preview = Vec::new();
-    let mut scope_identities = Vec::new();
     for element in &prepared {
-        scope_identities.push(exec::scope_identity(
-            &element.resolved_working_directory,
-            &exec::ExecutionSpec::Shell {
-                command: element.command.clone(),
-            },
-            request.acquire_confirmation.as_ref(),
-        )?);
         preview.push(format!("element {}", element.index));
-        preview.extend(exec::approval_preview(
+        preview.extend(exec::command_approval_preview(
             &element.resolved_working_directory,
             &exec::ExecutionSpec::Shell {
                 command: element.command.clone(),
             },
             request.acquire_confirmation.as_ref(),
-        )?);
+        ));
     }
     let authorization = confirmation::authorize_operation(
         &state,
@@ -1722,22 +1712,43 @@ pub(crate) async fn start_process_batch(
         &confirmation::automatic_command_reason(&config, &command_evaluation, &original_commands),
     )
     .await?;
-    for (element, identity) in prepared.iter().zip(scope_identities) {
-        if exec::scope_identity(
-            &element.resolved_working_directory,
-            &exec::ExecutionSpec::Shell {
+    if request.acquire_confirmation.is_some() && !authorization.approved {
+        let mut fallback_decision = decision;
+        for element in &mut prepared {
+            let execution = exec::ExecutionSpec::Shell {
                 command: element.command.clone(),
-            },
-            request.acquire_confirmation.as_ref(),
-        )? != identity
-        {
-            return Err("scope_target_changed".into());
+            };
+            element.decision = element
+                .decision
+                .max(exec::execution_path_decision(
+                    &config,
+                    &element.resolved_working_directory,
+                    &execution,
+                )?)
+                .max(exec::declared_scope_decision(
+                    &config,
+                    &element.resolved_working_directory,
+                    &execution,
+                    request.acquire_confirmation.as_ref(),
+                )?);
+            fallback_decision = fallback_decision.max(element.decision);
+        }
+        match fallback_decision {
+            PolicyDecision::Allow => {}
+            PolicyDecision::Deny => return Err("policy_denied".into()),
+            PolicyDecision::Confirm => {
+                return Err(authorization
+                    .result
+                    .clone()
+                    .unwrap_or_else(|| "provider_unavailable".into()));
+            }
         }
     }
     let confirmation_result = authorization.result;
-    if authorization.approved {
+    // Approved scopes are materialized only for the existing sandbox mounts.
+    if authorization.approved && config.policy.enabled && config.policy.bubblewrap {
         let mut granted = (*config).clone();
-        for element in &mut prepared {
+        for element in &prepared {
             granted = exec::granted_execution_config(
                 &granted,
                 &element.resolved_working_directory,
@@ -1745,7 +1756,8 @@ pub(crate) async fn start_process_batch(
                     command: element.command.clone(),
                 },
                 request.acquire_confirmation.as_ref(),
-            )?;
+            )
+            .map_err(|reason| format!("spawn_failed: {reason}"))?;
         }
         config = Arc::new(granted);
     }
@@ -2507,7 +2519,15 @@ async fn run_async_process(
     };
     let automatic_reason =
         confirmation::automatic_command_reason(&config, &command_evaluation, &original_command);
-    let (working_directory, decision) = if let Some(prepared) = prepared {
+    let acquisition = request.acquire_confirmation.as_ref();
+    let was_prepared = prepared.is_some();
+    if let Some(a) = acquisition {
+        if let Err(reason) = a.validate_scope(true) {
+            finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
+            return;
+        }
+    }
+    let (working_directory, mut decision) = if let Some(prepared) = prepared {
         prepared
     } else {
         let decision = command_evaluation.decision;
@@ -2525,54 +2545,27 @@ async fn run_async_process(
                 }
             },
         };
-        let path_decision =
-            match exec::execution_path_decision(&config, &working_directory, &request.execution) {
-                Ok(decision) => decision,
-                Err(reason) => {
-                    finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
-                    return;
-                }
-            };
-        let scoped = match exec::declared_scope_decision(
-            &config,
-            &working_directory,
-            &request.execution,
-            request.acquire_confirmation.as_ref(),
-        ) {
-            Ok(d) => d,
+        let checked = if acquisition.is_some() {
+            exec::execution_program_preflight(&request.execution).map(|()| decision)
+        } else {
+            exec::execution_path_decision(&config, &working_directory, &request.execution)
+                .map(|paths| decision.max(paths))
+        };
+        let decision = match checked {
+            Ok(decision) => decision,
             Err(reason) => {
                 finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
                 return;
             }
         };
-        (working_directory, decision.max(path_decision).max(scoped))
+        (working_directory, decision)
     };
-    let acquisition = request.acquire_confirmation.as_ref();
-    if let Some(a) = acquisition {
-        if let Err(reason) = a.validate_scope(true) {
-            finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
-            return;
-        }
-    }
-    let preview = match exec::approval_preview(&working_directory, &request.execution, acquisition)
-    {
-        Ok(value) => value,
-        Err(reason) => {
-            finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
-            return;
-        }
-    };
+    let preview =
+        exec::command_approval_preview(&working_directory, &request.execution, acquisition);
     set_policy_decision(&state, &process_id, format!("{decision:?}")).await;
     if decision == PolicyDecision::Confirm || acquisition.is_some() {
         set_process_state(&state, &process_id, ProcessState::WaitingConfirmation).await;
     }
-    let identity = match exec::scope_identity(&working_directory, &request.execution, acquisition) {
-        Ok(i) => i,
-        Err(reason) => {
-            finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
-            return;
-        }
-    };
     let authorization = if let Some(result) = prepared_confirmation_result {
         Ok(confirmation::OperationAuthorization {
             approved: result == "allow_once",
@@ -2594,10 +2587,8 @@ async fn run_async_process(
     let authorization = match authorization {
         Ok(value) => value,
         Err(reason) => {
-            // Preserve the public path rejection category when only the path
-            // decision denied the operation. Acquisition still runs first.
             let reason = if reason == "policy_denied"
-                && execution_policy_decision(&config, &request.execution) != PolicyDecision::Deny
+                && command_evaluation.decision != PolicyDecision::Deny
             {
                 "path_denied".to_string()
             } else {
@@ -2613,28 +2604,52 @@ async fn run_async_process(
             return;
         }
     };
-    let current_identity =
-        match exec::scope_identity(&working_directory, &request.execution, acquisition) {
-            Ok(identity) => identity,
+    if let Some(result) = &authorization.result {
+        set_confirmation_result(&state, &process_id, result.clone()).await;
+    }
+    // A failed explicit confirmation falls back to the original path policy;
+    // it neither grants its declared scopes nor requests confirmation again.
+    if !was_prepared && acquisition.is_some() && !authorization.approved {
+        let paths = exec::execution_path_decision(&config, &working_directory, &request.execution)
+            .and_then(|paths| {
+                exec::declared_scope_decision(
+                    &config,
+                    &working_directory,
+                    &request.execution,
+                    acquisition,
+                )
+                .map(|scoped| paths.max(scoped))
+            });
+        let paths = match paths {
+            Ok(paths) => paths,
             Err(reason) => {
                 finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
                 return;
             }
         };
-    if current_identity != identity {
-        finish_process(
-            &state,
-            &process_id,
-            ProcessState::Rejected,
-            "scope_target_changed",
-        )
-        .await;
-        return;
+        decision = decision.max(paths);
+        set_policy_decision(&state, &process_id, format!("{decision:?}")).await;
+        let rejection = match decision {
+            PolicyDecision::Allow => None,
+            PolicyDecision::Deny => Some("path_denied"),
+            PolicyDecision::Confirm => Some(
+                authorization
+                    .result
+                    .as_deref()
+                    .unwrap_or("provider_unavailable"),
+            ),
+        };
+        if let Some(reason) = rejection {
+            finish_process(&state, &process_id, ProcessState::Rejected, reason).await;
+            return;
+        }
     }
-    if let Some(result) = authorization.result {
-        set_confirmation_result(&state, &process_id, result).await;
-    }
-    let config = if authorization.approved {
+    // Batch admission already prepared the shared mount grants for every worker.
+    let config = if !was_prepared
+        && authorization.approved
+        && config.policy.enabled
+        && config.policy.bubblewrap
+    {
         match exec::granted_execution_config(
             &config,
             &working_directory,
@@ -2643,7 +2658,13 @@ async fn run_async_process(
         ) {
             Ok(value) => Arc::new(value),
             Err(reason) => {
-                finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
+                finish_process(
+                    &state,
+                    &process_id,
+                    ProcessState::Failed,
+                    &format!("spawn_failed: {reason}"),
+                )
+                .await;
                 return;
             }
         }
@@ -5044,6 +5065,203 @@ mod tests {
             );
             let _ = wait_output_capture(&state, &result.response.process_id).await;
             responder.0.abort();
+        }
+    }
+
+    // Actual file access distinguishes command approval from Agent-side scope
+    // inspection, including replacement during confirmation and failed fallback.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_commands_resolve_targets_in_the_execution_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Cleanup {
+            root: PathBuf,
+            private: PathBuf,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.private, fs::Permissions::from_mode(0o700));
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+        struct Responder(JoinHandle<()>);
+        impl Drop for Responder {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+
+        for batch in [false, true] {
+            for mode in ["permission", "replacement", "fallback"] {
+                if mode == "permission" && unsafe { libc::geteuid() } == 0 {
+                    eprintln!("root bypasses directory permissions; skipping inaccessible target");
+                    continue;
+                }
+                let (state, workspace) = test_state(2).await;
+                let private = workspace.join("private");
+                fs::create_dir(&private).unwrap();
+                let _cleanup = Cleanup {
+                    root: workspace.parent().unwrap().to_path_buf(),
+                    private: private.clone(),
+                };
+                let target = private.join("config");
+                let replacement = workspace.join("replacement");
+                let copied = workspace.join("copied");
+                let marker = workspace.join("batch-started");
+                fs::write(&target, "before approval").unwrap();
+                fs::write(&replacement, "after approval").unwrap();
+                if mode == "permission" {
+                    fs::set_permissions(&private, fs::Permissions::from_mode(0o000)).unwrap();
+                    assert_eq!(
+                        fs::canonicalize(&target).unwrap_err().kind(),
+                        std::io::ErrorKind::PermissionDenied
+                    );
+                }
+                {
+                    let mut config = state.config.write().await;
+                    config.policy.bubblewrap = false;
+                    config.policy.command = crate::config::PolicyConfig {
+                        default_action: if mode == "fallback" {
+                            PolicyDecision::Allow
+                        } else {
+                            PolicyDecision::Deny
+                        },
+                        allow: if mode == "fallback" {
+                            vec!["*".into()]
+                        } else {
+                            Vec::new()
+                        },
+                        deny: if mode == "fallback" {
+                            Vec::new()
+                        } else {
+                            vec!["*".into()]
+                        },
+                        ..Default::default()
+                    };
+                    config.policy.path = crate::config::PathPolicyConfig::default();
+                    config.confirmation_provider.channels =
+                        vec![crate::config::ConfirmationChannel::Ntfy];
+                }
+                let acquisition = serde_json::from_value(serde_json::json!({
+                    "reason": "请求批准本次配置读取。",
+                    "read": [target],
+                }))
+                .unwrap();
+                let command = format!("cat {} > {}", target.display(), copied.display());
+                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                *state.hub_sender.lock().await = Some(sender);
+                let responder_state = state.clone();
+                let count = Arc::new(AtomicUsize::new(0));
+                let count_before = count.clone();
+                let ran_before_approval = Arc::new(AtomicBool::new(false));
+                let ran_before = ran_before_approval.clone();
+                let target_before = target.clone();
+                let copied_before = copied.clone();
+                let marker_before = marker.clone();
+                let mut responder = Responder(tokio::spawn(async move {
+                    while let Some(message) = receiver.recv().await {
+                        let agentic_gpt_protocol::AgentMessage::ConfirmationRequest {
+                            request_id,
+                            ..
+                        } = message
+                        else {
+                            continue;
+                        };
+                        count_before.fetch_add(1, Ordering::SeqCst);
+                        ran_before.store(
+                            copied_before.exists() || marker_before.exists(),
+                            Ordering::SeqCst,
+                        );
+                        if mode == "replacement" {
+                            fs::rename(&replacement, &target_before).unwrap();
+                        }
+                        if let Some(sender) = responder_state
+                            .pending_confirmations
+                            .lock()
+                            .await
+                            .remove(&request_id)
+                        {
+                            let response = if mode == "fallback" {
+                                "provider_unavailable"
+                            } else {
+                                "allow_once"
+                            };
+                            let _ = sender.send(response.into());
+                        }
+                    }
+                }));
+                let outcome = if batch {
+                    start_process_batch(
+                        state.clone(),
+                        ProcessBatchExecRequest {
+                            agent_id: "test-agent".into(),
+                            elements: vec![
+                                agentic_gpt_protocol::ProcessExecElement {
+                                    command: format!("touch {}", marker.display()),
+                                    cwd: None,
+                                },
+                                agentic_gpt_protocol::ProcessExecElement { command, cwd: None },
+                            ],
+                            acquire_confirmation: Some(acquisition),
+                            cwd: Some(workspace.to_string_lossy().into_owned()),
+                            group: None,
+                            wait_seconds: Some(3),
+                        },
+                        "test".into(),
+                        None,
+                        None,
+                        8192,
+                    )
+                    .await
+                    .map(|result| result.response.processes)
+                } else {
+                    let mut request = exec_request(&command, &workspace);
+                    request.acquire_confirmation = Some(acquisition);
+                    start_and_wait_process(
+                        state.clone(),
+                        request,
+                        ProcessOptions::for_source("test"),
+                        8192,
+                    )
+                    .await
+                    .map(|result| vec![result.response])
+                };
+                responder.0.abort();
+                let _ = (&mut responder.0).await;
+                if let Ok(processes) = &outcome {
+                    for process in processes {
+                        if !process.state.is_terminal() {
+                            let _ = cancel_process(&state, &process.process_id).await;
+                        }
+                        let _ = wait_output_capture(&state, &process.process_id).await;
+                    }
+                }
+                assert_eq!(count.load(Ordering::SeqCst), 1, "{batch}/{mode}");
+                assert!(!ran_before_approval.load(Ordering::SeqCst));
+                if mode == "fallback" {
+                    if batch {
+                        assert_eq!(outcome.unwrap_err(), "policy_denied");
+                    } else {
+                        assert_eq!(outcome.unwrap()[0].state, ProcessState::Rejected);
+                    }
+                    assert!(!copied.exists());
+                    assert!(!marker.exists());
+                } else {
+                    let processes = outcome.unwrap();
+                    let reader = processes.last().unwrap();
+                    if mode == "permission" {
+                        assert_eq!(reader.state, ProcessState::Failed);
+                        assert!(reader.exit_code.is_some_and(|code| code != 0));
+                        assert!(copied.exists(), "the shell must reach the actual read");
+                    } else {
+                        assert_eq!(reader.state, ProcessState::Completed);
+                        assert_eq!(fs::read_to_string(&copied).unwrap(), "after approval");
+                    }
+                    assert_eq!(marker.exists(), batch);
+                }
+                drop(state);
+            }
         }
     }
 

@@ -125,6 +125,11 @@ pub(crate) fn preflight(
     program: &str,
     args: &[String],
 ) -> std::result::Result<(), String> {
+    preflight_program(program)?;
+    check_path_policy(config, working_directory, program, args)
+}
+
+pub(crate) fn preflight_program(program: &str) -> std::result::Result<(), String> {
     if matches!(program, "passwd" | "su" | "login") {
         return Err("interactive_credential_required".to_string());
     }
@@ -134,7 +139,7 @@ pub(crate) fn preflight(
     ) {
         return Err("requires_tty_not_supported".to_string());
     }
-    check_path_policy(config, working_directory, program, args)
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -20,13 +20,13 @@ fn acquire_confirmation_schema(allow_scope: bool) -> Value {
         "method":{"type":"string","enum":["ntfy","freedesktop"],"description":"可选确认提供方；省略沿用配置。"},
     });
     if allow_scope {
-        properties["read"] = json!({"type":"array", "items":{"type":"string"}, "default":[]});
-        properties["write"] = json!({"type":"array", "items":{"type":"string"}, "default":[]});
+        properties["read"] = json!({"type":"array", "items":{"type":"string"}, "default":[], "description":"获准后追加到本次已启用沙箱的读取范围；保留原有读写挂载规则，不改变持久配置。"});
+        properties["write"] = json!({"type":"array", "items":{"type":"string"}, "default":[], "description":"获准后追加到本次已启用沙箱的可写挂载范围，不改变持久配置。"});
     }
     json!({
         "type":"object", "additionalProperties":false, "required":["reason"],
         "description": if allow_scope {
-            "提供对象即主动请求单次确认；reason 必填。read/write 临时路径范围仅适用于本次命令，不改变持久配置。"
+            "提供对象即主动请求本次完整命令的确认；reason 必填。获准后不再做目标路径授权预检或身份复查；read/write 用于本次启用沙箱的临时挂载，不改变持久配置。"
         } else {
             "提供对象即主动请求单次确认；reason 必填，仅接受 reason/method，不接受 read/write 字段；不改变持久配置。"
         },
