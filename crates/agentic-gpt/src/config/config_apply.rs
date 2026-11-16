@@ -83,7 +83,11 @@ fn apply_one(root: &mut Value, change: &ConfigChange) -> Result<()> {
             if !entry.collection {
                 return Err(anyhow!("config_collection_operation_unsupported"));
             }
-            if !value.is_string() {
+            if entry.kind == "json-object-array" {
+                if !value.is_object() {
+                    return Err(anyhow!("config_collection_object_required"));
+                }
+            } else if !value.is_string() {
                 return Err(anyhow!("config_collection_string_required"));
             }
             let pointer = config_catalog::pointer(path);

@@ -23,10 +23,28 @@ pub struct SafePolicyRules {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SafeMcpPolicyRule {
+    pub server: String,
+    pub tool: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeMcpPolicyRules {
+    pub default_action: String,
+    pub allow: Vec<SafeMcpPolicyRule>,
+    pub confirm: Vec<SafeMcpPolicyRule>,
+    pub deny: Vec<SafeMcpPolicyRule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SafePolicySummary {
     pub enabled: bool,
     pub bubblewrap: bool,
     pub command: SafePolicyRules,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<SafeMcpPolicyRules>,
     pub path: SafePathPolicySummary,
 }
 

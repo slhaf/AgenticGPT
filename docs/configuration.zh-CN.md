@@ -232,7 +232,7 @@ agentic-gpt run
 | `confirmationLanguage` | `en` 或 `zh-CN`。 |
 | `shell` | Bash 命令执行的 Shell 初始化文件设置。 |
 | `mcpServers` | `mcp.*` 转发的下游 MCP server。 |
-| `policy` | 统一的自动命令／路径策略：`enabled`、`command`、`path` 与 `bubblewrap`。 |
+| `policy` | 统一的命令／MCP／路径策略：`enabled`、`command`、`mcp`、`path` 与 `bubblewrap`。 |
 | `limits` | Process 并发限制与最大活动 Process/Skill/MCP Job 容量。 |
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 仓库根目录、时区、日记日界线、维护策略及可选 Vaultwarden 密钥服务。 |
@@ -626,7 +626,7 @@ CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会
 
 ## 命令与路径策略
 
-`policy` 是自动命令判定、路径准入与 bubblewrap 挂载的唯一配置来源：
+`policy` 是命令与 MCP 判定、路径准入及 bubblewrap 挂载的配置来源：
 
 ```json
 {
@@ -649,9 +649,29 @@ CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会
 }
 ```
 
-`policy.enabled=false` 会关闭自动命令与路径策略，并使 bubblewrap 保持关闭；请求显式提供的
+`policy.enabled=false` 会关闭命令、MCP 与路径策略，并使 bubblewrap 保持关闭；请求显式提供的
 `acquireConfirmation` 仍按请求执行。命令策略始终按
 `deny > confirm > allow > defaultAction` 判定；命令缺省动作是 `confirm`。
+
+MCP 规则位于 `policy.mcp`，与命令规则分域，不继承命令的 allow/confirm/deny 列表。例如：
+
+```json
+{
+  "defaultAction": null,
+  "allow": [{"server": "mobile", "tool": "get_*"}],
+  "confirm": [],
+  "deny": [{"server": "mobile", "tool": "delete_*"}]
+}
+```
+
+`defaultAction` 缺省或为 null 时继承 `policy.command.defaultAction`，也可设为 allow/confirm/deny；
+三个规则列表缺省为空，旧配置不必补写本节。每条规则的 `server`（配置中的服务 ID）和
+`tool`（下游工具名）均为必填 glob，必须同时匹配；支持 `*`、`?` 等 glob 模式，
+空白或无效模式在配置加载／更新时被拒绝。规则按 `deny > confirm > allow > defaultAction`
+判定，不按具体程度排序。例如 allow 的 `get_*` 不能覆盖 confirm 的 `*`。
+只读注解不自动放行。单次调用和批量调用共用策略；批量中任一项命中 deny 会拒绝整批，
+不执行下游调用，其他情况下仅聚合需要确认的项。临时服务放行不能覆盖 deny。
+本策略是 Agentic 的下游 MCP 准入，不改变下游服务自身的认证和权限。
 
 路径只接受具体目录或文件根，不接受 `*`、`**` 等通配模式；加载时会展开 home 并规范化路径。
 `defaultAction` 只接受 `allow` 或 `deny`，缺省为 `deny`。`write` 根同时授予读取，`readOnly`

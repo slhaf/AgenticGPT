@@ -1885,3 +1885,217 @@ fn config_cli_rejects_invalid_server_without_writing_and_accepts_valid_server() 
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+// These regressions exercise policy through managed admission and the rmcp
+// transport, so a future confirmation refactor cannot silently bypass policy.
+struct McpPolicyTestRoot(PathBuf);
+
+impl Drop for McpPolicyTestRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn managed_mcp_policy_controls_downstream_admission() {
+    use crate::policy::PolicyDecision;
+
+    let (state, root) = managed_test_state(16).await;
+    let _root = McpPolicyTestRoot(root);
+    state.temporary_mcp_allows.lock().await.clear();
+    add_fake_server(&state, "other", false).await;
+    {
+        let mut config = state.config.write().await;
+        config.confirmation_provider =
+            crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
+        config.policy.mcp = serde_json::from_value(json!({
+            "allow": [{"server": "fa*", "tool": "read_*"}]
+        }))
+        .unwrap();
+    }
+    let fake = FakeMcpServer::new(FakeBehavior::Fast);
+    for (server_id, tool_name, expected) in [
+        ("fake", "read_status", ProcessState::Completed),
+        ("other", "read_status", ProcessState::Rejected),
+        ("fake", "write_status", ProcessState::Rejected),
+    ] {
+        let mut request = managed_request(json!({}), 5);
+        request.server_id = server_id.to_string();
+        request.tool_name = tool_name.to_string();
+        let response = start_managed_call_with_factory(
+            &state,
+            request,
+            "local:mcp.callTool",
+            None,
+            fake_factory(fake.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.response.state, expected);
+    }
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
+
+    // An explicit denial wins even over the existing temporary server grant.
+    crate::confirmation::allow_mcp_server_for_test(&state, "fake").await;
+    state.config.write().await.policy.mcp.deny = serde_json::from_value(json!([
+        {"server": "fake", "tool": "*"}
+    ]))
+    .unwrap();
+    let response = start_managed_call_with_factory(
+        &state,
+        managed_request(json!({}), 5),
+        "local:mcp.callTool",
+        None,
+        fake_factory(fake.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.response.state, ProcessState::Rejected);
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
+
+    state.config.write().await.policy.enabled = false;
+    let response = start_managed_call_with_factory(
+        &state,
+        managed_request(json!({}), 5),
+        "local:mcp.callTool",
+        None,
+        fake_factory(fake.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.response.state, ProcessState::Completed);
+
+    state.temporary_mcp_allows.lock().await.clear();
+    {
+        let mut config = state.config.write().await;
+        config.policy.enabled = true;
+        config.policy.mcp = Default::default();
+        config.policy.command.default_action = PolicyDecision::Allow;
+    }
+    let response = start_managed_call_with_factory(
+        &state,
+        managed_request(json!({}), 5),
+        "local:mcp.callTool",
+        None,
+        fake_factory(fake.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.response.state, ProcessState::Completed);
+
+    state.config.write().await.policy.mcp.default_action = Some(PolicyDecision::Confirm);
+    let response = start_managed_call_with_factory(
+        &state,
+        managed_request(json!({}), 5),
+        "local:mcp.callTool",
+        None,
+        fake_factory(fake.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.response.state, ProcessState::Rejected);
+    assert_eq!(fake.calls.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn mcp_batch_policy_filters_confirmation_and_rejects_denied_batch_atomically() {
+    let (state, root) = managed_test_state(16).await;
+    let _root = McpPolicyTestRoot(root);
+    state.temporary_mcp_allows.lock().await.clear();
+    {
+        let mut config = state.config.write().await;
+        config.confirmation_provider =
+            crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
+        config.policy.mcp = serde_json::from_value(json!({
+            "allow": [{"server": "fake", "tool": "read_*"}]
+        }))
+        .unwrap();
+    }
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    *state.hub_sender.lock().await = Some(sender);
+    let fake = FakeMcpServer::new(FakeBehavior::Fast);
+    let mut read = batch_call(Some("read"), "fake", "read");
+    read.tool_name = "read_status".to_string();
+    let calls = vec![read, batch_call(Some("write"), "fake", "write")];
+    let task_state = state.clone();
+    let task_fake = fake.clone();
+    let task_calls = calls.clone();
+    let task = tokio::spawn(async move {
+        batch::start_managed_batch_with_factory(
+            &task_state,
+            batch_request(task_calls, McpBatchMode::Parallel, false, 5),
+            "local:mcp.batch",
+            None,
+            fake_factory(task_fake),
+        )
+        .await
+    });
+    let message = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let request_id = match message {
+        agentic_gpt_protocol::AgentMessage::ConfirmationRequest {
+            request_id,
+            payload,
+            ..
+        } => {
+            assert!(payload
+                .command_preview
+                .contains("Calls requiring confirmation: 1"));
+            assert!(payload.command_preview.contains("#1 id=write"));
+            assert!(!payload.command_preview.contains("#0 id=read"));
+            request_id
+        }
+        other => panic!("unexpected message: {other:?}"),
+    };
+    assert!(fake.calls.lock().unwrap().is_empty());
+    state
+        .pending_confirmations
+        .lock()
+        .await
+        .remove(&request_id)
+        .unwrap()
+        .send("allow_once".to_string())
+        .unwrap();
+    let response = timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status, McpBatchStatus::Completed);
+    assert_eq!(fake.calls.lock().unwrap().len(), 2);
+    assert!(receiver.try_recv().is_err());
+
+    crate::confirmation::allow_mcp_server_for_test(&state, "fake").await;
+    state.config.write().await.policy.mcp.deny = serde_json::from_value(json!([
+        {"server": "fake", "tool": "fake.tool"}
+    ]))
+    .unwrap();
+    let response = batch::start_managed_batch_with_factory(
+        &state,
+        batch_request(calls.clone(), McpBatchMode::Sequential, false, 5),
+        "local:mcp.batch",
+        None,
+        fake_factory(fake.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status, McpBatchStatus::Rejected);
+    assert_eq!(fake.calls.lock().unwrap().len(), 2);
+    assert!(receiver.try_recv().is_err());
+
+    state.config.write().await.policy.enabled = false;
+    let response = batch::start_managed_batch_with_factory(
+        &state,
+        batch_request(calls, McpBatchMode::Parallel, false, 5),
+        "local:mcp.batch",
+        None,
+        fake_factory(fake.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status, McpBatchStatus::Completed);
+    assert_eq!(fake.calls.lock().unwrap().len(), 4);
+    assert!(state.pending_confirmations.lock().await.is_empty());
+}

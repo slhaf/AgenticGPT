@@ -64,26 +64,68 @@ impl PolicyEvaluation {
     }
 }
 
-fn decide(policy: &PolicyConfig, matches: impl Fn(&str) -> bool) -> PolicyEvaluation {
+fn decide_rules<T>(
+    default_action: PolicyDecision,
+    deny: &[T],
+    confirm: &[T],
+    allow: &[T],
+    matches: impl Fn(&T) -> bool,
+    describe: impl Fn(&T) -> String,
+) -> PolicyEvaluation {
     for (action, patterns) in [
-        (PolicyDecision::Deny, &policy.deny),
-        (PolicyDecision::Confirm, &policy.confirm),
-        (PolicyDecision::Allow, &policy.allow),
+        (PolicyDecision::Deny, deny),
+        (PolicyDecision::Confirm, confirm),
+        (PolicyDecision::Allow, allow),
     ] {
         let matched: Vec<_> = patterns.iter().filter(|pattern| matches(pattern)).collect();
         if !matched.is_empty() {
             let mut evaluation = PolicyEvaluation::new(action);
             if action == PolicyDecision::Confirm {
                 for pattern in matched {
-                    if !evaluation.rules.contains(pattern) {
-                        evaluation.rules.push(pattern.clone());
+                    let rule = describe(pattern);
+                    if !evaluation.rules.contains(&rule) {
+                        evaluation.rules.push(rule);
                     }
                 }
             }
             return evaluation;
         }
     }
-    PolicyEvaluation::new(policy.default_action)
+    PolicyEvaluation::new(default_action)
+}
+
+fn decide(policy: &PolicyConfig, matches: impl Fn(&str) -> bool) -> PolicyEvaluation {
+    decide_rules(
+        policy.default_action,
+        &policy.deny,
+        &policy.confirm,
+        &policy.allow,
+        |pattern| matches(pattern),
+        Clone::clone,
+    )
+}
+
+pub(crate) fn mcp_policy_decision(config: &Config, server: &str, tool: &str) -> PolicyDecision {
+    if !config.policy.enabled {
+        return PolicyDecision::Allow;
+    }
+    let policy = &config.policy.mcp;
+    decide_rules(
+        policy
+            .default_action
+            .unwrap_or(config.policy.command.default_action),
+        &policy.deny,
+        &policy.confirm,
+        &policy.allow,
+        |rule| {
+            globset::Glob::new(&rule.server)
+                .is_ok_and(|glob| glob.compile_matcher().is_match(server))
+                && globset::Glob::new(&rule.tool)
+                    .is_ok_and(|glob| glob.compile_matcher().is_match(tool))
+        },
+        |rule| format!("server={} tool={}", rule.server, rule.tool),
+    )
+    .decision
 }
 
 pub(crate) fn command_policy_decision(

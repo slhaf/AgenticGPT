@@ -2893,6 +2893,8 @@ components:
               type: boolean
             command:
               $ref: "#/components/schemas/SafePolicyRules"
+            mcp:
+              $ref: "#/components/schemas/SafeMcpPolicyRules"
             path:
               type: object
               required: [defaultAction, readOnly, write, deny]
@@ -2935,6 +2937,35 @@ components:
           type: array
           items:
             type: string
+    SafeMcpPolicyRule:
+      type: object
+      required: [server, tool]
+      additionalProperties: false
+      properties:
+        server:
+          type: string
+        tool:
+          type: string
+    SafeMcpPolicyRules:
+      type: object
+      required: [defaultAction, allow, confirm, deny]
+      additionalProperties: false
+      properties:
+        defaultAction:
+          type: string
+          enum: [allow, confirm, deny]
+        allow:
+          type: array
+          items:
+            $ref: "#/components/schemas/SafeMcpPolicyRule"
+        confirm:
+          type: array
+          items:
+            $ref: "#/components/schemas/SafeMcpPolicyRule"
+        deny:
+          type: array
+          items:
+            $ref: "#/components/schemas/SafeMcpPolicyRule"
     McpListServersRequest:
       type: object
       additionalProperties: false

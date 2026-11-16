@@ -809,9 +809,15 @@ pub(crate) async fn set_mcp_authorization(
     };
     audit.policy_decision = if matches!(
         decision,
-        "allow_once" | "allow_mcp_server_15m" | "allow_mcp_server_30m" | "temporary_mcp_allow"
+        "allow_once"
+            | "allow_mcp_server_15m"
+            | "allow_mcp_server_30m"
+            | "temporary_mcp_allow"
+            | "policy_allow"
     ) {
         "Allow".to_string()
+    } else if decision == "policy_deny" {
+        "Deny".to_string()
     } else {
         "Confirm".to_string()
     };

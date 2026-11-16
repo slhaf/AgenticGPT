@@ -125,7 +125,7 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 - `POST /v1/mcp/servers`：列出一个本地 Agent 中配置的 MCP 服务器；省略 `agentId` 时，则汇总所有当前已连接 Agent 的 MCP 服务器。
 - `POST /v1/mcp/tools`：列出一个 MCP 服务器暴露的工具。
 - `POST /v1/mcp/callTool`：通过所选本地 Agent 启动一个受管理的下游 MCP 工具进程。HTTP 响应为扁平的 `ProcessResponse`；等待超时不会取消进程。`timeoutSeconds` 默认值为 300，上限为 900。
-- `POST /v1/mcp/batch`：原子准入 1–16 个按序排列的下游 MCP 子进程。响应为 `McpBatchToolResponse`，整个响应共用 `limits.processResponseBytes` 预算；该操作使用一次聚合确认，支持并行或顺序模式、可选的安全快速失败调度，以及共用的全局/每服务器并发限制。聚合参数上限为 2 MiB，不是对外响应预算。
+- `POST /v1/mcp/batch`：原子准入 1–16 个按序排列的下游 MCP 子进程。响应为 `McpBatchToolResponse`，整个响应共用 `limits.processResponseBytes` 预算；该操作使用 MCP 策略判定，仅对需确认项进行一次聚合确认，任一 deny 拒绝整批；支持并行或顺序模式、可选的安全快速失败调度，以及共用的全局/每服务器并发限制。聚合参数上限为 2 MiB，不是对外响应预算。
 - `GET /v1/runs/{runId}`：查看一项 Hub 到 Agent 命令运行的已持久化状态和可选的迟到结果。
 - `POST /v1/room/skills/list`、`/read`、`/search`、`/active`、`/activate`、`/deactivate`：通过活动 Room Agent 发现 workspace Skills 并维护本地激活状态。这些端点不接收 `agentId`。
 - `POST /v1/room/skills/install`：异步安装一个 Skill，来源可以是公开 GitHub、HTTPS 文件条目或内联 UTF-8/base64 文件。网络操作开始前，响应会先返回 `installId`。
@@ -150,7 +150,7 @@ Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirm
 - 未传对象按策略判定；`tmux.pasteText` 的基础决策为 Confirm，无对象也自动确认，未获准不会写入。
 - 仅 Process exec/batch 接受可选 read/write 临时路径数组；文件与 tmux 拒绝 read/write 字段，包括空数组。
 
-文件 read/search/edit 的本地 MCP 入口也使用该对象，读取／搜索批次只接受顶层对象。主动确认不跳过工具集、容量和文件完整性等独立检查。Agent 与 Hub 须同步升级；具体迁移示例、通知展示边界见[单次主动确认](configuration.zh-CN.md#单次主动确认)。下游 MCP 的 server/tool 专用审批与临时 server 授权按钮保持原有语义。
+文件 read/search/edit 的本地 MCP 入口也使用该对象，读取／搜索批次只接受顶层对象。主动确认不跳过工具集、容量和文件完整性等独立检查。Agent 与 Hub 须同步升级；具体迁移示例、通知展示边界见[单次主动确认](configuration.zh-CN.md#单次主动确认)。下游 MCP 按 `policy.mcp` 的 server/tool 规则判定，需确认时使用专用审批与临时 server 授权按钮；临时授权不能覆盖 deny。
 
 当配置要求 Confirm 且确认通道不可用时：
 

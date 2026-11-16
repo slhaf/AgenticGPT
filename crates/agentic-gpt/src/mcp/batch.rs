@@ -48,7 +48,7 @@ struct PreparedMcpBatchCall {
     argument_keys_truncated: bool,
     argument_bytes: usize,
     argument_sha256: String,
-    temporary_allowed: bool,
+    authorization: Option<String>,
 }
 
 pub(crate) struct ManagedMcpBatchResponse {
@@ -233,7 +233,7 @@ async fn start_managed_batch_with_factory_budget(
 
     let confirmation_items = prepared
         .iter()
-        .filter(|call| !call.temporary_allowed)
+        .filter(|call| call.authorization.is_none())
         .map(|call| McpBatchConfirmationItem {
             index: call.index,
             id: call.id.clone(),
@@ -265,20 +265,26 @@ async fn start_managed_batch_with_factory_budget(
             .collect(),
         batch_cancel.clone(),
     ));
-    let confirmation_result = confirmation::authorize_mcp_batch_cancellable(
-        state,
-        &confirmation_items,
-        temporary_server,
-        batch_cancel,
-    )
-    .await;
+    let confirmation_result = if prepared
+        .iter()
+        .any(|call| call.authorization.as_deref() == Some("policy_deny"))
+    {
+        "policy_deny".to_string()
+    } else {
+        confirmation::authorize_mcp_batch_cancellable(
+            state,
+            &confirmation_items,
+            temporary_server,
+            batch_cancel,
+        )
+        .await
+    };
     watcher.abort();
     for (index, registration) in registrations.iter().enumerate() {
-        let child_authorization = if prepared[index].temporary_allowed {
-            "temporary_mcp_allow"
-        } else {
-            confirmation_result.as_str()
-        };
+        let child_authorization = prepared[index]
+            .authorization
+            .as_deref()
+            .unwrap_or(confirmation_result.as_str());
         let _ = process::set_mcp_authorization(
             state,
             &registration.info.process_id,
@@ -402,6 +408,7 @@ async fn prepare_mcp_batch(
             McpBatchRequest::MAX_CALLS
         ));
     }
+    let policy_config = state.config.read().await.clone();
     let mut ids = HashSet::new();
     let mut aggregate_bytes = 0usize;
     let mut prepared = Vec::with_capacity(payload.calls.len());
@@ -434,7 +441,17 @@ async fn prepare_mcp_batch(
             bounded_mcp_argument_keys(&call.arguments);
         let (config_revision, server) = server_config_snapshot(state, &call.server_id).await;
         let server = server.map_err(|reason| anyhow!(reason))?;
-        let temporary_allowed = confirmation::temporary_mcp_allowed(state, &call.server_id).await;
+        let decision =
+            crate::policy::mcp_policy_decision(&policy_config, &call.server_id, &call.tool_name);
+        let authorization = match decision {
+            crate::policy::PolicyDecision::Deny => Some("policy_deny".to_string()),
+            crate::policy::PolicyDecision::Allow => Some("policy_allow".to_string()),
+            crate::policy::PolicyDecision::Confirm => {
+                confirmation::temporary_mcp_allowed(state, &call.server_id)
+                    .await
+                    .then(|| "temporary_mcp_allow".to_string())
+            }
+        };
         prepared.push(PreparedMcpBatchCall {
             index,
             id: call.id.clone(),
@@ -455,7 +472,7 @@ async fn prepare_mcp_batch(
             argument_keys_truncated,
             argument_bytes: encoded.len(),
             argument_sha256,
-            temporary_allowed,
+            authorization,
         });
     }
     Ok(prepared)
@@ -489,11 +506,10 @@ async fn run_mcp_batch_coordinator(
                     timeout_seconds,
                     registration.info.process_id.clone(),
                     client_factory.clone(),
-                    Some(if call.temporary_allowed {
-                        "temporary_mcp_allow".to_string()
-                    } else {
-                        confirmation_result.clone()
-                    }),
+                    Some(
+                        call.authorization
+                            .unwrap_or_else(|| confirmation_result.clone()),
+                    ),
                     fail_fast.then(|| stop.clone()),
                 )
                 .await;
@@ -523,11 +539,7 @@ async fn run_mcp_batch_coordinator(
                         timeout_seconds,
                         registration.info.process_id.clone(),
                         task_factory,
-                        Some(if call.temporary_allowed {
-                            "temporary_mcp_allow".to_string()
-                        } else {
-                            task_confirmation
-                        }),
+                        Some(call.authorization.unwrap_or(task_confirmation)),
                         fail_fast.then(|| task_stop.clone()),
                     )
                     .await;

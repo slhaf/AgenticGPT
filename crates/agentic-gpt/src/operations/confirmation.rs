@@ -702,14 +702,18 @@ pub(crate) async fn authorize_mcp_tool_call_cancellable(
     arguments: &serde_json::Value,
     cancel_requested: Arc<AtomicBool>,
 ) -> String {
-    if temporary_mcp_allowed(state, server_id).await {
-        return "temporary_mcp_allow".to_string();
-    }
     if cancel_requested.load(Ordering::Acquire) {
         return "cancelled".to_string();
     }
-
     let config = state.config.read().await.clone();
+    match crate::policy::mcp_policy_decision(&config, server_id, tool_name) {
+        crate::policy::PolicyDecision::Deny => return "policy_deny".to_string(),
+        crate::policy::PolicyDecision::Allow => return "policy_allow".to_string(),
+        crate::policy::PolicyDecision::Confirm => {}
+    }
+    if temporary_mcp_allowed(state, server_id).await {
+        return "temporary_mcp_allow".to_string();
+    }
     let decision = request_mcp_tool_confirmation_cancellable(
         state,
         &config,

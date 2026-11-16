@@ -169,6 +169,7 @@ pub(crate) fn default_config_summary() -> SafeConfigSummary {
                 deny: Vec::new(),
                 default_action: "confirm".into(),
             },
+            mcp: None,
             path: SafePathPolicySummary {
                 default_action: "deny".into(),
                 read_only: Vec::new(),

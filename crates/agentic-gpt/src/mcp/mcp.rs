@@ -616,7 +616,11 @@ fn validate_tool_name(tool_name: &str) -> Result<()> {
 fn mcp_authorization_allows(value: &str) -> bool {
     matches!(
         value,
-        "allow_once" | "allow_mcp_server_15m" | "allow_mcp_server_30m" | "temporary_mcp_allow"
+        "allow_once"
+            | "allow_mcp_server_15m"
+            | "allow_mcp_server_30m"
+            | "temporary_mcp_allow"
+            | "policy_allow"
     )
 }
 

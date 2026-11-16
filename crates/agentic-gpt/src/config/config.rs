@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use agentic_gpt_protocol::{
-    EventSeverity, SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafePolicySummary,
-    SafeTunnelSummary, DEFAULT_PROCESS_RESPONSE_BYTES, MAX_PROCESS_RESPONSE_BYTES,
-    MIN_PROCESS_RESPONSE_BYTES,
+    EventSeverity, SafeConfigSummary, SafeMcpPolicyRule, SafeMcpPolicyRules, SafePathPolicySummary,
+    SafePolicyRules, SafePolicySummary, SafeTunnelSummary, DEFAULT_PROCESS_RESPONSE_BYTES,
+    MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES,
 };
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, Utc};
@@ -792,6 +792,8 @@ pub(crate) struct SecurityPolicyConfig {
     #[serde(default)]
     pub(crate) bubblewrap: bool,
     pub(crate) command: PolicyConfig,
+    #[serde(default)]
+    pub(crate) mcp: McpPolicyConfig,
     pub(crate) path: PathPolicyConfig,
 }
 
@@ -801,9 +803,26 @@ impl Default for SecurityPolicyConfig {
             enabled: true,
             bubblewrap: false,
             command: PolicyConfig::default(),
+            mcp: McpPolicyConfig::default(),
             path: PathPolicyConfig::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+pub(crate) struct McpPolicyConfig {
+    pub(crate) default_action: Option<PolicyDecision>,
+    pub(crate) allow: Vec<McpPolicyRule>,
+    pub(crate) confirm: Vec<McpPolicyRule>,
+    pub(crate) deny: Vec<McpPolicyRule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct McpPolicyRule {
+    pub(crate) server: String,
+    pub(crate) tool: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
@@ -1570,6 +1589,46 @@ impl Config {
                 enabled: self.policy.enabled,
                 bubblewrap: self.policy.bubblewrap,
                 command: safe_policy(&self.policy.command),
+                mcp: Some(SafeMcpPolicyRules {
+                    default_action: self
+                        .policy
+                        .mcp
+                        .default_action
+                        .unwrap_or(self.policy.command.default_action)
+                        .as_str()
+                        .to_string(),
+                    allow: self
+                        .policy
+                        .mcp
+                        .allow
+                        .iter()
+                        .map(|rule| SafeMcpPolicyRule {
+                            server: rule.server.clone(),
+                            tool: rule.tool.clone(),
+                        })
+                        .collect(),
+                    confirm: self
+                        .policy
+                        .mcp
+                        .confirm
+                        .iter()
+                        .map(|rule| SafeMcpPolicyRule {
+                            server: rule.server.clone(),
+                            tool: rule.tool.clone(),
+                        })
+                        .collect(),
+                    deny: self
+                        .policy
+                        .mcp
+                        .deny
+                        .iter()
+                        .map(|rule| SafeMcpPolicyRule {
+                            server: rule.server.clone(),
+                            tool: rule.tool.clone(),
+                        })
+                        .collect(),
+                }),
+
                 path: SafePathPolicySummary {
                     default_action: match self.policy.path.default_action {
                         PathDefaultAction::Allow => "allow",
@@ -1625,6 +1684,22 @@ impl Config {
             .chain(&self.policy.command.deny)
         {
             crate::policy::validate_command_pattern(pattern)?;
+        }
+        for rule in self
+            .policy
+            .mcp
+            .allow
+            .iter()
+            .chain(&self.policy.mcp.confirm)
+            .chain(&self.policy.mcp.deny)
+        {
+            for (field, pattern) in [("server", &rule.server), ("tool", &rule.tool)] {
+                if pattern.trim().is_empty() {
+                    return Err(anyhow!("MCP policy {field} pattern must not be empty"));
+                }
+                globset::Glob::new(pattern)
+                    .map_err(|error| anyhow!("invalid MCP policy {field} pattern: {error}"))?;
+            }
         }
         crate::exec::normalize_roots(
             self.policy

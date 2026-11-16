@@ -12,6 +12,7 @@ pub(crate) enum ConfigValueKind {
     AutoOrNonNegativeInteger,
     EventNotificationLevel,
     JsonStringArray,
+    JsonObjectArray,
     JsonStringArrayOrNull,
     JsonPathArray,
     NullableString,
@@ -39,6 +40,7 @@ impl ConfigValueKind {
             Self::NonNegativeInteger => "non-negative-integer",
             Self::AutoOrNonNegativeInteger => "auto-or-non-negative-integer",
             Self::JsonStringArray => "json-string-array",
+            Self::JsonObjectArray => "json-object-array",
             Self::JsonStringArrayOrNull => "json-string-array-or-null",
             Self::JsonPathArray => "json-path-array",
             Self::NullableString => "nullable-string",
@@ -485,8 +487,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Policy,
         Boolean,
         false,
-        "Enable command and path policy enforcement.",
-        "启用命令与路径策略执行。",
+        "Enable command, MCP and path policy enforcement.",
+        "启用命令、MCP 与路径策略执行。",
         "true",
         set_policy_enabled
     ),
@@ -529,6 +531,30 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "拒绝的命令模式数组。",
         r#"[]"#,
         set_policy_command_deny
+    ),
+    config_key!(
+        "policy.mcp.defaultAction", Policy, PolicyAction, true,
+        "Default MCP action; null inherits the command default action.",
+        "MCP 未匹配规则时的默认动作；null 继承命令默认动作。",
+        "null", set_policy_mcp_default_action
+    ),
+    config_key!(
+        "policy.mcp.allow", Policy, JsonObjectArray, false,
+        "MCP rules matching both server and tool globs.",
+        "允许的 MCP 规则；server 和 tool 两个 glob 必须同时匹配。",
+        r#"[{"server":"mobile","tool":"get_*"}]"#, set_policy_mcp_allow
+    ),
+    config_key!(
+        "policy.mcp.confirm", Policy, JsonObjectArray, false,
+        "MCP rules matching both server and tool globs.",
+        "需要确认的 MCP 规则；server 和 tool 两个 glob 必须同时匹配。",
+        r#"[{"server":"mobile","tool":"get_*"}]"#, set_policy_mcp_confirm
+    ),
+    config_key!(
+        "policy.mcp.deny", Policy, JsonObjectArray, false,
+        "MCP rules matching both server and tool globs.",
+        "拒绝的 MCP 规则；server 和 tool 两个 glob 必须同时匹配。",
+        r#"[{"server":"mobile","tool":"get_*"}]"#, set_policy_mcp_deny
     ),
     config_key!(
         "policy.path.defaultAction",

@@ -118,6 +118,13 @@ pub(crate) async fn collect(state: &AppState) -> Value {
                 "confirmCount": config.policy.command.confirm.len(),
                 "denyCount": config.policy.command.deny.len(),
             },
+            "mcp": {
+                "defaultAction": config.policy.mcp.default_action.unwrap_or(config.policy.command.default_action),
+                "inheritsCommandDefault": config.policy.mcp.default_action.is_none(),
+                "allowCount": config.policy.mcp.allow.len(),
+                "confirmCount": config.policy.mcp.confirm.len(),
+                "denyCount": config.policy.mcp.deny.len(),
+            },
             "path": {
                 "defaultAction": config.policy.path.default_action,
                 "readOnlyCount": config.policy.path.read_only.len(),

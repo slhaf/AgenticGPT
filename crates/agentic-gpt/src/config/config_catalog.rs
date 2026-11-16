@@ -128,7 +128,7 @@ fn collection(path: &[String]) -> bool {
     matches!(
         parts.as_slice(),
         ["toolsets", "enabled"]
-            | ["policy", "command", "allow" | "confirm" | "deny"]
+            | ["policy", "command" | "mcp", "allow" | "confirm" | "deny"]
             | ["policy", "path", "readOnly" | "write" | "deny"]
             | ["skills", "allowedHosts"]
             | ["httpMcp", "allowHosts"]
@@ -198,7 +198,10 @@ pub(crate) fn field_label(path: &[String], language: UiLanguage) -> Option<&'sta
             ("Total operation timeout (seconds)", "操作总时限（秒）")
         }
         ["skills", "allowedHosts"] => ("Allowed download hosts", "允许下载的主机"),
-        ["policy", "enabled"] => ("Enforce command and path policies", "启用命令与路径策略"),
+        ["policy", "enabled"] => (
+            "Enforce command, MCP and path policies",
+            "启用命令、MCP 与路径策略",
+        ),
         ["policy", "command", "defaultAction"] => (
             "Default action for unmatched commands",
             "未匹配命令的默认动作",
