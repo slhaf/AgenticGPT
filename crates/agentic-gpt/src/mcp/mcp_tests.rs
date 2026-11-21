@@ -91,7 +91,7 @@ impl rmcp::ServerHandler for FakeMcpServer {
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>> + Send + '_
+    ) -> impl Future<Output = Result<rmcp::model::CallToolResponse, rmcp::ErrorData>> + Send + '_
     {
         let behavior = self.behavior.clone();
         let calls = self.calls.clone();
@@ -154,7 +154,7 @@ impl rmcp::ServerHandler for FakeMcpServer {
                 }
             };
             events.lock().unwrap().push(format!("end:{label}"));
-            result
+            result.map(Into::into)
         }
     }
 
@@ -163,15 +163,17 @@ impl rmcp::ServerHandler for FakeMcpServer {
         notification: rmcp::model::CancelledNotificationParam,
         _context: rmcp::service::NotificationContext<rmcp::RoleServer>,
     ) -> impl Future<Output = ()> + Send + '_ {
-        self.cancelled_ids
-            .lock()
-            .unwrap()
-            .push(notification.request_id.to_string());
+        self.cancelled_ids.lock().unwrap().push(
+            notification
+                .request_id
+                .expect("targeted cancellation")
+                .to_string(),
+        );
         std::future::ready(())
     }
 
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        rmcp::model::ServerInfo::new(
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
                 .build(),
@@ -190,7 +192,7 @@ fn fake_factory(server: FakeMcpServer) -> McpClientFactory {
                     let _ = running.waiting().await;
                 }
             });
-            Ok(ClientInfo::default().serve(client_io).await?)
+            Ok(ClientConfig::default().serve(client_io).await?)
         })
     })
 }
@@ -207,7 +209,7 @@ fn routing_factory(servers: std::collections::HashMap<String, FakeMcpServer>) ->
                     let _ = running.waiting().await;
                 }
             });
-            Ok(ClientInfo::default().serve(client_io).await?)
+            Ok(ClientConfig::default().serve(client_io).await?)
         })
     })
 }

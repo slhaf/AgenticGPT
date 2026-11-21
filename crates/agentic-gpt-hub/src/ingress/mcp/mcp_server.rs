@@ -28,7 +28,7 @@ use args::{
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, ErrorData, Meta, ServerCapabilities, ServerInfo, ToolAnnotations,
+    CallToolResult, ErrorData, MetaObject, ServerCapabilities, ServerConfig, ToolAnnotations,
 };
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde_json::{json, Map, Value};
@@ -196,7 +196,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
             "securitySchemes".to_string(),
             json!([{ "type": "oauth2", "scopes": ["agentic:mcp"] }]),
         );
-        route.attr.meta = Some(Meta(meta));
+        route.attr.meta = Some(MetaObject(meta));
     }
 }
 
@@ -376,8 +376,8 @@ async fn unavailable_process_value(
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for AgenticMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(
                 "agentic-gpt-hub",
                 env!("CARGO_PKG_VERSION"),

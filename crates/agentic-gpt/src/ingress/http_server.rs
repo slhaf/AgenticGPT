@@ -323,7 +323,7 @@ async fn serve_listener(
     owner: Arc<HttpOwner>,
 ) -> Result<()> {
     let mut server_config = StreamableHttpServerConfig::default()
-        .with_stateful_mode(true)
+        .with_legacy_session_mode(true)
         .with_cancellation_token(session_stop.clone());
     server_config = match allow_hosts {
         None => server_config.disable_allowed_hosts(),

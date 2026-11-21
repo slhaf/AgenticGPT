@@ -2109,7 +2109,7 @@ def require_schema_contract(document: dict[str, Any], schemas: dict[str, Any]) -
     for name, expected_values in (
         ("EventSeverity", ["low", "medium", "high"]),
         ("EventStatus", ["pending", "handled", "expired"]),
-        ("EventSourceKind", ["process", "skill_install", "external"]),
+        ("EventSourceKind", ["process", "skill_install", "email", "secret", "external"]),
     ):
         schema = schemas.get(name, {})
         if not isinstance(schema, dict) or schema.get("enum") != expected_values:

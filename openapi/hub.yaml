@@ -4682,7 +4682,7 @@ components:
       enum: [pending, handled, expired]
     EventSourceKind:
       type: string
-      enum: [process, skill_install, external]
+      enum: [process, skill_install, email, secret, external]
     EventSource:
       type: object
       required: [kind, ref]

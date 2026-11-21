@@ -217,6 +217,7 @@ impl SecretService {
             let id = format!("secret-sync:{}", uuid::Uuid::new_v4());
             let _ = event_store.inject_external_once(
                 &id,
+                agentic_gpt_protocol::EventSourceKind::Secret,
                 &EventInjectRequest {
                     message,
                     severity: Some(EventSeverity::Low),

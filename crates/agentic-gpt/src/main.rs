@@ -70,6 +70,8 @@ mod local_control;
 mod local_service;
 #[path = "mcp/mcp.rs"]
 mod mcp;
+#[path = "operations/mcp_events.rs"]
+mod mcp_events;
 #[path = "runtime/notify.rs"]
 mod notify;
 #[path = "operations/operation.rs"]

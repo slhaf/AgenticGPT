@@ -120,7 +120,7 @@ printf '%s' '{"message":"需要查看部署状态","ref":"deploy-42","severity":
 ```
 
 `privateevent.inject` 不会出现在公开 `tools/list` 中。运行时将事件来源固定为 `external`，外部事件调用方提供 `ref` 作为事件引用。
-注入成功的 ACK 不会向调用方暴露事件，也不表示事件已被消费。当前没有事件主动 push；提醒只会随该 Agent 的下一次公开工具调用显示。
+注入成功的 ACK 不会向调用方暴露事件，也不表示事件已被消费。提醒仍随公开工具调用显示；主动通知可通过 MCP Events 订阅，见[事件订阅](interfaces.md#mcp-events-订阅)。
 不要把裸事件 JSON 写入 daemon 的 MCP stdin；该 stdin 保留给 MCP framing。
 
 公开的 `event.list`、`event.get` 和 `event.mark` 是独立于工具集开关的 Agent 收件箱工具，可供 Standalone、Local、Tunnel 和 HTTP 工具表面使用。

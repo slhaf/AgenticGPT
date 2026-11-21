@@ -270,7 +270,9 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 以及 Hub `RunReport` 相互独立：
 
 - 内部事件由服务端绑定 `process` 或 `skill_install` 和对应实体 ID。
-- 外部注入的来源种类固定为 `external`，来源引用由调用方通过 `ref` 提供。
+- 新邮件来源为 `email`，引用为邮件 ID；密钥同步完成来源为 `secret`，引用为同步 ID。
+- 本地外部注入来源固定为 `external`，引用由调用方通过 `ref` 提供。
+- 升级前保存的 `external` 记录不按文案或引用回填分类。
 - 读取、筛选、标记或传输事件都不能改写来源。
 
 事件记录使用 camelCase 字段 `eventId`、`message`、`severity`（`low|medium|high`）、
@@ -591,3 +593,20 @@ V1 消息分为以下两类：
 Agent 重启时，传输账本是命令/结果的持久权威来源：绑定所有者的已完成记录可以重新发送匹配结果；绑定所有者的已接受记录可以从已存储命令恢复；没有完成结果的 started/running 记录会变为 `unknown`，而不会重放副作用。claim 会被锁定并绑定到显式的 `agentId`；其他所有者不能接管该记录。旧的无所有者记录继续保持 `LegacyUnowned`：不会自动协调、执行，也不会用于披露结果。恢复操作须由运维人员检查保留的原始记录和更新的所有者绑定证据；绝不能为了让启动通过而删除去重证据。
 
 账本解析失败或最后一行被截断时会 fail closed。出错的原始字节保存在私有 `.recovery` sidecar 中，压缩过程会保留私有 `.backup`；这些都不是删除或重置账本的理由。Hub 会在超时后将缺少状态/结果的 acked 运行标记为 `unknown`，但该状态或缓存缺失都不能证明 Agent 已停止。
+
+
+## MCP Events 订阅
+
+Agent endpoint 通过顶层 `capabilities.events` 声明 `events/list`、`events/subscribe`、`events/unsubscribe` 协议方法，不是 tools/call 工具。Hub 跨 Agent 订阅聚合不在此接口范围。
+
+唯一事件 `agentic.event.created` 表示正式入库的新事件。按来源种类及严重程度过滤，各维度取交集、维度内取并集、省略不限。不新增业务 type。Process/安装最初响应已含终态时仍抑制通知。邮件只推送发件人、主题及邮件引用，不扩展正文/附件。
+
+订阅及投递进度持久化，重启可继续发送。回调验证 HTTPS 地址并使用 Standard Webhooks 签名；密钥不进入消息或日志。订阅只接收生效后入库事件，cursor 为 null，不提供历史回放；旧事件通过 event.list/get 查询。有限重试保持 eventId。
+
+Webhook ACK 不是处理完成，不自动 event.mark，也不增加面板显示计数。event.mark 不消费订阅投递队列。取消订阅后停止后续投递。下游 MCP per-call 生命周期不变。
+
+过滤参数示例：`{"kinds":["email","secret"],"severities":["medium","high"]}`。
+`kinds` 支持 `process/skill_install/external/email/secret`，`severities` 支持 `low/medium/high`；空数组拒绝。
+订阅缺省有效期 24 小时，请在返回的 `refreshBefore` 前刷新；无期限请求也只授予有限有效期。
+HTTP 订阅归属现有单 Agent 的授权域，关闭 HTTP 或更换其根凭证会停止旧授权域的投递；
+本地与 tunnel 订阅分别沿用对应 Agent 入口权限，不新增跨 Agent 访问能力。

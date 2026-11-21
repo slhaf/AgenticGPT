@@ -26,7 +26,10 @@ fn settle_remote_response(
 ) -> Result<serde_json::Value> {
     let mut seen = HashSet::with_capacity(payload.dispositions.len());
     for disposition in &payload.dispositions {
-        if disposition.source.kind == EventSourceKind::External {
+        if !matches!(
+            disposition.source.kind,
+            EventSourceKind::Process | EventSourceKind::SkillInstall
+        ) {
             return Err(anyhow::anyhow!("event_settle_external_source"));
         }
         if !seen.insert((

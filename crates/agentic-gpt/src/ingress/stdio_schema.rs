@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use agentic_gpt_protocol::{MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES};
-use rmcp::model::{Meta, Tool, ToolAnnotations};
+use rmcp::model::{MetaObject, Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
 use crate::{
@@ -67,7 +67,7 @@ pub(super) fn tool_descriptor(name: &str) -> Tool {
     Tool::new(name.to_string(), tool_description(name), input_schema)
         .with_annotations(annotations)
         .with_raw_output_schema(Arc::new(output_schema()))
-        .with_meta(Meta(Map::from_iter([(
+        .with_meta(MetaObject(Map::from_iter([(
             "surface".to_string(),
             Value::String("agent-local".to_string()),
         )])))

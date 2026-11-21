@@ -19,11 +19,11 @@ use anyhow::Result;
 use base64::Engine;
 use chrono::Utc;
 #[cfg(test)]
-use rmcp::model::Meta;
+use rmcp::model::MetaObject;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, Content, ErrorData, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResult, ContentBlock, ErrorData, ListToolsResult,
+        PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
     },
     service::{RequestContext as McpRequestContext, RoleServer},
     transport::{async_rw::AsyncRwTransport, stdio},
@@ -1737,7 +1737,7 @@ impl ServerHandler for AgentMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: McpRequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
         let email_result = request.name.starts_with("room.email.");
         let email_images = matches!(
             request.name.as_ref(),
@@ -1745,7 +1745,7 @@ impl ServerHandler for AgentMcpServer {
         );
         let (mut value, special_result) = self.call_with_result(request).await?;
         if let Some(result) = special_result {
-            return Ok(result);
+            return Ok(result.into());
         }
         let images = if email_images {
             value
@@ -1767,7 +1767,7 @@ impl ServerHandler for AgentMcpServer {
                 {
                     result
                         .content
-                        .push(Content::image(data.to_owned(), mime_type.to_owned()));
+                        .push(ContentBlock::image(data.to_owned(), mime_type.to_owned()));
                 }
             }
         }
@@ -1787,9 +1787,9 @@ impl ServerHandler for AgentMcpServer {
             {
                 error["events"] = events.clone();
             }
-            return Ok(CallToolResult::structured_error(error));
+            return Ok(CallToolResult::structured_error(error).into());
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     async fn list_tools(
@@ -1817,13 +1817,50 @@ impl ServerHandler for AgentMcpServer {
             .then(|| tool_descriptor(name))
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(rmcp::model::Implementation::new(
-                "agentic-gpt-local-agent",
-                env!("CARGO_PKG_VERSION"),
-            ))
-            .with_instructions(INSTRUCTIONS)
+    async fn on_custom_request(
+        &self,
+        request: rmcp::model::CustomRequest,
+        _context: McpRequestContext<RoleServer>,
+    ) -> Result<rmcp::model::CustomResult, ErrorData> {
+        let owner = match self.ingress {
+            RequestIngress::TunnelStdio => "tunnel".to_owned(),
+            RequestIngress::LocalUnix | RequestIngress::Cli => "local".to_owned(),
+            RequestIngress::Http => {
+                let config = self.state.config.read().await;
+                let token = crate::config::resolve_secret_reference(&config.http_mcp.bearer_token)
+                    .map_err(|_| ErrorData::internal_error("event_authority_unavailable", None))?;
+                format!("http:{:x}", Sha256::digest(token.as_bytes()))
+            }
+            RequestIngress::Hub => {
+                return Err(ErrorData::new(
+                    rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                    "unsupported ingress",
+                    None,
+                ))
+            }
+        };
+        crate::mcp_events::handle(
+            &self.state.event_store,
+            &request.method,
+            request.params.unwrap_or_else(|| serde_json::json!({})),
+            &owner,
+        )
+        .await
+        .map(rmcp::model::CustomResult::new)
+    }
+
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_events()
+                .build(),
+        )
+        .with_server_info(rmcp::model::Implementation::new(
+            "agentic-gpt-local-agent",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(INSTRUCTIONS)
     }
 }
 
@@ -1835,9 +1872,9 @@ fn ordered_file_read_result(
         return (value, None);
     }
 
-    let mut content = vec![Content::text(value.to_string())];
+    let mut content = vec![ContentBlock::text(value.to_string())];
     for image in images {
-        content.push(Content::image(
+        content.push(ContentBlock::image(
             base64::engine::general_purpose::STANDARD.encode(image.bytes),
             image.mime_type,
         ));
@@ -1944,7 +1981,7 @@ fn batch_text_result_serialized_size(value: &Value, results: &[Value]) -> usize 
     let mut result = CallToolResult::structured(value.clone());
     result.content = results
         .iter()
-        .map(|item| Content::text(item.to_string()))
+        .map(|item| ContentBlock::text(item.to_string()))
         .collect();
     serde_json::to_vec(&result)
         .map(|serialized| serialized.len())
@@ -1970,7 +2007,8 @@ fn batch_image_serialized_costs(
                     *overhead
                 } else {
                     let serialized =
-                        serde_json::to_vec(&Content::image(String::new(), image.mime_type)).ok()?;
+                        serde_json::to_vec(&ContentBlock::image(String::new(), image.mime_type))
+                            .ok()?;
                     let overhead = serialized.len().checked_sub(2)?.checked_add(1)?;
                     block_overhead.insert(image.mime_type, overhead);
                     overhead
@@ -1993,8 +2031,8 @@ fn fail_batch_image_result(value: &mut Value, index: usize, serialized_bytes: &m
     });
     let previous_result_bytes = serialized_json_size(&previous);
     let replacement_result_bytes = serialized_json_size(&replacement);
-    let previous_text_bytes = serialized_json_size(&Content::text(previous.to_string()));
-    let replacement_text_bytes = serialized_json_size(&Content::text(replacement.to_string()));
+    let previous_text_bytes = serialized_json_size(&ContentBlock::text(previous.to_string()));
+    let replacement_text_bytes = serialized_json_size(&ContentBlock::text(replacement.to_string()));
     let mut adjusted_size = (*serialized_bytes)
         .checked_sub(previous_result_bytes)
         .and_then(|size| size.checked_sub(previous_text_bytes))
@@ -2037,11 +2075,11 @@ fn build_ordered_batch_image_result(
     let results = value["results"].as_array().expect("batch result array");
     let mut content = Vec::new();
     for (index, item) in results.iter().enumerate() {
-        content.push(Content::text(item.to_string()));
+        content.push(ContentBlock::text(item.to_string()));
         if include_images[index] {
             if let Ok(output) = &outputs[index] {
                 for image in &output.images {
-                    content.push(Content::image(
+                    content.push(ContentBlock::image(
                         base64::engine::general_purpose::STANDARD.encode(&image.bytes),
                         image.mime_type,
                     ));

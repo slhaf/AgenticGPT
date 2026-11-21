@@ -9,6 +9,7 @@ name = "agentic-gpt"
 path = "src/main.rs"
 
 [dependencies]
+hmac = "0.12"
 agentic-apply-patch = { path = "../agentic-apply-patch" }
 agentic-gpt-protocol = { workspace = true, features = ["schema"] }
 anyhow.workspace = true
@@ -36,7 +37,7 @@ obscura-js = { path = "../../vendor/obscura/crates/obscura-js", features = ["ren
 notify-rust = "4.11"
 zbus = "5.15"
 parking_lot = "0.12"
-rmcp = { version = "1.7.0", default-features = false, features = ["client", "server", "macros", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-streamable-http-server", "transport-child-process"] }
+rmcp = { version = "=3.10.0", default-features = false, features = ["client", "server", "macros", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-streamable-http-server", "transport-child-process"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 pgp = { version = "0.20.0", default-features = false }
 regex = "=1.13.1"

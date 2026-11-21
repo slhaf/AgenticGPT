@@ -32,7 +32,9 @@ pub(crate) fn attach_event_panel_to_tool_result(
             .is_some_and(|text| text.text.as_str() == reminder.as_str())
     });
     if !already_present {
-        result.content.push(rmcp::model::Content::text(reminder));
+        result
+            .content
+            .push(rmcp::model::ContentBlock::text(reminder));
     }
     Ok(())
 }

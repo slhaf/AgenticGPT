@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::private_state::PrivateStatePaths;
 
-const EVENT_STORE_SCHEMA_VERSION: i64 = 4;
+const EVENT_STORE_SCHEMA_VERSION: i64 = 5;
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 1_000;
 const EVENT_HISTORY_RETENTION: Duration = Duration::days(7);
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS events (
     severity TEXT NOT NULL CHECK (severity IN ('low','medium','high')),
     created_at TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('pending','handled','expired')),
-    source_kind TEXT NOT NULL CHECK (source_kind IN ('process','skill_install','external')),
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('process','skill_install','email','secret','external')),
     source_ref TEXT NOT NULL,
     shown_count INTEGER NOT NULL DEFAULT 0 CHECK (shown_count >= 0),
     expires_at TEXT,
@@ -130,7 +130,7 @@ impl InternalEventPolicy {
 }
 
 pub(crate) struct EventStore {
-    connection: Mutex<Connection>,
+    pub(crate) connection: Mutex<Connection>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -181,6 +181,7 @@ impl EventStore {
     pub(crate) fn inject_external_once(
         &self,
         external_id: &str,
+        source_kind: EventSourceKind,
         request: &EventInjectRequest,
         low_ttl_seconds: u64,
     ) -> Result<()> {
@@ -210,7 +211,7 @@ impl EventStore {
                 &request.message,
                 severity,
                 now,
-                &EventSource { kind: EventSourceKind::External, reference: request.reference.clone() },
+                &EventSource { kind: source_kind, reference: request.reference.clone() },
                 expires_at.as_ref(),
             )?;
             transaction.execute(
@@ -224,7 +225,7 @@ impl EventStore {
     pub(crate) fn open(paths: &PrivateStatePaths) -> Result<Arc<Self>> {
         let path = paths.root.join("events.sqlite3");
         ensure_private_database_file(&paths.root, &path)?;
-        let connection =
+        let mut connection =
             Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                 .with_context(|| format!("event_store_open_failed: {}", path.display()))?;
         connection
@@ -233,7 +234,31 @@ impl EventStore {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .context("event_store_schema_version_read_failed")?;
-        if version != EVENT_STORE_SCHEMA_VERSION {
+        if version == 4 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Rebuild only events to extend its CHECK. Copy every column unchanged,
+            // retaining historical source classifications and all existing indexes.
+            let indexes = {
+                let mut statement = transaction.prepare(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='events' AND sql IS NOT NULL",
+                )?;
+                let indexes = statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                indexes
+            };
+            transaction.execute_batch("ALTER TABLE events RENAME TO events_v4")?;
+            transaction.execute_batch(SCHEMA)?;
+            transaction.execute_batch(
+                "INSERT INTO events SELECT * FROM events_v4; DROP TABLE events_v4;",
+            )?;
+            for sql in indexes {
+                transaction.execute_batch(&sql)?;
+            }
+            transaction.pragma_update(None, "user_version", EVENT_STORE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+        } else if version != EVENT_STORE_SCHEMA_VERSION {
             return Err(anyhow!(
                 "event_store_schema_migration_required: found {version}; required {EVENT_STORE_SCHEMA_VERSION}; run the state migration script before starting the Agent"
             ));
@@ -242,6 +267,7 @@ impl EventStore {
             .pragma_update(None, "synchronous", "FULL")
             .context("event_store_synchronous_failed")?;
 
+        crate::mcp_events::initialize(&connection)?;
         Ok(Arc::new(Self {
             connection: Mutex::new(connection),
         }))
@@ -1098,6 +1124,14 @@ fn insert_event(
             ],
         )
         .context("event_store_insert_failed")?;
+    crate::mcp_events::enqueue(
+        transaction,
+        &event_id,
+        message,
+        severity,
+        created_at,
+        source,
+    )?;
     Ok(event_id)
 }
 
@@ -1168,7 +1202,10 @@ fn validate_origin(origin: &EventOrigin) -> Result<()> {
 
 fn validate_internal_source(source: &EventSource) -> Result<()> {
     validate_reference(&source.reference, "event_ref")?;
-    if source.kind == EventSourceKind::External {
+    if !matches!(
+        source.kind,
+        EventSourceKind::Process | EventSourceKind::SkillInstall
+    ) {
         return Err(anyhow!("event_internal_source_kind_invalid"));
     }
     Ok(())
@@ -1281,6 +1318,8 @@ fn parse_source_kind(value: &str) -> Result<EventSourceKind> {
     match value {
         "process" => Ok(EventSourceKind::Process),
         "skill_install" => Ok(EventSourceKind::SkillInstall),
+        "email" => Ok(EventSourceKind::Email),
+        "secret" => Ok(EventSourceKind::Secret),
         "external" => Ok(EventSourceKind::External),
         _ => Err(anyhow!("event_store_invalid_source_kind")),
     }
@@ -1372,6 +1411,114 @@ mod tests {
         }
     }
 
+    #[test]
+    fn version_four_upgrade_preserves_history_indexes_and_accepts_business_sources() {
+        // Tier ⑤: upgrade a real old database, then produce and consume new kinds.
+        let root = tempfile::tempdir().unwrap();
+        let paths = PrivateStatePaths::for_test(root.path().to_path_buf());
+        let connection = Connection::open(root.path().join("events.sqlite3")).unwrap();
+        connection
+            .execute_batch(&SCHEMA.replace(
+                "'process','skill_install','email','secret','external'",
+                "'process','skill_install','external'",
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 4).unwrap();
+        let now = format_time(Utc::now());
+        connection.execute(
+            "INSERT INTO events VALUES ('legacy','old mail','high',?1,'handled','external','old-mail',2,NULL,?1)",
+            [&now],
+        ).unwrap();
+        connection
+            .execute_batch(
+                "CREATE INDEX extra_event_ref ON events(source_ref);
+             CREATE TABLE external_deliveries(delivery_id TEXT PRIMARY KEY NOT NULL);
+             INSERT INTO external_deliveries VALUES ('email:old-mail');",
+            )
+            .unwrap();
+        let indexes: Vec<String> = connection.prepare(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events' ORDER BY name",
+        ).unwrap().query_map([], |row| row.get(0)).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap();
+        drop(connection);
+        let store = EventStore::open(&paths).unwrap();
+        let legacy = store.get("legacy").unwrap();
+        assert_eq!(legacy.message, "old mail");
+        assert_eq!(legacy.status, EventStatus::Handled);
+        assert_eq!(legacy.source.kind, EventSourceKind::External);
+        assert_eq!(legacy.source.reference, "old-mail");
+        assert_eq!(legacy.shown_count, 2);
+        {
+            let connection = store.connection.lock().unwrap();
+            assert_eq!(
+                connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .unwrap(),
+                5
+            );
+            assert_eq!(
+                connection
+                    .query_row::<String, _, _>(
+                        "SELECT terminal_at FROM events WHERE event_id='legacy'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                now
+            );
+            let preserved_indexes: Vec<String> = connection.prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events' ORDER BY name",
+            ).unwrap().query_map([], |row| row.get(0)).unwrap()
+                .collect::<rusqlite::Result<_>>().unwrap();
+            assert_eq!(preserved_indexes, indexes);
+            assert_eq!(
+                connection
+                    .query_row::<String, _, _>(
+                        "SELECT delivery_id FROM external_deliveries",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                "email:old-mail"
+            );
+            assert!(connection
+                .execute(
+                    "UPDATE events SET source_kind='unknown' WHERE event_id='legacy'",
+                    [],
+                )
+                .is_err());
+        }
+        for (kind, id) in [
+            (EventSourceKind::Email, "new-mail"),
+            (EventSourceKind::Secret, "new-sync"),
+        ] {
+            let event = request(id, id, Some(EventSeverity::High));
+            store.inject_external_once(id, kind, &event, 0).unwrap();
+            store.inject_external_once(id, kind, &event, 0).unwrap();
+            assert!(store
+                .register_internal(&source(kind, id), &policy(&[]))
+                .is_err());
+        }
+        let items = store.list(&EventListRequest::default()).unwrap().items;
+        assert_eq!(items.len(), 2);
+        for item in items {
+            let record = store.get(&item.event_id).unwrap();
+            assert_eq!(
+                record.source.kind,
+                if record.source.reference == "new-mail" {
+                    EventSourceKind::Email
+                } else {
+                    EventSourceKind::Secret
+                }
+            );
+        }
+        drop(store);
+        let reopened = EventStore::open(&paths).unwrap();
+        assert_eq!(
+            reopened.get("legacy").unwrap().source.kind,
+            EventSourceKind::External
+        );
+    }
     #[test]
     fn list_summaries_count_unicode_scalars_and_preserve_full_message_on_get() {
         let (store, _, root) = store("unicode-summary");

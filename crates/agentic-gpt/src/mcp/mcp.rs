@@ -17,7 +17,7 @@ use agentic_gpt_protocol::{
 use anyhow::{anyhow, Context, Result};
 use rmcp::{
     model::{
-        CallToolRequest, CallToolRequestParams, CancelledNotificationParam, ClientInfo,
+        CallToolRequest, CallToolRequestParams, CancelledNotificationParam, ClientConfig,
         ClientRequest, JsonObject, ServerResult,
     },
     service::{PeerRequestOptions, RunningService, ServiceError},
@@ -39,7 +39,7 @@ use crate::{
     utils::bounded_mcp_argument_keys,
 };
 
-type McpClient = RunningService<rmcp::RoleClient, ClientInfo>;
+type McpClient = RunningService<rmcp::RoleClient, ClientConfig>;
 type McpClientFuture = Pin<Box<dyn Future<Output = Result<McpClient>> + Send>>;
 type McpClientFactory = Arc<dyn Fn(McpServerConfig) -> McpClientFuture + Send + Sync + 'static>;
 
@@ -426,10 +426,10 @@ async fn run_managed_call(
     {
         let _ = timeout(
             Duration::from_secs(2),
-            peer.notify_cancelled(CancelledNotificationParam {
-                request_id,
-                reason: Some("Process no longer active".to_string()),
-            }),
+            peer.notify_cancelled(CancelledNotificationParam::new(
+                Some(request_id),
+                Some("Process no longer active".to_string()),
+            )),
         )
         .await;
         close_client(client).await;
@@ -447,10 +447,7 @@ async fn run_managed_call(
         _ = sleep_until(deadline) => {
             let notification = timeout(
                 Duration::from_secs(2),
-                peer.notify_cancelled(CancelledNotificationParam {
-                    request_id,
-                    reason: Some("Agentic MCP execution deadline expired".to_string()),
-                }),
+                peer.notify_cancelled(CancelledNotificationParam::new(Some(request_id), Some("Agentic MCP execution deadline expired".to_string()))),
             ).await;
             let (outcome, evidence) = if matches!(notification, Ok(Ok(()))) {
                 ("notification_sent", "mcp_timeout_cancel_notification_sent")
@@ -682,7 +679,7 @@ async fn client(server: &McpServerConfig) -> Result<McpClient> {
             let transport = StreamableHttpClientTransport::from_config(
                 streamable_http_transport_config(server)?,
             );
-            Ok(ClientInfo::default().serve(transport).await?)
+            Ok(ClientConfig::default().serve(transport).await?)
         }
         "stdio" => {
             let command = server.url.clone().context("mcp_server_command_missing")?;
@@ -694,7 +691,7 @@ async fn client(server: &McpServerConfig) -> Result<McpClient> {
                         cmd.env("PATH", format!("{home}/.local/bin:{path}"));
                     }
                 }))?;
-            Ok(ClientInfo::default().serve(transport).await?)
+            Ok(ClientConfig::default().serve(transport).await?)
         }
         other => Err(anyhow!("unsupported_mcp_transport: {other}")),
     }

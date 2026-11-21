@@ -355,7 +355,12 @@ async fn deliver_events(state: &AppState) -> Result<()> {
         // the stable mail ID, so a crash before ACK cannot duplicate the event.
         if state
             .event_store
-            .inject_external_once(&format!("email:{id}"), &request, ttl)
+            .inject_external_once(
+                &format!("email:{id}"),
+                agentic_gpt_protocol::EventSourceKind::Email,
+                &request,
+                ttl,
+            )
             .is_err()
         {
             break;

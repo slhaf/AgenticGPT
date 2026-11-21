@@ -1025,7 +1025,12 @@ fn canonical_sources(command_type: &str, sources: &[EventSource]) -> Result<Vec<
 
 fn canonical_recovery_sources(sources: &[EventSource]) -> Result<Vec<EventSource>> {
     for (index, source) in sources.iter().enumerate() {
-        if source.reference.is_empty() || source.kind == EventSourceKind::External {
+        if source.reference.is_empty()
+            || !matches!(
+                source.kind,
+                EventSourceKind::Process | EventSourceKind::SkillInstall
+            )
+        {
             bail!("event_feedback_invalid_source");
         }
         if sources[..index].iter().any(|previous| previous == source) {
@@ -1046,12 +1051,19 @@ fn source_kind_order(kind: &EventSourceKind) -> u8 {
         EventSourceKind::Process => 0,
         EventSourceKind::SkillInstall => 1,
         EventSourceKind::External => 2,
+        EventSourceKind::Email => 3,
+        EventSourceKind::Secret => 4,
     }
 }
 
 fn validate_source_identities(command_type: &str, sources: &[EventSource]) -> Result<()> {
     for (index, source) in sources.iter().enumerate() {
-        if source.reference.is_empty() || source.kind == EventSourceKind::External {
+        if source.reference.is_empty()
+            || !matches!(
+                source.kind,
+                EventSourceKind::Process | EventSourceKind::SkillInstall
+            )
+        {
             bail!("event_feedback_invalid_source");
         }
         let kind_matches = match command_type {

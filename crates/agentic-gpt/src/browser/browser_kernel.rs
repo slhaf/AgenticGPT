@@ -2,8 +2,8 @@ use crate::browser_runtime::NodeReplLaunchSpec;
 use anyhow::{anyhow, Result};
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, Implementation,
-        JsonObject, Meta, ProtocolVersion, RequestParamsMeta,
+        CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
+        JsonObject, MetaObject, ProtocolVersion, RequestParamsMeta,
     },
     service::RunningService,
     transport::TokioChildProcess,
@@ -14,8 +14,8 @@ use std::{path::Path, time::Duration};
 
 const BROWSER_UNAVAILABLE_SENTINEL: &str = "agentic_browser_runtime_browser_unavailable";
 
-fn node_repl_client_info() -> ClientInfo {
-    ClientInfo::new(
+fn node_repl_client_info() -> ClientConfig {
+    ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("agentic-browser-runtime", env!("CARGO_PKG_VERSION")),
     )
@@ -40,7 +40,7 @@ fn validate_ids(session_id: &str, turn_id: &str) -> Result<()> {
 }
 
 pub(crate) struct NodeReplKernel {
-    client: RunningService<RoleClient, ClientInfo>,
+    client: RunningService<RoleClient, ClientConfig>,
     session_id: String,
     turn_id: String,
     unavailable: bool,
@@ -48,7 +48,7 @@ pub(crate) struct NodeReplKernel {
 
 impl NodeReplKernel {
     fn from_initialized_client(
-        client: RunningService<RoleClient, ClientInfo>,
+        client: RunningService<RoleClient, ClientConfig>,
         session_id: String,
         turn_id: String,
     ) -> Result<NodeReplKernel> {
@@ -109,7 +109,7 @@ impl NodeReplKernel {
             ("code".to_string(), Value::String(code.to_string())),
             ("timeout_ms".to_string(), json!(timeout_ms)),
         ]);
-        let metadata = Meta(Map::from_iter([(
+        let metadata = MetaObject(Map::from_iter([(
             "x-codex-turn-metadata".to_string(),
             json!({
                 "session_id": self.session_id,
@@ -117,7 +117,7 @@ impl NodeReplKernel {
             }),
         )]));
         let mut request = CallToolRequestParams::new("js").with_arguments(arguments);
-        request.set_meta(metadata);
+        request.set_meta(metadata.into());
 
         let result = tokio::time::timeout(
             Duration::from_millis(timeout_ms.saturating_add(1_000)),
@@ -205,8 +205,8 @@ mod tests {
     use parking_lot::Mutex;
     use rmcp::{
         model::{
-            CallToolRequestParams, Content, InitializeRequestParams, ProtocolVersion,
-            ServerCapabilities, ServerInfo,
+            CallToolRequestParams, ContentBlock, InitializeRequestParams, ProtocolVersion,
+            ServerCapabilities, ServerConfig,
         },
         service::{RequestContext, RunningService},
         RoleServer, ServerHandler, ServiceExt,
@@ -230,7 +230,7 @@ mod tests {
     struct RecordedCall {
         name: String,
         arguments: JsonObject,
-        meta: Option<Meta>,
+        meta: Option<MetaObject>,
     }
 
     #[derive(Clone, Debug)]
@@ -271,20 +271,21 @@ mod tests {
             &self,
             request: CallToolRequestParams,
             context: RequestContext<RoleServer>,
-        ) -> impl Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_ {
+        ) -> impl Future<Output = Result<rmcp::model::CallToolResponse, rmcp::ErrorData>> + Send + '_
+        {
             self.calls.lock().push(RecordedCall {
                 name: request.name.to_string(),
                 arguments: request.arguments.unwrap_or_default(),
-                meta: Some(context.meta),
+                meta: Some(context.meta.0),
             });
             match self.behavior {
-                Behavior::Preserve => std::future::ready(Ok(expected_result())),
-                Behavior::Success => std::future::ready(Ok(CallToolResult::default())),
+                Behavior::Preserve => std::future::ready(Ok(expected_result().into())),
+                Behavior::Success => std::future::ready(Ok(CallToolResult::default().into())),
             }
         }
 
-        fn get_info(&self) -> ServerInfo {
-            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        fn get_info(&self) -> ServerConfig {
+            ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
                 .with_server_info(rmcp::model::Implementation::new("fake-node-repl", "test"))
         }
     }
@@ -292,7 +293,7 @@ mod tests {
     async fn connected(
         server: FakeNodeReplServer,
     ) -> (
-        RunningService<RoleClient, ClientInfo>,
+        RunningService<RoleClient, ClientConfig>,
         tokio::task::JoinHandle<()>,
     ) {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
@@ -307,19 +308,19 @@ mod tests {
     fn expected_result() -> CallToolResult {
         let mut result = CallToolResult::default();
         result.content = vec![
-            Content::text("hello"),
-            Content::image("aW1hZ2U=", "image/png"),
+            ContentBlock::text("hello"),
+            ContentBlock::image("aW1hZ2U=", "image/png"),
         ];
         result.structured_content = Some(json!({"value": 42}));
         result.is_error = Some(true);
-        result.meta = Some(Meta(Map::from_iter([(
+        result.meta = Some(MetaObject(Map::from_iter([(
             "result-key".to_string(),
             json!("result-value"),
         )])));
         result
     }
 
-    fn metadata_values(meta: &Meta) -> &Value {
+    fn metadata_values(meta: &MetaObject) -> &Value {
         &meta.0["x-codex-turn-metadata"]
     }
 

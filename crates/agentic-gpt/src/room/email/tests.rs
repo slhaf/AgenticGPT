@@ -499,6 +499,7 @@ async fn email_event_capacity_and_ack_replay_do_not_block_mail_or_duplicate_remi
         .event_store
         .inject_external_once(
             &format!("email:{first_id}"),
+            agentic_gpt_protocol::EventSourceKind::Email,
             &EventInjectRequest {
                 message,
                 severity: Some(EventSeverity::Medium),
@@ -516,6 +517,14 @@ async fn email_event_capacity_and_ack_replay_do_not_block_mail_or_duplicate_remi
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 2);
+    let email_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE source_kind='email'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(email_count, 2);
     // Keep the producer-side ACK missing again after history cleanup. The
     // permanent delivery receipt must still prevent an old reminder replay.
     conn.execute("DELETE FROM events WHERE source_ref=?", [&first_id])

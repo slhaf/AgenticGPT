@@ -288,6 +288,22 @@ async fn secret_queries_share_sync_preserve_budget_and_fail_closed_confirmation(
         assert_eq!(fixture.owner.usage.rank(ITEM_ID), (0.0, 0));
         fixture.complete_sync().await;
         assert_eq!(fixture.state.secret.info()["syncStatus"], "succeeded");
+        let events = fixture
+            .state
+            .event_store
+            .list(&agentic_gpt_protocol::EventListRequest::default())
+            .unwrap();
+        assert_eq!(events.items.len(), 1);
+        let event = fixture
+            .state
+            .event_store
+            .get(&events.items[0].event_id)
+            .unwrap();
+        assert_eq!(
+            event.source.kind,
+            agentic_gpt_protocol::EventSourceKind::Secret
+        );
+        assert_eq!(event.message, "密钥同步成功");
     })
     .catch_unwind()
     .await;

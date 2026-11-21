@@ -6,7 +6,7 @@ members = [
     "crates/agentic-apply-patch",
     "crates/agentic-browser-host",
 ]
-exclude = ["vendor/obscura"]
+exclude = ["vendor/obscura", "vendor/rmcp"]
 resolver = "2"
 
 [workspace.package]
@@ -29,3 +29,6 @@ serde_yaml = "0.9"
 tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 unicode-width = "0.2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
+
+[patch.crates-io]
+rmcp = { path = "vendor/rmcp" }

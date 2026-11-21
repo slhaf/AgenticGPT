@@ -1,4 +1,4 @@
-use rmcp::model::{CallToolResult, Content, Meta};
+use rmcp::model::{CallToolResult, ContentBlock, MetaObject};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -6,20 +6,20 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgenticResult {
     #[serde(default)]
-    content: Vec<Content>,
+    content: Vec<ContentBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]
     structured_content: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     is_error: Option<bool>,
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    meta: Option<Meta>,
+    meta: Option<MetaObject>,
 }
 
 impl AgenticResult {
     pub(crate) fn from_native_value(value: Value) -> Self {
         let is_error = value.get("error").is_some();
         Self {
-            content: vec![Content::text(content_text(&value))],
+            content: vec![ContentBlock::text(content_text(&value))],
             structured_content: Some(value),
             is_error: Some(is_error),
             meta: None,
@@ -30,13 +30,13 @@ impl AgenticResult {
         let images = value
             .as_object_mut()
             .and_then(|value| value.remove("images"));
-        let mut content = vec![Content::text(content_text(&value))];
+        let mut content = vec![ContentBlock::text(content_text(&value))];
         if let Some(images) = images.and_then(|images| images.as_array().cloned()) {
             for image in images {
                 if let (Some(data), Some(mime_type)) =
                     (image["data"].as_str(), image["mimeType"].as_str())
                 {
-                    content.push(Content::image(data.to_owned(), mime_type.to_owned()));
+                    content.push(ContentBlock::image(data.to_owned(), mime_type.to_owned()));
                 }
             }
         }

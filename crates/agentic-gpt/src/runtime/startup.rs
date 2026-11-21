@@ -64,11 +64,13 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
     tokio::spawn(watch_live_config(state.clone(), false, None));
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
+    let events = EventsBackground::start(state.clone());
     let browser = BrowserBackground::start(state.clone());
     let result = tokio::select! {
         result = hub::connect_loop(state) => result,
         result = wait_for_local_shutdown_signal() => result,
     };
+    events.stop().await;
     browser.stop().await;
     email.stop().await;
     secret.shutdown().await;
@@ -140,6 +142,7 @@ pub(crate) async fn run_stdio_worker(
     ));
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
+    let events = EventsBackground::start(state.clone());
     let browser = BrowserBackground::start(state.clone());
     let stdio = stdio_server::serve_stdio(state);
     tokio::pin!(stdio);
@@ -167,10 +170,31 @@ pub(crate) async fn run_stdio_worker(
             }
         }
     };
+    events.stop().await;
     browser.stop().await;
     email.stop().await;
     secret.shutdown().await;
     result
+}
+
+struct EventsBackground {
+    shutdown: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl EventsBackground {
+    fn start(state: AppState) -> Self {
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(crate::mcp_events::run(state, shutdown.clone()));
+        Self { shutdown, task }
+    }
+
+    async fn stop(self) {
+        self.shutdown.cancel();
+        if let Err(error) = self.task.await {
+            log_warn(format!("MCP event delivery task failed: {error}"));
+        }
+    }
 }
 
 struct EmailBackground {
@@ -336,6 +360,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
     let hub_task = Some(tokio::spawn(hub::connect_loop(state.clone())));
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
+    let events = EventsBackground::start(state.clone());
     let browser = BrowserBackground::start(state.clone());
     let mut local_task = tokio::spawn(listener.serve(state));
     let result = tokio::select! {
@@ -353,6 +378,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         task.abort();
         let _ = task.await;
     }
+    events.stop().await;
     browser.stop().await;
     email.stop().await;
     secret.shutdown().await;

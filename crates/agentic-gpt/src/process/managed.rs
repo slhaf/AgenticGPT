@@ -4362,10 +4362,10 @@ async fn cancel_mcp_process(state: &AppState, process_id: &str) -> Result<Proces
     };
     let notification = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        peer.notify_cancelled(rmcp::model::CancelledNotificationParam {
-            request_id,
-            reason: Some("Cancelled by Agentic process.cancel".to_string()),
-        }),
+        peer.notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+            Some(request_id),
+            Some("Cancelled by Agentic process.cancel".to_string()),
+        )),
     )
     .await;
     let mut processes = state.processes.lock().await;

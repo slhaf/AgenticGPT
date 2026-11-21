@@ -44,6 +44,8 @@ impl EventStatus {
 pub enum EventSourceKind {
     Process,
     SkillInstall,
+    Email,
+    Secret,
     External,
 }
 
@@ -52,6 +54,8 @@ impl EventSourceKind {
         match self {
             Self::Process => "process",
             Self::SkillInstall => "skill_install",
+            Self::Email => "email",
+            Self::Secret => "secret",
             Self::External => "external",
         }
     }

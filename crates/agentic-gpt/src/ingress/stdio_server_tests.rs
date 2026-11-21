@@ -13,7 +13,7 @@ use std::{
 use agentic_gpt_protocol::{AgentMessage, SkillActivationRequest};
 use base64::Engine;
 use rmcp::{
-    model::{CallToolRequestParams, Content},
+    model::{CallToolRequestParams, ContentBlock},
     ServiceExt,
 };
 use serde::Deserialize;
@@ -497,13 +497,13 @@ async fn browser_repl_event_decoration_preserves_inner_result_channels() -> anyh
     }))?;
     let mut inner = CallToolResult::default();
     inner.content = vec![
-        Content::text("hello"),
-        Content::text(matching_panel.clone()),
-        Content::image("aW1hZ2U=", "image/png"),
+        ContentBlock::text("hello"),
+        ContentBlock::text(matching_panel.clone()),
+        ContentBlock::image("aW1hZ2U=", "image/png"),
     ];
     inner.structured_content = Some(json!({"value":42}));
     inner.is_error = Some(true);
-    inner.meta = Some(Meta(Map::from_iter([(
+    inner.meta = Some(MetaObject(Map::from_iter([(
         "result-key".to_string(),
         json!("result-value"),
     )])));
@@ -3787,4 +3787,109 @@ fn state_with_browser_runtime(docs_root: PathBuf, result: CallToolResult) -> App
         Arc::new(crate::state::BrowserRuntimeSlot::new(Some(browser_runtime)));
     state.browser_runtime = browser_runtime_cell;
     state
+}
+
+#[tokio::test]
+async fn stdio_events_discovery_and_custom_dispatch_reach_subscription_validation(
+) -> anyhow::Result<()> {
+    use anyhow::{anyhow, ensure, Context};
+    use rmcp::model::{ClientRequest, CustomRequest, ErrorCode, ServerResult};
+
+    // Tier ④: real initialization and wire dispatch must expose the extension
+    // and route discovered subscription requests to its validator.
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let _cleanup = TestStateCleanup::for_server(&server).await;
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = split(client_io);
+    let (server_read, server_write) = split(server_io);
+    let server_task = tokio::spawn(async move {
+        let transport = AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+        let running = server
+            .serve(ResumableStdioTransport::new(transport))
+            .await?;
+        let _ = running.waiting().await?;
+        anyhow::Result::<()>::Ok(())
+    });
+    let client = match ().serve((client_read, client_write)).await {
+        Ok(client) => client,
+        Err(error) => {
+            server_task.abort();
+            let _ = server_task.await;
+            return Err(error.into());
+        }
+    };
+    let result: anyhow::Result<()> = async {
+        let initialized =
+            serde_json::to_value(client.peer_info().context("missing initialize result")?)?;
+        ensure!(
+            initialized["capabilities"]["events"].is_object(),
+            "events capability was not advertised"
+        );
+        let discovery = client
+            .send_request(ClientRequest::CustomRequest(CustomRequest::new(
+                "events/list",
+                Some(json!({})),
+            )))
+            .await?;
+        let ServerResult::CustomResult(discovery) = discovery else {
+            return Err(anyhow!(
+                "events/list did not return the custom event discovery response"
+            ));
+        };
+        let event = discovery.0["events"]
+            .as_array()
+            .context("events/list omitted its event list")?
+            .iter()
+            .find(|event| event["name"] == "agentic.event.created")
+            .context("Agent inbox event was not discoverable")?;
+        let properties = &event["inputSchema"]["properties"];
+        ensure!(
+            properties["kinds"]["items"]["enum"]
+                .as_array()
+                .is_some_and(
+                    |values| values.contains(&json!("email")) && values.contains(&json!("secret"))
+                ),
+            "business source filters were not discoverable"
+        );
+        ensure!(
+            properties["severities"]["items"]["enum"]
+                .as_array()
+                .is_some_and(|values| values.contains(&json!("high"))),
+            "severity filtering was not discoverable"
+        );
+
+        for arguments in [
+            json!({"kinds":["not-a-kind"]}),
+            json!({"severities":["urgent"]}),
+        ] {
+            let result = client
+                .send_request(ClientRequest::CustomRequest(CustomRequest::new(
+                    "events/subscribe",
+                    Some(json!({
+                        "name": event["name"],
+                        "arguments": arguments,
+                        "delivery": {"mode":"webhook","url":"https://example.com/callback"}
+                    })),
+                )))
+                .await;
+            match result {
+                Err(rmcp::ServiceError::McpError(error)) => {
+                    ensure!(
+                        error.code == ErrorCode::INVALID_PARAMS,
+                        "subscription was not routed to parameter validation: {error}"
+                    );
+                    ensure!(
+                        error.message == "Event filters must contain supported values",
+                        "subscription did not reach business filter validation: {error}"
+                    );
+                }
+                other => return Err(anyhow!("invalid subscription produced {other:?}")),
+            }
+        }
+        Ok(())
+    }
+    .await;
+    let _ = client.cancel().await;
+    server_task.await??;
+    result
 }
