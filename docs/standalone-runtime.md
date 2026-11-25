@@ -42,11 +42,11 @@ AS/OIDC 别名 `/.well-known/oauth-authorization-server` 和
 `https://chatgpt.com/connector_platform_oauth_redirect` 回调。不提供 refresh token、
 `offline_access`、DCR、通用注册或任意重定向。
 
-OAuth code 和 access token 是不透明的 listener 本地内存记录，带有过期和撤销状态。轮换 direct bearer 内容会原地更新认证、
-保留已有 rmcp session，并撤销 OAuth 记录；替换 listener、rebind、禁用或重启都会丢弃所有 listener 本地状态。
+OAuth code 和 access token 是不透明的 listener 本地内存记录，带有过期和撤销状态。轮换 direct bearer 内容会原地更新认证，
+并撤销 OAuth 记录；替换 listener、rebind、禁用或重启都会丢弃所有 listener 本地状态。
 
 Standalone 授权页面及工具/profile 语义不等同于 Hub 的 `Hub API key`、profile 或路由合同。rmcp transport
-使用有状态的 Streamable HTTP/SSE，因此 rebind 或禁用后仍需重新执行 `initialize`。schema、allow-host、CLI 和
+使用无状态的 Streamable HTTP；`initialize` 不返回 `Mcp-Session-Id`，后续请求不依赖会话。schema、allow-host、CLI 和
 reload 详情见 [`configuration.md`](configuration.md)。
 
 `publicUrl` 仅用于公布外部 HTTPS origin；它不会改变本地 bind，也不负责路由流量，且该 origin 可以仍为 loopback/private。
@@ -432,7 +432,7 @@ Standalone、Local 和连接 Hub 的 Agent 共用配置更新与串行应用协�
 
 MCP server id 只能使用 `A-Z`、`a-z`、`0-9`、`.`、`_` 或 `-`，最长 64 字节；streamable-http 要求绝对 HTTP(S) URL，stdio 要求非空启动命令且不接受 HTTP auth。API 中完整 server id 占一个路径段。
 
-`httpMcp` 由 Standalone worker 的监听器/auth 所有者协调。更换 endpoint identity 会关闭旧 session 并丢弃其 OAuth 状态，客户端重新 initialize；token 原地更新保留 session 并撤销 OAuth 记录。绑定或凭据失败与持久保存分开报告，不导致其他入口重启。凭据引用无法解析时退役 HTTP 入口并拒绝新请求，已准入响应完成后关闭旧会话；引用恢复后由 owner 重建。
+`httpMcp` 由 Standalone worker 的监听器/auth 所有者协调。更换 endpoint identity 会丢弃原 listener 的 OAuth 状态；token 原地更新会撤销 OAuth 记录。绑定或凭据失败与持久保存分开报告，不导致其他入口重启。凭据引用无法解析时退役 HTTP 入口并拒绝新请求，已准入响应完成后关闭旧 listener；引用恢复后由 owner 重建。
 
 `apiKey` 仅接受 `env:NAME` 和 `file:PATH`。解析出的值会作为 `CONTROL_PLANE_API_KEY` 注入 tunnel-client 子进程环境；
 不会将其放入 argv、日志、配置摘要、报告、生成的 runtime 文件或备份。文件 reference 末尾可有一个 LF 或 CRLF，读取时会将其移除。

@@ -407,12 +407,12 @@ server-to-server 请求仍然有效，不添加 permissive CORS。未配置 `pub
 直接 bearer 失败仍使用普通 Bearer challenge；配置后，MCP challenge 指向
 path-specific protected-resource metadata URL。
 
-rmcp transport 使用有状态的 Streamable HTTP/SSE：
+rmcp transport 使用无状态的 Streamable HTTP（每个请求可以用 SSE 返回结果）：
 
-- 客户端必须先初始化 session。
-- listener rebind 或关闭会终止 session，客户端必须重新 initialize。
-- 直接 bearer 内容轮换会原地更新认证并保留既有 session，同时原子撤销 OAuth 记录。
-- 无效候选保留上一次有效 listener 及其 state。
+- `initialize` 不返回 `Mcp-Session-Id`；后续请求不依赖会话或空闲超时。
+- 不提供用于独立接收服务器通知或恢复响应的 SSE 流。
+- 直接 bearer 内容轮换会原地更新认证，同时原子撤销 OAuth 记录。
+- 无效候选保留上一次有效 listener。
 
 `allowHosts` 是 HTTP MCP transport 使用的 DNS-rebinding 防护：
 
@@ -970,7 +970,7 @@ Standalone、Local 和连接 Hub 的 Agent 共用串行配置应用协调。目�
 | `hub.enabled`、`hub.url`、`hub.transport`、`hub.agentSecret` | 启停或重配 Standalone/Local 辅助连接；Hub 连接关闭时依赖它的报告暂停，`ntfy` 确认不可用。Hub 模式的命令连接不受影响。 |
 | `tunnel.hubReporting.enabled` | 更新后续报告是否发送，不重建或断开辅助连接；连接关闭时保留设置并暂停发送。 |
 | `tunnel.hubReporting.detail` | 更新后续报告策略，不重建 Tunnel 或 Hub 连接。 |
-| `httpMcp.*` | Standalone listener/auth 所有者协调监听、认证与 session；endpoint identity 改变后客户端需重新 initialize。Local/Hub 模式不因此新增 TCP listener。 |
+| `httpMcp.*` | Standalone listener/auth 所有者协调监听与认证；不保留 MCP 会话。Local/Hub 模式不因此新增 TCP listener。 |
 | `browser.*`、Browser 工具集启停 | 协调发现、排空旧租约并替换 runtime；旧租约、JS 变量和会话可能失效，不重放网页动作。 |
 | `email.account` | 排空在途邮件请求与同步，释放旧账户 owner 后切换；保留 Store、同步记录与发送结果，不自动重发。 |
 | `room.secret` 后端／启停／凭据 | 排空请求、停止旧 CLI/sync、释放 session 和账户锁，再允许新 owner 激活；保留加密缓存及使用记录，不重放写入。 |

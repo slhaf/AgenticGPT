@@ -17,7 +17,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    session::never::NeverSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use tokio::{
     net::TcpListener,
@@ -323,16 +323,16 @@ async fn serve_listener(
     owner: Arc<HttpOwner>,
 ) -> Result<()> {
     let mut server_config = StreamableHttpServerConfig::default()
-        .with_legacy_session_mode(true)
+        .with_legacy_session_mode(false)
         .with_cancellation_token(session_stop.clone());
     server_config = match allow_hosts {
         None => server_config.disable_allowed_hosts(),
         Some(hosts) if hosts.len() == 1 && hosts[0] == "*" => server_config.disable_allowed_hosts(),
         Some(hosts) => server_config.with_allowed_hosts(hosts),
     };
-    let session_manager = Arc::new(LocalSessionManager::default());
+    let session_manager = Arc::new(NeverSessionManager::default());
     let service_owner = owner.clone();
-    let service: StreamableHttpService<AgentMcpServer, LocalSessionManager> =
+    let service: StreamableHttpService<AgentMcpServer, NeverSessionManager> =
         StreamableHttpService::new(
             move || {
                 Ok(AgentMcpServer::with_http_owner(

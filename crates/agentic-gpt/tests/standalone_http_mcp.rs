@@ -71,7 +71,6 @@ fn standalone_http_mcp_allow_hosts_supports_default_and_explicit_full_allow() {
         &endpoint,
         "evil.example",
         Some(&authorization),
-        None,
         initialize.clone(),
     )
     .unwrap();
@@ -84,7 +83,6 @@ fn standalone_http_mcp_allow_hosts_supports_default_and_explicit_full_allow() {
         &endpoint,
         "evil.example",
         Some(&authorization),
-        None,
         initialize.clone(),
         200,
     )
@@ -99,7 +97,6 @@ fn standalone_http_mcp_allow_hosts_supports_default_and_explicit_full_allow() {
         &endpoint,
         "another.evil.example",
         Some(&authorization),
-        None,
         initialize.clone(),
         200,
     )
@@ -115,7 +112,6 @@ fn standalone_http_mcp_allow_hosts_supports_default_and_explicit_full_allow() {
         &endpoint,
         "still.evil.example",
         Some(&authorization),
-        None,
         initialize,
         200,
     )
@@ -156,16 +152,15 @@ fn run_config_self_disable_scenario(root: &Path) -> Result<(), String> {
         .push(json!("config"));
     config["config"] = json!({"updatePolicy":"allow"});
     write_config(&config_path, &config)?;
-    let session = http_initialize(&endpoint, token, 10)?;
-    wait_for_http_tools_presence(&endpoint, token, &session, 11, "config.update", true)?;
+    http_initialize(&endpoint, token, 10)?;
+    wait_for_http_tools_presence(&endpoint, token, 11, "config.update", true)?;
 
     // One real POST, without transport retry: retiring the current endpoint
-    // must deliver this exact response before closing its MCP session.
+    // must deliver this exact response before retiring the listener.
     let authorization = format!("Bearer {token}");
     let response = http_post(
         &endpoint,
         Some(&authorization),
-        Some(&session),
         json!({
             "jsonrpc":"2.0", "id":12, "method":"tools/call", "params":{
                 "name":"config.update", "arguments":{"changes":[{"op":"set","path":["httpMcp","enabled"],"value":false}]}
@@ -207,7 +202,7 @@ fn run_config_self_disable_scenario(root: &Path) -> Result<(), String> {
         "stdio could not re-enable HTTP",
     )?;
     wait_for_tcp(&endpoint, true)?;
-    let replacement_session = http_initialize(&endpoint, token, 20)?;
+    http_initialize(&endpoint, token, 20)?;
     let occupied = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
     let occupied_port = occupied
         .local_addr()
@@ -226,14 +221,19 @@ fn run_config_self_disable_scenario(root: &Path) -> Result<(), String> {
     let (_, still_serving) = http_call(
         &endpoint,
         token,
-        &replacement_session,
         21,
         "config.get",
         json!({"paths":[["httpMcp","port"]]}),
     )?;
     let item = &still_serving["result"]["structuredContent"]["items"][0];
-    require(item["value"] == occupied_port && item["appliedValue"] == port && item["applyStatus"] == "failed",
-        &format!("failed rebind did not retain the old listener and report desired/applied values: {still_serving}"))?;
+    require(
+        item["value"] == occupied_port
+            && item["appliedValue"] == port
+            && item["applyStatus"] == "failed",
+        &format!(
+            "failed rebind did not retain the old listener and report desired/applied values: {still_serving}"
+        ),
+    )?;
     drop(worker);
     drop(occupied);
     wait_for_tcp(&endpoint, false)?;
@@ -277,8 +277,8 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     let stdio_tools = worker.stdio_tools_list(2)?;
     let stdio_tools = sorted_tools(&stdio_tools["result"]["tools"])?;
 
-    let session_id = http_initialize(&endpoint, initial_token, 10)?;
-    let (_, http_tools) = http_tools_list(&endpoint, initial_token, &session_id, 11)?;
+    http_initialize(&endpoint, initial_token, 10)?;
+    let (_, http_tools) = http_tools_list(&endpoint, initial_token, 11)?;
     let http_tools = sorted_tools(&http_tools["result"]["tools"])?;
     require(
         http_tools == stdio_tools,
@@ -306,7 +306,6 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     let (_, http_result) = http_call(
         &endpoint,
         initial_token,
-        &session_id,
         12,
         "process.exec",
         json!({
@@ -331,7 +330,6 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     let (_, denied) = http_call(
         &endpoint,
         initial_token,
-        &session_id,
         13,
         "process.exec",
         json!({
@@ -353,7 +351,6 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     let old_token_response = wait_for_http_status(
         &endpoint,
         Some(&old_auth),
-        Some(&session_id),
         json!({
             "jsonrpc": "2.0",
             "id": 20,
@@ -371,7 +368,6 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     let (_, rotated_tools) = wait_for_http_exchange(
         &endpoint,
         Some(&new_auth),
-        Some(&session_id),
         json!({
             "jsonrpc": "2.0",
             "id": 21,
@@ -396,14 +392,8 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     write_config(&config_path, &config)?;
     thread::sleep(RELOAD_WAIT);
 
-    let (_, changed_tools) = wait_for_http_tools_presence(
-        &endpoint,
-        rotated_token,
-        &session_id,
-        30,
-        "process.exec",
-        false,
-    )?;
+    let (_, changed_tools) =
+        wait_for_http_tools_presence(&endpoint, rotated_token, 30, "process.exec", false)?;
     require(
         !tool_names(&changed_tools["result"]["tools"])
             .iter()
@@ -413,7 +403,6 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     let (_, unavailable_call) = http_call(
         &endpoint,
         rotated_token,
-        &session_id,
         31,
         "process.exec",
         json!({
@@ -429,14 +418,8 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     config["toolsets"]["enabled"] = json!(["agent", "file", "mcp", "process", "skills", "tmux"]);
     write_config(&config_path, &config)?;
     thread::sleep(RELOAD_WAIT);
-    let (_, restored_tools) = wait_for_http_tools_presence(
-        &endpoint,
-        rotated_token,
-        &session_id,
-        32,
-        "process.exec",
-        true,
-    )?;
+    let (_, restored_tools) =
+        wait_for_http_tools_presence(&endpoint, rotated_token, 32, "process.exec", true)?;
     require(
         tool_names(&restored_tools["result"]["tools"])
             .iter()
@@ -450,7 +433,6 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
     let (_, retained) = wait_for_http_exchange(
         &endpoint,
         Some(&new_auth),
-        Some(&session_id),
         json!({
             "jsonrpc": "2.0",
             "id": 40,
@@ -492,13 +474,8 @@ fn run_file_scenario(root: &Path) -> Result<(), String> {
     let initial_endpoint = Endpoint::new("127.0.0.1", initial_port);
     let replacement_endpoint = Endpoint::new("127.0.0.1", replacement_port);
     wait_for_tcp(&initial_endpoint, true)?;
-    let session_id = http_initialize(&initial_endpoint, "http-file-initial-token", 100)?;
-    let (_, initial_tools) = http_tools_list(
-        &initial_endpoint,
-        "http-file-initial-token",
-        &session_id,
-        101,
-    )?;
+    http_initialize(&initial_endpoint, "http-file-initial-token", 100)?;
+    let (_, initial_tools) = http_tools_list(&initial_endpoint, "http-file-initial-token", 101)?;
     require(
         initial_tools["result"]["tools"]
             .as_array()
@@ -514,7 +491,6 @@ fn run_file_scenario(root: &Path) -> Result<(), String> {
     let old_token_response = wait_for_http_status(
         &initial_endpoint,
         Some(&old_auth),
-        Some(&session_id),
         json!({
             "jsonrpc": "2.0",
             "id": 102,
@@ -531,7 +507,6 @@ fn run_file_scenario(root: &Path) -> Result<(), String> {
     let (_, _) = wait_for_http_exchange(
         &initial_endpoint,
         Some("Bearer http-file-rotated-token"),
-        Some(&session_id),
         json!({
             "jsonrpc": "2.0",
             "id": 103,
@@ -547,24 +522,12 @@ fn run_file_scenario(root: &Path) -> Result<(), String> {
     thread::sleep(RELOAD_WAIT);
     wait_for_tcp(&replacement_endpoint, true)?;
     wait_for_tcp(&initial_endpoint, false)?;
-    let stale_session = wait_for_http_status(
-        &replacement_endpoint,
-        Some("Bearer http-file-rotated-token"),
-        Some(&session_id),
-        json!({
-            "jsonrpc": "2.0",
-            "id": 104,
-            "method": "tools/list",
-            "params": {}
-        }),
-        404,
-    )?;
+    let (_, rebound_tools) =
+        http_tools_list(&replacement_endpoint, "http-file-rotated-token", 104)?;
     require(
-        stale_session.status == 404,
-        "host/port reconfigure unexpectedly preserved the old HTTP session",
+        rebound_tools["result"]["tools"].is_array(),
+        "rebound endpoint rejected a request without a session",
     )?;
-    let replacement_session =
-        http_initialize(&replacement_endpoint, "http-file-rotated-token", 105)?;
 
     config["httpMcp"]["enabled"] = json!(false);
     write_config(&config_path, &config)?;
@@ -575,29 +538,7 @@ fn run_file_scenario(root: &Path) -> Result<(), String> {
     write_config(&config_path, &config)?;
     thread::sleep(RELOAD_WAIT);
     wait_for_tcp(&replacement_endpoint, true)?;
-    let stale_after_enable = wait_for_http_status(
-        &replacement_endpoint,
-        Some("Bearer http-file-rotated-token"),
-        Some(&replacement_session),
-        json!({
-            "jsonrpc": "2.0",
-            "id": 106,
-            "method": "tools/list",
-            "params": {}
-        }),
-        404,
-    )?;
-    require(
-        stale_after_enable.status == 404,
-        "disable/enable did not require a fresh HTTP session",
-    )?;
-    let fresh_session = http_initialize(&replacement_endpoint, "http-file-rotated-token", 107)?;
-    let (_, fresh_tools) = http_tools_list(
-        &replacement_endpoint,
-        "http-file-rotated-token",
-        &fresh_session,
-        108,
-    )?;
+    let (_, fresh_tools) = http_tools_list(&replacement_endpoint, "http-file-rotated-token", 108)?;
     require(
         fresh_tools["result"]["tools"]
             .as_array()
@@ -640,7 +581,6 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let unauthorized = http_post_with_host(
         &endpoint,
         &host,
-        None,
         None,
         json!({
             "jsonrpc": "2.0",
@@ -913,11 +853,11 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
         "params": {}
     }))?;
     let stdio_tools = sorted_tools(&worker.stdio_tools_list(3)?["result"]["tools"])?;
-    let direct_session = http_initialize(&endpoint, initial_token, 10)?;
-    let (_, direct_message) = http_tools_list(&endpoint, initial_token, &direct_session, 11)?;
+    http_initialize(&endpoint, initial_token, 10)?;
+    let (_, direct_message) = http_tools_list(&endpoint, initial_token, 11)?;
     let direct_tools = sorted_tools(&direct_message["result"]["tools"])?;
-    let oauth_session = http_initialize(&endpoint, &access_token, 12)?;
-    let (_, oauth_message) = http_tools_list(&endpoint, &access_token, &oauth_session, 13)?;
+    http_initialize(&endpoint, &access_token, 12)?;
+    let (_, oauth_message) = http_tools_list(&endpoint, &access_token, 13)?;
     let oauth_tools = sorted_tools(&oauth_message["result"]["tools"])?;
     require(
         oauth_tools == direct_tools && oauth_tools == stdio_tools,
@@ -1225,7 +1165,6 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
         &endpoint,
         &host,
         Some(&format!("Bearer {initial_token}")),
-        Some(&direct_session),
         json!({
             "jsonrpc": "2.0",
             "id": 20,
@@ -1244,16 +1183,15 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
         )),
         "rotated direct challenge",
     )?;
-    let (_, new_direct_tools) = http_tools_list(&endpoint, rotated_token, &direct_session, 21)?;
+    let (_, new_direct_tools) = http_tools_list(&endpoint, rotated_token, 21)?;
     require(
         sorted_tools(&new_direct_tools["result"]["tools"])? == direct_tools,
-        "new direct bearer did not preserve the existing MCP session",
+        "new direct bearer did not expose the same tools",
     )?;
     let old_oauth = http_post_with_host(
         &endpoint,
         &host,
         Some(&format!("Bearer {access_token}")),
-        Some(&oauth_session),
         json!({
             "jsonrpc": "2.0",
             "id": 22,
@@ -1316,7 +1254,6 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
         &endpoint,
         &host,
         Some("Bearer audience-mismatch-token"),
-        None,
         json!({
             "jsonrpc": "2.0",
             "id": 23,
@@ -2015,12 +1952,11 @@ fn http_request(
     read_http_response(stream)
 }
 
-fn http_initialize(endpoint: &Endpoint, token: &str, id: i64) -> Result<String, String> {
+fn http_initialize(endpoint: &Endpoint, token: &str, id: i64) -> Result<(), String> {
     let authorization = format!("Bearer {token}");
     let response = http_post(
         endpoint,
         Some(&authorization),
-        None,
         json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -2042,11 +1978,10 @@ fn http_initialize(endpoint: &Endpoint, token: &str, id: i64) -> Result<String, 
             .is_some_and(|value| value.contains("text/event-stream")),
         "HTTP initialize did not return an SSE response",
     )?;
-    let session_id = response
-        .header("mcp-session-id")
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "HTTP initialize omitted Mcp-Session-Id".to_string())?
-        .to_string();
+    require(
+        response.header("mcp-session-id").is_none(),
+        "stateless HTTP initialize unexpectedly returned Mcp-Session-Id",
+    )?;
     let message = sse_message(&response)?;
     require(
         message["result"]["protocolVersion"].is_string(),
@@ -2055,7 +1990,6 @@ fn http_initialize(endpoint: &Endpoint, token: &str, id: i64) -> Result<String, 
     let initialized = http_post(
         endpoint,
         Some(&authorization),
-        Some(&session_id),
         json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
@@ -2069,29 +2003,26 @@ fn http_initialize(endpoint: &Endpoint, token: &str, id: i64) -> Result<String, 
             initialized.status
         ),
     )?;
-    Ok(session_id)
+    Ok(())
 }
 
 fn http_tools_list(
     endpoint: &Endpoint,
     token: &str,
-    session_id: &str,
     id: i64,
 ) -> Result<(HttpResponse, Value), String> {
     let authorization = format!("Bearer {token}");
-    http_tools_list_with_authorization(endpoint, &authorization, session_id, id)
+    http_tools_list_with_authorization(endpoint, &authorization, id)
 }
 
 fn http_tools_list_with_authorization(
     endpoint: &Endpoint,
     authorization: &str,
-    session_id: &str,
     id: i64,
 ) -> Result<(HttpResponse, Value), String> {
     wait_for_http_exchange(
         endpoint,
         Some(authorization),
-        Some(session_id),
         json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -2105,7 +2036,6 @@ fn http_tools_list_with_authorization(
 fn http_call(
     endpoint: &Endpoint,
     token: &str,
-    session_id: &str,
     id: i64,
     name: &str,
     arguments: Value,
@@ -2114,7 +2044,6 @@ fn http_call(
     wait_for_http_exchange(
         endpoint,
         Some(&authorization),
-        Some(session_id),
         json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -2128,14 +2057,13 @@ fn http_call(
 fn wait_for_http_exchange(
     endpoint: &Endpoint,
     authorization: Option<&str>,
-    session_id: Option<&str>,
     request: Value,
     expected_status: u16,
 ) -> Result<(HttpResponse, Value), String> {
     let deadline = Instant::now() + OPERATION_TIMEOUT;
     let mut last_error = String::new();
     while Instant::now() < deadline {
-        match http_post(endpoint, authorization, session_id, request.clone()) {
+        match http_post(endpoint, authorization, request.clone()) {
             Ok(response) if response.status == expected_status => match sse_message(&response) {
                 Ok(message) => return Ok((response, message)),
                 Err(error) => last_error = error,
@@ -2158,7 +2086,6 @@ fn wait_for_http_exchange(
 fn wait_for_http_status(
     endpoint: &Endpoint,
     authorization: Option<&str>,
-    session_id: Option<&str>,
     request: Value,
     expected_status: u16,
 ) -> Result<HttpResponse, String> {
@@ -2167,7 +2094,6 @@ fn wait_for_http_status(
         endpoint,
         &host_header,
         authorization,
-        session_id,
         request,
         expected_status,
     )
@@ -2177,20 +2103,13 @@ fn wait_for_http_status_with_host(
     endpoint: &Endpoint,
     host_header: &str,
     authorization: Option<&str>,
-    session_id: Option<&str>,
     request: Value,
     expected_status: u16,
 ) -> Result<HttpResponse, String> {
     let deadline = Instant::now() + OPERATION_TIMEOUT;
     let mut last_error = String::new();
     while Instant::now() < deadline {
-        match http_post_with_host(
-            endpoint,
-            host_header,
-            authorization,
-            session_id,
-            request.clone(),
-        ) {
+        match http_post_with_host(endpoint, host_header, authorization, request.clone()) {
             Ok(response) if response.status == expected_status => return Ok(response),
             Ok(response) => {
                 last_error = format!(
@@ -2210,7 +2129,6 @@ fn wait_for_http_status_with_host(
 fn wait_for_http_tools_presence(
     endpoint: &Endpoint,
     token: &str,
-    session_id: &str,
     id: i64,
     tool: &str,
     expected_presence: bool,
@@ -2218,7 +2136,7 @@ fn wait_for_http_tools_presence(
     let deadline = Instant::now() + OPERATION_TIMEOUT;
     let mut last_error = String::new();
     while Instant::now() < deadline {
-        match http_tools_list(endpoint, token, session_id, id) {
+        match http_tools_list(endpoint, token, id) {
             Ok((response, message)) => {
                 let present = tool_names(&message["result"]["tools"])
                     .iter()
@@ -2246,7 +2164,6 @@ fn assert_unauthorized(
     let response = http_post(
         endpoint,
         authorization,
-        None,
         json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -2272,18 +2189,16 @@ fn assert_unauthorized(
 fn http_post(
     endpoint: &Endpoint,
     authorization: Option<&str>,
-    session_id: Option<&str>,
     request: Value,
 ) -> Result<HttpResponse, String> {
     let host_header = endpoint.address();
-    http_post_with_host(endpoint, &host_header, authorization, session_id, request)
+    http_post_with_host(endpoint, &host_header, authorization, request)
 }
 
 fn http_post_with_host(
     endpoint: &Endpoint,
     host_header: &str,
     authorization: Option<&str>,
-    session_id: Option<&str>,
     request: Value,
 ) -> Result<HttpResponse, String> {
     let body = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
@@ -2301,13 +2216,9 @@ fn http_post_with_host(
         head.push_str(authorization);
         head.push_str("\r\n");
     }
-    if let Some(session_id) = session_id {
-        head.push_str("Mcp-Session-Id: ");
-        head.push_str(session_id);
-        head.push_str("\r\nMCP-Protocol-Version: ");
-        head.push_str(INITIAL_PROTOCOL_VERSION);
-        head.push_str("\r\n");
-    }
+    head.push_str("MCP-Protocol-Version: ");
+    head.push_str(INITIAL_PROTOCOL_VERSION);
+    head.push_str("\r\n");
     head.push_str("\r\n");
     stream
         .write_all(head.as_bytes())
