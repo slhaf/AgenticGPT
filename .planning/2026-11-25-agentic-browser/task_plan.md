@@ -10,3 +10,4 @@
 用户已确认多对多配对、整个 profile 独占和扩展生命周期。首版工具支持显式选择 browserId。Agentic 的 Rust 编译、测试和重型验证走既有 remote-build。
 
 - [complete] 更新 MCP 初始化说明，核对 Browser 配置热重载。
+- [complete] 将扩展配置移入工具栏弹窗，移除独立设置页并同步配对文档。

@@ -6,7 +6,7 @@ Install Agentic Browser in a Chrome or Chromium profile. The extension connects 
 
 1. Build the [Agentic Browser extension](https://github.com/slhaf/mcp-chrome-for-Agentic). In Chrome 116+ or Chromium, open `chrome://extensions`, enable developer mode, and load the build directory in the target profile.
 2. Add `browser` to the existing Agentic `toolsets.enabled` list and configure `browser.pairingToken`. Use `openssl rand -hex 32` to generate a token for each Agentic instance.
-3. Open extension settings and enter the browser name, Agentic address, and token. The default address for Chrome and Agentic on the same host is `ws://127.0.0.1:39421`. Add a connection for each instance the browser should pair with.
+3. Click **Agentic Browser** in the Chrome toolbar. In the popup, enter the browser name and add the address and token for each instance. The default address for Chrome and Agentic on the same host is `ws://127.0.0.1:39421`. Click **Save settings**.
 4. Start Agentic. Check the connection status in the extension and use `browser.list` to find its `browserId`.
 
 ```json

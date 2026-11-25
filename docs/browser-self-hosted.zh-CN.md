@@ -6,7 +6,7 @@ Agentic Browser 是安装在 Chrome 或 Chromium profile 内的扩展。它主�
 
 1. 从 [Agentic Browser 源码](https://github.com/slhaf/mcp-chrome-for-Agentic) 构建扩展。在目标 Chrome 116+ 或 Chromium profile 的 `chrome://extensions` 开发者模式中加载构建目录。
 2. 在现有 Agentic 配置的 `toolsets.enabled` 中加入 `browser`，设置 `browser.pairingToken`。用 `openssl rand -hex 32` 生成每个 Agentic 实例的配对密钥。
-3. 打开扩展设置，填写浏览器名称、Agentic 地址及刚生成的密钥。Agentic 与 Chromium 同机时，默认地址为 `ws://127.0.0.1:39421`。给同一个浏览器配对多个实例时，分别添加连接。
+3. 点击 Chrome 工具栏中的 **Agentic Browser**，在弹窗内填写浏览器名称，并为每个实例添加地址及其配对令牌。Agentic 与 Chromium 同机时，默认地址为 `ws://127.0.0.1:39421`。点击**保存设置**。
 4. 启动 Agentic，确认扩展显示已连接，并通过 `browser.list` 获取对应的 `browserId`。
 
 ```json
