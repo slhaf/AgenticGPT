@@ -348,27 +348,24 @@ async fn terminal_result_is_not_suppressed_when_panel_preparation_fails() -> any
 }
 
 #[tokio::test]
-async fn browser_missing_runtime_has_stable_degraded_results() -> anyhow::Result<()> {
+async fn browser_offline_dispatch_preserves_audit_without_script_body() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let source = "console.log('browser-audit-secret')";
     assert_eq!(
         server.dispatch("browser.list", json!({})).await?,
-        json!({"runtimeAvailable":false,"leases":[]})
+        json!({"runtimeAvailable":false,"browsers":[],"leases":[]})
     );
-    for (name, arguments) in [
-        ("browser.manual", json!({"action":"search","query":"tabs"})),
-        (
+    let value = server
+        .dispatch(
             "browser.acquire",
-            json!({"name":"lease","idleTimeoutSeconds":1}),
-        ),
-        ("browser.repl", json!({"name":"lease","code":source})),
-        ("browser.reset", json!({"name":"lease"})),
-        ("browser.release", json!({"name":"lease"})),
-    ] {
-        let value = server.dispatch(name, arguments).await?;
-        assert_eq!(value["error"]["code"], "browser_runtime_unavailable");
-        assert_eq!(value["error"]["message"], "browser_runtime_unavailable");
-    }
+            json!({"browserId":"offline","name":"lease","idleTimeoutSeconds":1}),
+        )
+        .await?;
+    assert_eq!(value["error"]["code"], "browser_not_connected");
+    let value = server
+        .dispatch("browser.repl", json!({"name":"lease","code":source}))
+        .await?;
+    assert_eq!(value["error"]["code"], "browser_lease_expired");
     let audit = std::fs::read_to_string(
         server
             .state
@@ -388,102 +385,55 @@ async fn browser_missing_runtime_has_stable_degraded_results() -> anyhow::Result
     assert_eq!(records[0]["codeBytes"], source.len());
     assert_eq!(records[0]["codeSha256"], browser_sha256(source));
     assert_eq!(records[0]["outcome"], "failed");
-    assert_eq!(records[0]["errorCode"], "browser_runtime_unavailable");
+    assert_eq!(records[0]["errorCode"], "browser_lease_expired");
     assert!(!audit.contains(source));
 
     Ok(())
 }
 
 #[tokio::test]
-async fn browser_manual_dispatch_uses_selected_runtime_docs_root() -> anyhow::Result<()> {
-    let docs_root = std::env::temp_dir().join(format!("agentic-browser-docs-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&docs_root)?;
-    std::fs::write(docs_root.join("api.md"), "before\nbrowser sdk\napi after\n")?;
-    let server = AgentMcpServer::new(state_with_browser_runtime(
-        docs_root.clone(),
+async fn browser_lists_connected_profiles_and_releases_named_leases() -> anyhow::Result<()> {
+    let state = state_with_test_browsers(
+        &["profile-zeta", "profile-alpha"],
         CallToolResult::default(),
-    ));
-
-    let read = server
-        .dispatch(
-            "browser.manual",
-            json!({"action":"read","path":"api.md","startLine":2,"endLine":2}),
-        )
-        .await?;
-    assert_eq!(read["path"], "api.md");
-    assert_eq!(read["content"], "browser sdk\n");
-    assert!(!serde_json::to_string(&read)?.contains(docs_root.to_string_lossy().as_ref()));
-
-    let search = server
-        .dispatch(
-            "browser.manual",
-            json!({"action":"search","query":"browser","maxResults":1}),
-        )
-        .await?;
-    assert_eq!(search["matches"][0]["path"], "api.md");
-    assert_eq!(search["matches"][0]["line"], 2);
-    assert!(!serde_json::to_string(&search)?.contains(docs_root.to_string_lossy().as_ref()));
-
-    let absolute = server
-        .dispatch(
-            "browser.manual",
-            json!({"action":"read","path":docs_root.join("api.md")}),
-        )
-        .await?;
-    assert_eq!(absolute["error"]["code"], "browser_manual_invalid_path");
-    std::fs::remove_dir_all(docs_root)?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn browser_list_maps_runtime_snapshots_and_release_is_idempotent() -> anyhow::Result<()> {
-    let server = AgentMcpServer::new(state_with_browser_runtime(
-        PathBuf::from("/runtime/docs"),
-        CallToolResult::default(),
-    ));
-    for (name, timeout) in [("zeta", 5_u64), ("alpha", 6_u64)] {
-        server
+    )
+    .await?;
+    let server = AgentMcpServer::new(state);
+    for (name, browser_id) in [("zeta", "profile-zeta"), ("alpha", "profile-alpha")] {
+        let acquired = server
             .dispatch(
                 "browser.acquire",
-                json!({"name":name,"idleTimeoutSeconds":timeout}),
+                json!({"browserId":browser_id,"name":name,"idleTimeoutSeconds":60}),
             )
             .await?;
+        assert_eq!(acquired["state"], "ready");
+        assert_eq!(acquired["browserId"], browser_id);
     }
 
     let listed = server.dispatch("browser.list", json!({})).await?;
     assert_eq!(listed["runtimeAvailable"], true);
-    assert_eq!(listed["appVersion"], "test-browser");
-    assert_eq!(listed["channel"], "test");
-    let leases = listed["leases"].as_array().expect("lease array");
+    assert_eq!(listed["browsers"].as_array().unwrap().len(), 2);
     assert_eq!(
-        leases
-            .iter()
-            .map(|lease| lease["name"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["alpha", "zeta"]
+        listed["leases"],
+        json!([
+            {"name":"alpha","browserId":"profile-alpha"},
+            {"name":"zeta","browserId":"profile-zeta"},
+        ])
     );
-    for lease in leases {
-        assert!(lease["remainingIdleSeconds"].is_u64());
-        assert!(lease["remainingIdleSeconds"].as_u64().unwrap() <= 6);
-        let serialized = serde_json::to_string(lease)?;
-        for forbidden in ["session_id", "turn_id", "nodeRepl", "/runtime"] {
-            assert!(
-                !serialized.contains(forbidden),
-                "opaque field leaked: {forbidden}"
-            );
-        }
-    }
-
     let absent = server
         .dispatch("browser.release", json!({"name":"missing"}))
         .await?;
     assert_eq!(absent, json!({"name":"missing","released":false}));
-    server
+    let released = server
         .dispatch("browser.release", json!({"name":"alpha"}))
         .await?;
-    server
-        .dispatch("browser.release", json!({"name":"zeta"}))
-        .await?;
+    assert_eq!(released["released"], true);
+    let listed = server.dispatch("browser.list", json!({})).await?;
+    assert_eq!(
+        listed["leases"],
+        json!([{"name":"zeta","browserId":"profile-zeta"}])
+    );
+    server.state.browser_runtime.shutdown().await;
     Ok(())
 }
 
@@ -508,16 +458,16 @@ async fn browser_repl_event_decoration_preserves_inner_result_channels() -> anyh
         json!("result-value"),
     )])));
 
-    let server = AgentMcpServer::new(state_with_browser_runtime(
-        PathBuf::from("/runtime/docs"),
-        inner.clone(),
-    ));
-    server
+    let state = state_with_test_browsers(&["profile"], inner.clone()).await?;
+    let runtime = state.browser_runtime.clone();
+    let server = AgentMcpServer::new(state);
+    let acquired = server
         .dispatch(
             "browser.acquire",
-            json!({"name":"lease","idleTimeoutSeconds":60}),
+            json!({"browserId":"profile","name":"lease","idleTimeoutSeconds":60}),
         )
         .await?;
+    assert_eq!(acquired["state"], "ready");
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (client_read, client_write) = split(client_io);
     let (server_read, server_write) = split(server_io);
@@ -565,6 +515,7 @@ async fn browser_repl_event_decoration_preserves_inner_result_channels() -> anyh
     assert_eq!(outer.meta, inner.meta);
     let _ = client.cancel().await;
     server_task.await??;
+    runtime.shutdown().await;
     Ok(())
 }
 
@@ -3713,7 +3664,7 @@ fn test_state(profile: CapabilityProfile) -> AppState {
         private_state,
         event_store,
         process_history,
-        browser_runtime: std::sync::Arc::new(crate::state::BrowserRuntimeSlot::default()),
+        browser_runtime: std::sync::Arc::new(crate::browser_runtime::BrowserRuntime::default()),
         config_runtime: std::sync::Arc::new(crate::config_runtime::ConfigRuntime::default()),
         runtime: RuntimeModel::tunnel(profile, false),
         started_at: chrono::Utc::now(),
@@ -3765,28 +3716,73 @@ async fn allow_test_printf(server: &AgentMcpServer) {
         .push("printf **".to_string());
 }
 
-fn state_with_browser_runtime(docs_root: PathBuf, result: CallToolResult) -> AppState {
-    let mut state = test_state(CapabilityProfile::Normal);
-    let browser_runtime = Arc::new(crate::state::BrowserRuntimeContext {
-        descriptor: crate::browser_runtime::BrowserRuntimeDescriptor {
-            app_version: "test-browser".to_string(),
-            channel: "test".to_string(),
-            node_repl_path: PathBuf::from("/runtime/node-repl"),
-            node_path: PathBuf::from("/runtime/node"),
-            browser_client_path: PathBuf::from("/runtime/browser-client.mjs"),
-            browser_service_path: PathBuf::from("/runtime/browser-service.mjs"),
-            codex_home: PathBuf::from("/runtime/codex"),
-            codex_cli_path: Some(PathBuf::from("/runtime/codex-cli")),
-            node_module_dirs: Vec::new(),
-            trusted_code_paths: Vec::new(),
-            docs_root,
-        },
-        manager: crate::browser_manager::test_manager_with_result(result),
-    });
-    let browser_runtime_cell =
-        Arc::new(crate::state::BrowserRuntimeSlot::new(Some(browser_runtime)));
-    state.browser_runtime = browser_runtime_cell;
+async fn state_with_test_browsers(
+    ids: &[&str],
+    result: CallToolResult,
+) -> anyhow::Result<AppState> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let state = test_state(CapabilityProfile::Normal);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    drop(listener);
     state
+        .browser_runtime
+        .configure(address, Some("test-token"), "test-agent")
+        .await?;
+    let result = serde_json::to_value(result)?;
+    for id in ids {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+        socket
+            .send(Message::Text(
+                json!({
+                    "type":"hello", "token":"test-token", "browserId":id, "browserName":id,
+                    "apiVersion":1, "extensionVersion":"1.0.0"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await?;
+        let welcome = socket.next().await.transpose()?.expect("welcome");
+        assert_eq!(
+            serde_json::from_str::<Value>(welcome.to_text()?)?["type"],
+            "welcome"
+        );
+        socket
+            .send(Message::Text(r#"{"type":"status","busy":false}"#.into()))
+            .await?;
+        let result = result.clone();
+        tokio::spawn(async move {
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let data = match request["type"].as_str().unwrap() {
+                    "acquire" => json!({"leaseId":Uuid::new_v4()}),
+                    "repl" => result.clone(),
+                    "release" => json!({"released":true}),
+                    other => panic!("unexpected Browser request {other}"),
+                };
+                let reply = json!({"type":"result","requestId":request["requestId"],"result":data});
+                if socket
+                    .send(Message::Text(reply.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !state
+                .browser_runtime
+                .browser_info(id)
+                .is_some_and(|browser| !browser.busy)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+    }
+    Ok(state)
 }
 
 #[tokio::test]

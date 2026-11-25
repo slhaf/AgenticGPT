@@ -12,7 +12,7 @@ bash scripts/release-preflight.sh
 
 该[预检脚本](../../scripts/release-preflight.sh)不会创建 tag、构建 Linux 发行包或发布 GitHub Release。它会依次执行：
 
-1. 检查仓库五个 Rust crate 的格式（`cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -p agentic-browser-host -- --check`）。
+1. 检查仓库四个 Rust crate 的格式（`cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -- --check`）。
 2. 检查并测试 Rust 工作区。
 3. 构建 `agentic-gpt` 与 `agentic-gpt-hub`。
 4. 运行 OpenAPI schema 和真实进程的跨端契约检查。
@@ -32,7 +32,7 @@ release_tag="$(git describe --tags --exact-match)" &&
 
 Rust、HTTP 契约和 Console 各自拥有版本来源，不能把一个版本号视为其他部分的自动来源：
 
-- **Rust 发布标签**：[`agentic-gpt`](../../crates/agentic-gpt/Cargo.toml) 与 [`agentic-gpt-hub`](../../crates/agentic-gpt-hub/Cargo.toml) 必须采用同一版本；发布标签为 `v<该版本>`。带标签的预检会校验配对。`agentic-browser-host` 随包发布，但不决定该标签。
+- **Rust 发布标签**：[`agentic-gpt`](../../crates/agentic-gpt/Cargo.toml) 与 [`agentic-gpt-hub`](../../crates/agentic-gpt-hub/Cargo.toml) 必须采用同一版本；发布标签为 `v<该版本>`。带标签的预检会校验配对。Agentic Browser 扩展由其独立仓库构建。
 - **HTTP/OpenAPI 契约**：权威定义是 [`openapi/hub.yaml`](../../openapi/hub.yaml)，包括 `info.version`、路径、schema 与响应；不会由 Rust 标签自动生成或更新。[`scripts/check_contract_parity.py`](../../scripts/check_contract_parity.py) 针对当前检出的代码检查 schema 与 Agent/Hub 运行行为。
 - **Console**：独立于 Rust 发布工作流。Android 的版本字段在 [`console/androidApp/build.gradle.kts`](../../console/androidApp/build.gradle.kts)（`versionCode`、`versionName`）；桌面分发的 `packageVersion` 在 [`console/desktopApp/build.gradle.kts`](../../console/desktopApp/build.gradle.kts)。Rust 工作流不构建或发布 Console。[`console/gradle/libs.versions.toml`](../../console/gradle/libs.versions.toml) 管理依赖和插件版本，不是产品发布版本来源。
 
@@ -45,7 +45,7 @@ cargo install cross --git https://github.com/cross-rs/cross
 ./scripts/dist-linux.sh
 ```
 
-脚本对 `x86_64` 和 `aarch64` 的 GNU 与 musl 四个目标执行工作区的 release 构建，其中 musl 产物静态链接。脚本将三个二进制以及 Agentic `LICENSE`、`THIRD_PARTY_NOTICES.md` 和第三方许可证全文复制到各自 `dist/<target>/` 目录。Obscura、V8/rusty_v8 与内置字体的声明随 Linux 发行包提供。
+脚本对 `x86_64` 和 `aarch64` 的 GNU 与 musl 四个目标执行工作区的 release 构建，其中 musl 产物静态链接。脚本将两个二进制以及 Agentic `LICENSE`、`THIRD_PARTY_NOTICES.md` 和第三方许可证全文复制到各自 `dist/<target>/` 目录。Obscura、V8/rusty_v8 与内置字体的声明随 Linux 发行包提供。
 
 构建镜像由 [`Cross.toml`](../../Cross.toml) 指定；首次构建需要下载镜像。各目标使用独立的构建缓存，避免不同镜像复用不兼容的构建中间文件。
 
@@ -61,7 +61,7 @@ rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unkn
 
 此命令会编译并写入或覆盖本地 `dist/` 产物，但不会创建 tag 或发布 GitHub Release。
 
-[`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述三个二进制、Agentic `LICENSE`、`THIRD_PARTY_NOTICES.md` 和 `licenses/`，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布四个压缩包与校验和文件，并使用标签对应的 `docs/release-notes-<tag>.md` 作为 Release 正文。
+[`release.yml`](../../.github/workflows/release.yml) 将每个目标目录打成 `agentic-gpt-<target>.tar.gz`，内容为上述两个二进制、Agentic `LICENSE`、`THIRD_PARTY_NOTICES.md` 和 `licenses/`，并生成 `release/SHA256SUMS`。它通过 `softprops/action-gh-release@v2` 发布四个压缩包与校验和文件，并使用标签对应的 `docs/release-notes-<tag>.md` 作为 Release 正文。
 
 ## 触发实际发布
 

@@ -16,7 +16,7 @@
 
 ## 模块边界与代码放置
 
-Rust workspace 当前有五个 crate，成员见根目录 [`Cargo.toml`](../../Cargo.toml)：`agentic-gpt`、`agentic-gpt-hub`、`agentic-gpt-protocol`、`agentic-apply-patch`、`agentic-browser-host`。当前依赖方向为 Agent → protocol、apply-patch；Hub → protocol。Protocol 放共享 wire/domain DTO 与序列化合同，不承担数据库、网络、授权或业务副作用。[apply-patch](../../crates/agentic-apply-patch/src/lib.rs) 是纯 patch 解析/定位/文本更新算法库；[browser-host](../../crates/agentic-browser-host/src/main.rs) 是独立扩展桥接程序，不是 Agent runtime 或 Hub 的状态所有者。调整依赖前检查 crate manifest 和实际调用，避免反向依赖或把桥接进程逻辑塞入核心 crate。
+Rust workspace 当前有四个 crate，成员见根目录 [`Cargo.toml`](../../Cargo.toml)：`agentic-gpt`、`agentic-gpt-hub`、`agentic-gpt-protocol`、`agentic-apply-patch`。当前依赖方向为 Agent → protocol、apply-patch；Hub → protocol。Protocol 放共享 wire/domain DTO 与序列化合同，不承担数据库、网络、授权或业务副作用。[apply-patch](../../crates/agentic-apply-patch/src/lib.rs) 是纯 patch 解析/定位/文本更新算法库；Agentic Browser 扩展通过 WebSocket 连接 Agent，管理对应 profile 的执行租约。调整依赖前检查 crate manifest 和实际调用，避免反向依赖或把桥接进程逻辑塞入核心 crate。
 
 Agent 与 Hub 均以二进制 crate 根显式装配许多私有模块；目录不是 Cargo crate，且部分模块通过 `#[path]` 映射。以下是当前代码的定位图，不意味着每种改动都要同时改所有层：
 
@@ -27,7 +27,7 @@ Agent 与 Hub 均以二进制 crate 根显式装配许多私有模块；目录�
 | Agent operations | [`operations/`](../../crates/agentic-gpt/src/operations/operation.rs)：真实入口准入/授权、共享本地服务、命令策略、确认与结果映射。它不是无差别接管所有工具入口的通用 dispatcher。 |
 | Agent process | [`process/`](../../crates/agentic-gpt/src/process/managed.rs)：受管理进程生命周期、执行预检、输出/取消；历史记录 adapter 在 [`storage/process_history.rs`](../../crates/agentic-gpt/src/storage/process_history.rs)。 |
 | Agent files / MCP | [`files/`](../../crates/agentic-gpt/src/files/file_ops.rs) 管文件操作；[`mcp/`](../../crates/agentic-gpt/src/mcp/mcp.rs) 管下游 MCP 客户端/调用与并发，不把任意工具请求等同本地工具。 |
-| Agent skills / Room / Browser | [`skills/`](../../crates/agentic-gpt/src/skills/skills.rs) 与 [`skill_installs.rs`](../../crates/agentic-gpt/src/skills/skill_installs.rs) 管 skill 发现、执行和安装；[`room/`](../../crates/agentic-gpt/src/room/room_repository.rs) 管 Agent 本地 Room 读取/维护；[`browser/`](../../crates/agentic-gpt/src/browser/browser_runtime.rs) 管 Browser runtime 与发现/分发。 |
+| Agent skills / Room / Browser | [`skills/`](../../crates/agentic-gpt/src/skills/skills.rs) 与 [`skill_installs.rs`](../../crates/agentic-gpt/src/skills/skill_installs.rs) 管 skill 发现、执行和安装；[`room/`](../../crates/agentic-gpt/src/room/room_repository.rs) 管 Agent 本地 Room 读取/维护；[`browser/`](../../crates/agentic-gpt/src/browser/browser_runtime.rs) 管 Agentic Browser 连接及本地租约路由。 |
 | Agent storage / config / UI | [`storage/`](../../crates/agentic-gpt/src/storage/private_state.rs) 管私有状态、传输账本与审计；[`config/`](../../crates/agentic-gpt/src/config/config.rs) 管配置；[`ui/`](../../crates/agentic-gpt/src/ui/cli.rs) 含 CLI、TUI、配置 TUI。 |
 | Hub runtime / agents | [`runtime/`](../../crates/agentic-gpt-hub/src/runtime/state.rs) 管 Hub 运行态与服务器；[`agents/`](../../crates/agentic-gpt-hub/src/agents/dispatch.rs) 管 Agent registry、连接生命周期、派发与运行回执协调。Hub 派发命令，Agent 执行副作用。 |
 | Hub ingress / storage | [`ingress/http/`](../../crates/agentic-gpt-hub/src/ingress/http/routes.rs) 管 HTTP/OpenAPI 路由；[`ingress/mcp/`](../../crates/agentic-gpt-hub/src/ingress/mcp/mcp_server.rs) 管 Apps MCP；[`storage/`](../../crates/agentic-gpt-hub/src/storage/runs.rs) 与 [`db.rs`](../../crates/agentic-gpt-hub/src/storage/db.rs) 管 Hub 持久运行回执和数据库。两种 ingress 的身份与响应封套不同。 |
@@ -106,7 +106,7 @@ Rust 单元测试放模块 `#[cfg(test)]` 测试模块或现有测试文件，�
 以下是在仓库根目录运行的本地验证流程。Rust 步骤与当前 [CI 工作流](../../.github/workflows/ci.yml) 对齐；Python 部分采用隔离虚拟环境，不是 CI 命令的逐字复制：
 
 ```bash
-cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -p agentic-browser-host -- --check
+cargo fmt -p agentic-gpt -p agentic-gpt-hub -p agentic-gpt-protocol -p agentic-apply-patch -- --check
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

@@ -381,7 +381,7 @@ mod tests {
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,
             process_history,
-            browser_runtime: std::sync::Arc::new(crate::state::BrowserRuntimeSlot::default()),
+            browser_runtime: std::sync::Arc::new(crate::browser_runtime::BrowserRuntime::default()),
             config_runtime: std::sync::Arc::new(crate::config_runtime::ConfigRuntime::default()),
             runtime: crate::state::RuntimeModel::tunnel(profile, false),
             started_at: Utc::now(),
@@ -476,7 +476,6 @@ mod tests {
         let mut disk = effective.clone();
         disk.workspace_root = candidate_workspace;
         disk.policy.path.write = vec![candidate_write_root.to_path_buf()];
-        disk.browser.managed.enabled = false;
         let disk_path = root.join("config.json");
         fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
         app.config_path = disk_path.clone();

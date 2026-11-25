@@ -225,14 +225,6 @@ fn run_incomplete_room_toolsets_e2e(root: &Path) -> Result<(), String> {
     ensure_success(&updated, "set separate Room repository root")?;
     expect_local_tool_success(&binary, &config_path, "room.notebook.recent")?;
 
-    let updated = output_with_timeout(
-        command(&binary, root)
-            .args(["config", "--config"])
-            .arg(&config_path)
-            .args(["set", "browser.runtime", "{}"]),
-        CLI_TIMEOUT,
-    )?;
-    ensure_success(&updated, "set incomplete explicit Browser runtime")?;
     let enabled = output_with_timeout(
         command(&binary, root)
             .args(["config", "--config"])
@@ -240,17 +232,28 @@ fn run_incomplete_room_toolsets_e2e(root: &Path) -> Result<(), String> {
             .args(["toolset", "enable", "browser"]),
         CLI_TIMEOUT,
     )?;
-    ensure_success(&enabled, "enable Browser toolset without runtime")?;
+    ensure_success(&enabled, "enable Browser toolset before extension connects")?;
     wait_for_tool_presence(&binary, &config_path, "browser.list", true)?;
     expect_browser_list_unavailable(&binary, &config_path)?;
-    expect_local_tool_error(
+    let manual = local_output_with_timeout(
         &binary,
         &config_path,
-        "browser.manual",
-        r#"{"action":"search","query":"test"}"#,
-        "browser_runtime_unavailable",
-        "browser_runtime_unavailable",
+        [
+            "call",
+            "browser.manual",
+            "--arguments",
+            r#"{"action":"read","path":"quickstart.md"}"#,
+        ],
+        CALL_TIMEOUT,
     )?;
+    let manual: Value =
+        serde_json::from_slice(&manual.stdout).map_err(|error| error.to_string())?;
+    if !manual["structuredContent"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("browser.repl"))
+    {
+        return Err("offline Browser manual is unavailable".into());
+    }
 
     signal_and_wait(cleanup.child, libc::SIGTERM, Duration::from_secs(5))?;
     Ok(())

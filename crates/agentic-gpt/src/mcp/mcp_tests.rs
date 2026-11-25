@@ -253,7 +253,7 @@ async fn managed_test_state(max_active_processes: usize) -> (AppState, PathBuf) 
         private_state: private_state.clone(),
         event_store,
         process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
-        browser_runtime: std::sync::Arc::new(crate::state::BrowserRuntimeSlot::default()),
+        browser_runtime: std::sync::Arc::new(crate::browser_runtime::BrowserRuntime::default()),
         config_runtime: std::sync::Arc::new(crate::config_runtime::ConfigRuntime::default()),
         runtime: crate::state::RuntimeModel::local(crate::state::CapabilityProfile::Normal),
         started_at: chrono::Utc::now(),

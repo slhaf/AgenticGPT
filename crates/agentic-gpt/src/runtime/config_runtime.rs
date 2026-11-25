@@ -68,15 +68,6 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     if !differs(&old_connection, &next.room.secret) {
         errors.remove("room.secret");
     }
-    if !differs(&old.browser, &next.browser)
-        && (!next
-            .toolsets
-            .is_enabled(crate::config::ToolNamespace::Browser)
-            || state.browser_runtime.inner.lock().await.is_some())
-    {
-        errors.remove("browser");
-    }
-
     // Prepare service owners before publishing the new snapshot. Their guards exclude
     // old in-flight writes and new requests until the corresponding configuration is visible.
     let old_email_enabled = old
@@ -171,69 +162,23 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
         }
     }
 
-    let mut browser_guard = None;
-    let mut browser_changed = false;
-    if differs(&old.browser, &next.browser)
-        || old
-            .toolsets
-            .is_enabled(crate::config::ToolNamespace::Browser)
-            != next
-                .toolsets
-                .is_enabled(crate::config::ToolNamespace::Browser)
+    let browser = crate::config::ToolNamespace::Browser;
+    let old_browser_enabled = old.toolsets.is_enabled(browser);
+    let next_browser_enabled = next.toolsets.is_enabled(browser);
+    if old.browser != next.browser
+        || old_browser_enabled != next_browser_enabled
+        || errors.contains_key("browser")
     {
-        // Keep the current owner closed until the new configuration is published.
-        errors.remove("browser");
-        let mut slot = state.browser_runtime.inner.lock().await;
-        let enabled = next
-            .toolsets
-            .is_enabled(crate::config::ToolNamespace::Browser);
-        let stopped = if let Some(context) = slot.as_ref() {
-            context.manager.shutdown().await
-        } else {
-            Ok(())
-        };
-        match stopped {
+        match configure_browser(state, &next).await {
             Ok(()) => {
-                *slot = None;
-                if enabled {
-                    errors.insert("browser".into(), "browser_runtime_unavailable".into());
-                }
-                browser_changed = true;
+                errors.remove("browser");
             }
             Err(error) => {
-                let code = crate::startup::error_code(&error.to_string());
-                if code != "browser_runtime_busy" {
-                    *slot = None;
-                    browser_changed = true;
-                }
+                crate::utils::log_warn(format!("browser listener failed: {error}"));
                 next.browser = old.browser.clone();
-                errors.insert("browser".into(), code);
+                errors.insert("browser".into(), "browser_listener_failed".into());
             }
         }
-        if let Some(error) = errors
-            .get("browser")
-            .filter(|error| error.as_str() != "browser_runtime_unavailable")
-            .cloned()
-        {
-            if old
-                .toolsets
-                .is_enabled(crate::config::ToolNamespace::Browser)
-                != next
-                    .toolsets
-                    .is_enabled(crate::config::ToolNamespace::Browser)
-            {
-                if old
-                    .toolsets
-                    .is_enabled(crate::config::ToolNamespace::Browser)
-                {
-                    next.toolsets.enable(crate::config::ToolNamespace::Browser);
-                } else {
-                    next.toolsets.disable(crate::config::ToolNamespace::Browser);
-                }
-                errors.insert("toolsets.enabled".into(), error);
-            }
-        }
-        browser_guard = Some(slot);
     }
     let hub_changed =
         differs(&old.hub, &next.hub) || old.auxiliary_hub_enabled() != next.auxiliary_hub_enabled();
@@ -255,25 +200,7 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
             .skill_installs
             .reconfigure(next.skills.max_concurrent_installs);
     }
-    // Background preparation clears the Browser error. Keep its slot locked while
-    // publishing the error table so an old snapshot cannot resurrect that error.
-    let unchanged_browser = if browser_guard.is_none() {
-        Some(state.browser_runtime.inner.lock().await)
-    } else {
-        None
-    };
-    if unchanged_browser
-        .as_ref()
-        .is_some_and(|slot| slot.is_some())
-    {
-        errors.remove("browser");
-    }
     *state.config_runtime.errors.write().await = errors;
-    if browser_changed {
-        state.browser_runtime.changed.send_replace(());
-    }
-    drop(unchanged_browser);
-    drop(browser_guard);
     drop(email_guard);
     drop(secret_guard);
     if hub_changed {
@@ -346,28 +273,46 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     Ok(())
 }
 
+async fn configure_browser(state: &AppState, config: &Config) -> Result<()> {
+    if config
+        .toolsets
+        .is_enabled(crate::config::ToolNamespace::Browser)
+    {
+        state
+            .browser_runtime
+            .configure(
+                config.browser.listen_addr,
+                config.browser.pairing_token.as_deref(),
+                &state.transport_agent_id,
+            )
+            .await
+    } else {
+        state.browser_runtime.shutdown().await;
+        Ok(())
+    }
+}
+
+pub(crate) async fn start_browser_listener(state: &AppState) {
+    let config = state.config.read().await;
+    if let Err(error) = configure_browser(state, &config).await {
+        crate::utils::log_warn(format!("browser listener failed: {error}"));
+        state
+            .config_runtime
+            .errors
+            .write()
+            .await
+            .insert("browser".into(), "browser_listener_failed".into());
+    }
+}
+
 impl ConfigRuntime {
-    pub(crate) fn new(
-        config: &Config,
-        browser_available: bool,
-        room_error: Option<String>,
-    ) -> Self {
+    pub(crate) fn new(config: &Config, room_error: Option<String>) -> Self {
         let mut runtime = Self::default();
         if let Some(error) = room_error {
             runtime
                 .errors
                 .get_mut()
                 .insert("room.repositoryRoot".into(), error);
-        }
-        if config
-            .toolsets
-            .is_enabled(crate::config::ToolNamespace::Browser)
-            && !browser_available
-        {
-            runtime
-                .errors
-                .get_mut()
-                .insert("browser".into(), "browser_runtime_unavailable".into());
         }
         if config.mode == crate::config::RuntimeMode::Hub || config.auxiliary_hub_enabled() {
             runtime.hub_connection.get_mut().status = ConfigApplyStatus::Applying;
@@ -377,10 +322,6 @@ impl ConfigRuntime {
             Ordering::Relaxed,
         );
         runtime
-    }
-
-    pub(crate) async fn browser_ready(&self) {
-        self.errors.write().await.remove("browser");
     }
 
     pub(crate) async fn status(

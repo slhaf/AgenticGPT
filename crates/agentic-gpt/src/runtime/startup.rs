@@ -12,7 +12,7 @@ use crate::{
     config::{self, Config, RuntimeMode},
     http_server, hub, instance_lock, local_control, private_state, process, process_history,
     room_repository, skill_installs, skills,
-    state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel},
+    state::{AppState, CapabilityProfile, RuntimeModel},
     stdio_server, supervisor, tmux,
     utils::{ensure_parent, log_info, log_warn},
 };
@@ -58,20 +58,21 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
         },
         initial.limits.max_active_processes.resolve().diagnostic()
     ));
-    let state = build_app_state(config_path.clone(), initial, runtime, false, None)?;
+    let state = build_app_state(config_path.clone(), initial, runtime, false)?;
     state.skill_installs.recover(state.clone()).await?;
     crate::event_notifications::recover_event_notifications(&state).await?;
     tokio::spawn(watch_live_config(state.clone(), false, None));
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
     let events = EventsBackground::start(state.clone());
-    let browser = BrowserBackground::start(state.clone());
+    crate::config_runtime::start_browser_listener(&state).await;
+    let browser = state.browser_runtime.clone();
     let result = tokio::select! {
         result = hub::connect_loop(state) => result,
         result = wait_for_local_shutdown_signal() => result,
     };
     events.stop().await;
-    browser.stop().await;
+    browser.shutdown().await;
     email.stop().await;
     secret.shutdown().await;
     result
@@ -115,7 +116,6 @@ pub(crate) async fn run_stdio_worker(
         config,
         RuntimeModel::tunnel(profile, hub_enabled),
         supervised,
-        None,
     )?;
     state.skill_installs.recover(state.clone()).await?;
     crate::event_notifications::recover_event_notifications(&state).await?;
@@ -143,7 +143,8 @@ pub(crate) async fn run_stdio_worker(
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
     let events = EventsBackground::start(state.clone());
-    let browser = BrowserBackground::start(state.clone());
+    crate::config_runtime::start_browser_listener(&state).await;
+    let browser = state.browser_runtime.clone();
     let stdio = stdio_server::serve_stdio(state);
     tokio::pin!(stdio);
     let result = tokio::select! {
@@ -171,7 +172,7 @@ pub(crate) async fn run_stdio_worker(
         }
     };
     events.stop().await;
-    browser.stop().await;
+    browser.shutdown().await;
     email.stop().await;
     secret.shutdown().await;
     result
@@ -202,29 +203,6 @@ struct EmailBackground {
     task: tokio::task::JoinHandle<Result<()>>,
 }
 
-struct BrowserBackground {
-    shutdown: CancellationToken,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl BrowserBackground {
-    fn start(state: AppState) -> Self {
-        let shutdown = CancellationToken::new();
-        let task = tokio::spawn(crate::browser_discovery::run_background(
-            state,
-            shutdown.clone(),
-        ));
-        Self { shutdown, task }
-    }
-
-    async fn stop(self) {
-        self.shutdown.cancel();
-        if let Err(error) = self.task.await {
-            log_warn(format!("browser preparation task failed: {error}"));
-        }
-    }
-}
-
 impl EmailBackground {
     fn start(state: AppState) -> Self {
         let shutdown = CancellationToken::new();
@@ -246,14 +224,12 @@ pub(crate) fn build_app_state(
     config: Config,
     runtime: RuntimeModel,
     supervised: bool,
-    browser_runtime: Option<Arc<BrowserRuntimeContext>>,
 ) -> Result<AppState> {
     build_app_state_with_private_state(
         config_path,
         config,
         runtime,
         supervised,
-        browser_runtime,
         private_state::prepare()?,
     )
 }
@@ -263,7 +239,6 @@ pub(crate) fn build_app_state_with_private_state(
     config: Config,
     runtime: RuntimeModel,
     supervised: bool,
-    browser_runtime: Option<Arc<BrowserRuntimeContext>>,
     private_state: private_state::PrivateStatePaths,
 ) -> Result<AppState> {
     let room_error = if config.toolsets.uses_room_repository() {
@@ -287,11 +262,8 @@ pub(crate) fn build_app_state_with_private_state(
     }
     let skill_installs_root = private_state.skill_installs.clone();
     let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(
-        &config,
-        browser_runtime.is_some(),
-        room_error,
+        &config, room_error,
     ));
-    let browser_runtime_cell = Arc::new(crate::state::BrowserRuntimeSlot::new(browser_runtime));
     Ok(AppState {
         config_path,
         transport_agent_id: config.agent_id.clone(),
@@ -301,7 +273,7 @@ pub(crate) fn build_app_state_with_private_state(
         email,
         secret,
         process_history,
-        browser_runtime: browser_runtime_cell,
+        browser_runtime: Arc::new(crate::browser_runtime::BrowserRuntime::default()),
         config_runtime,
         runtime,
         started_at: chrono::Utc::now(),
@@ -347,7 +319,6 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         config,
         RuntimeModel::local_with_hub(profile, hub_enabled),
         false,
-        None,
     )?;
     state.skill_installs.recover(state.clone()).await?;
     crate::event_notifications::recover_event_notifications(&state).await?;
@@ -361,7 +332,8 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
     let secret = state.secret.clone();
     let email = EmailBackground::start(state.clone());
     let events = EventsBackground::start(state.clone());
-    let browser = BrowserBackground::start(state.clone());
+    crate::config_runtime::start_browser_listener(&state).await;
+    let browser = state.browser_runtime.clone();
     let mut local_task = tokio::spawn(listener.serve(state));
     let result = tokio::select! {
         result = &mut local_task => match result {
@@ -379,7 +351,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         let _ = task.await;
     }
     events.stop().await;
-    browser.stop().await;
+    browser.shutdown().await;
     email.stop().await;
     secret.shutdown().await;
     result

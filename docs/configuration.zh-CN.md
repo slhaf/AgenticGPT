@@ -238,7 +238,7 @@ agentic-gpt run
 | `room` | Room 仓库根目录、时区、日记日界线、维护策略及可选 Vaultwarden 密钥服务。 |
 | `email` | 单账户 IMAP/SMTP、同步间隔、本地内容保存限制和发送/垃圾箱策略；见[邮件使用指南](email.zh-CN.md)。 |
 | `tunnel` | Standalone tunnel-client 路径、secret 引用与可选 reporting。 |
-| `browser` | 可选的高级 Browser runtime 覆盖；Browser runtime 准备受 Browser 工具集开关控制。启用工具集且托管 runtime 自动 provisioning 已开启时，Agent 启动或运行中重新配置 Browser 后会在后台准备运行时；准备期间 Browser 工具仍保留，`browser.list` 报告 `runtimeAvailable=false`，其他需要运行时的操作返回 `browser_runtime_unavailable`。准备成功后自动可用；若没有可用的运行时，Agent 继续运行，Browser 保持不可用。`browser.managed.autoProvision` 默认 `false`。托管缓存位于 `~/.agentic_gpt/cache/browser-runtime/`；新版本准备并切换成功后清理不再使用的旧版本缓存。 |
+| `browser` | Agentic Browser 扩展连接的监听地址与配对密钥。Browser 工具集控制工具和监听，已连接浏览器可由 `browser.list` 查看。 |
 | `hub` | `enabled` 在 Standalone/Local 启用 Hub 辅助连接，默认 `false`；Hub 模式仍始终使用命令连接。Standalone 的上报由 `tunnel.hubReporting.enabled` 独立控制，但需要辅助连接开启才会发送。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
 | `events` | 持久事件收件箱中 `low` 严重级别事件的保留时长，以及内部事件严重级别覆盖。 |
@@ -297,7 +297,7 @@ agentic-gpt config manual --section config
 
 - `set` 替换值或整个子树；设置对象不会与旧对象自动合并。
 - `unset` 移除显式字段或 map 条目，恢复缺省；必需的 `mode/profile/toolsets/toolsets.enabled` 不可删除。
-- `add/remove` 仅用于目录标为集合的列表，添加已存在值或移除不存在值均无变化。集合包括工具集、命令/路径规则、Skills 允许主机及 HTTP 允许主机；有序的确认通道和 Browser 模块目录用 `set` 整体替换。
+- `add/remove` 仅用于目录标为集合的列表，添加已存在值或移除不存在值均无变化。集合包括工具集、命令/路径规则、Skills 允许主机及 HTTP 允许主机；有序的确认通道用 `set` 整体替换。
 - `null` 是值，和 `unset` 不同。例如 `shell.initFile=null` 禁用初始化文件，`unset` 恢复默认路径。CLI 的文本解析便利约定不改变 API 语义。
 
 整批操作完成后统一校验，成功才保存一次；操作或校验失败不保存本批变更。写入在 rename 后发生目录同步错误时，响应会区分文件已替换，不能把该错误解释为未保存。
@@ -487,41 +487,14 @@ public-origin editor、secret-reference editor 与 JSON array/`null` allow-host 
 交互式 editor；用户可在最终一次提交前修正或关闭 endpoint。Review 中 bearer 引用显示为
 `[REDACTED]`，但会显示 `publicUrl`；取消或校验失败不会写入任何内容。
 
-### Browser runtime 覆盖
+### Browser 扩展连接
 
-Browser 是否启用不由 runtime 配置决定，`toolsets.enabled` 仍具有权威性。没有
-`browser` section（或使用 `browser: {}`）时，普通 runtime discovery 不变。显式 descriptor
-用于开发、特殊部署或恢复等高级场景，不是普通 managed-runtime 安装路径。
-`codexCliPath` 可选，因为官方 Browser launcher 只有在可用时才会导出
-`CODEX_CLI_PATH`。配置 `runtime` 时其他 scalar 均必填，所有配置路径必须是绝对路径；
-`nodeModuleDirs` 默认为空列表：
+| 字段 | 用途 |
+|---|---|
+| `browser.listenAddr` | Agentic 接受扩展 WebSocket 连接的地址，默认 `127.0.0.1:39421`。 |
+| `browser.pairingToken` | 配对密钥。扩展连接该 Agentic 时提供这个值。配置 API 读取和交互式 Review 会对密钥脱敏。 |
 
-```json
-{
-  "browser": {
-    "runtime": {
-      "appVersion": "<official-runtime-version>",
-      "channel": "<runtime-channel>",
-      "nodeReplPath": "/absolute/path/to/node_repl",
-      "nodePath": "/absolute/path/to/node",
-      "browserClientPath": "/absolute/path/to/browser-client.mjs",
-      "browserServicePath": "/absolute/path/to/browser-service.mjs",
-      "codexHome": "/absolute/path/to/runtime-home",
-      "codexCliPath": "/optional/absolute/path/to/codex-or-compatible-cli",
-      "nodeModuleDirs": ["/absolute/path/to/node_modules"]
-    }
-  }
-}
-```
-
-显式 source 在启动或局部重配置时选择并具有权威性：
-
-- 无效 descriptor 会使 Browser runtime 不可用，不会回退到 Desktop discovery，但 Agentic 仍会
-  继续启动。只要 `browser` 工具集已启用，工具仍保留在能力列表中；需要 runtime 的调用返回
-  `browser_runtime_unavailable`，`browser.list` 报告不可用状态。
-- 修改它会协调重建 Browser runtime；旧租约与 JavaScript 会话可能失效。准备失败会报告组件错误，不能把配置保存成功视为 Browser 已可用。
-- `docsRoot` 与 `trustedCodePaths` 由内部派生，不是配置字段。
-- 本设置不管理 installer、downloader 或 runtime cache。
+启用 `toolsets.enabled` 中的 `browser` 并配置密钥后，Agentic 监听扩展连接。启用工具集后可以离线使用 `browser.manual`。用 `browser.list` 查看浏览器是否已连接、是否占用。安装和配对见 [Browser 部署指南](browser-self-hosted.zh-CN.md)。
 
 Local/Standalone 的 Unix MCP 路径位于 `~/.agentic_gpt/runtime/agent/<agentId>/`，Standalone supervisor 的运行时目录位于 `~/.agentic_gpt/runtime/tunnel/<agentId>/`。这些是按连接身份分隔的 runtime 路径；事件、Process 和 Skill 私有持久状态仍共享 `~/.agentic_gpt/state/`，不会随 `agentId` 切换。
 
@@ -971,7 +944,7 @@ Standalone、Local 和连接 Hub 的 Agent 共用串行配置应用协调。目�
 | `tunnel.hubReporting.enabled` | 更新后续报告是否发送，不重建或断开辅助连接；连接关闭时保留设置并暂停发送。 |
 | `tunnel.hubReporting.detail` | 更新后续报告策略，不重建 Tunnel 或 Hub 连接。 |
 | `httpMcp.*` | Standalone listener/auth 所有者协调监听与认证；不保留 MCP 会话。Local/Hub 模式不因此新增 TCP listener。 |
-| `browser.*`、Browser 工具集启停 | 协调发现、排空旧租约并替换 runtime；旧租约、JS 变量和会话可能失效，不重放网页动作。 |
+| `browser.*`、Browser 工具集启停 | 重新配置扩展监听和配对。关闭连接会使其租约失效，扩展可在配置允许时重新连接。 |
 | `email.account` | 排空在途邮件请求与同步，释放旧账户 owner 后切换；保留 Store、同步记录与发送结果，不自动重发。 |
 | `room.secret` 后端／启停／凭据 | 排空请求、停止旧 CLI/sync、释放 session 和账户锁，再允许新 owner 激活；保留加密缓存及使用记录，不重放写入。 |
 | `room.secret.getPolicy/upsertPolicy/deletePolicy/syncWaitTimeoutMs`、其余邮件设置 | 后续请求／同步使用新值；已准入操作保留各自策略和等待预算。 |

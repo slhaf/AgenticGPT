@@ -2052,7 +2052,7 @@ mod tests {
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state: private_state.clone(),
             process_history,
-            browser_runtime: Arc::new(crate::state::BrowserRuntimeSlot::default()),
+            browser_runtime: Arc::new(crate::browser_runtime::BrowserRuntime::default()),
             config_runtime: Arc::new(crate::config_runtime::ConfigRuntime::default()),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),

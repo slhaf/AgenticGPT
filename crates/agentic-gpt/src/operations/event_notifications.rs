@@ -502,7 +502,7 @@ mod tests {
             private_state: private_state.clone(),
             event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
-            browser_runtime: std::sync::Arc::new(crate::state::BrowserRuntimeSlot::default()),
+            browser_runtime: std::sync::Arc::new(crate::browser_runtime::BrowserRuntime::default()),
             config_runtime: std::sync::Arc::new(crate::config_runtime::ConfigRuntime::default()),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: Utc::now(),

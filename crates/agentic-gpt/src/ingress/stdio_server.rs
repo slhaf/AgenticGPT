@@ -8,7 +8,7 @@ mod stdio_transport;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use agentic_gpt_protocol::{
@@ -1448,46 +1448,24 @@ impl AgentMcpServer {
         }
         Ok(())
     }
-    async fn browser_runtime(&self) -> Option<Arc<crate::state::BrowserRuntimeContext>> {
-        let slot = self.state.browser_runtime.inner.lock().await;
-        let config = self.state.config.read().await.clone();
-        if !config
-            .toolsets
-            .is_enabled(crate::config::ToolNamespace::Browser)
-        {
-            return None;
-        }
-        slot.clone()
-    }
-
     async fn dispatch_browser_manual(&self, arguments: Value) -> Result<Value> {
         let args: BrowserManualArgs = from_value(arguments)?;
-        let Some(runtime) = self.browser_runtime().await else {
-            return Ok(browser_runtime_unavailable_value());
-        };
-
         let value = match args.action.as_str() {
-            "read" => match crate::browser_manual::read(
-                &runtime.descriptor.docs_root,
-                crate::browser_manual::ReadRequest {
-                    path: args.path.expect("validated browser.manual read path"),
-                    start_line: args.start_line,
-                    end_line: args.end_line,
-                },
-            ) {
+            "read" => match crate::browser_manual::read(crate::browser_manual::ReadRequest {
+                path: args.path.expect("validated browser.manual read path"),
+                start_line: args.start_line,
+                end_line: args.end_line,
+            }) {
                 Ok(response) => serde_json::to_value(response).unwrap_or_else(|error| {
                     browser_error_value(format!("browser_manual_serialize_failed:{error}"))
                 }),
                 Err(error) => browser_error_value(error),
             },
-            "search" => match crate::browser_manual::search(
-                &runtime.descriptor.docs_root,
-                crate::browser_manual::SearchRequest {
-                    query: args.query.expect("validated browser.manual search query"),
-                    max_results: args.max_results,
-                    context_lines: args.context_lines,
-                },
-            ) {
+            "search" => match crate::browser_manual::search(crate::browser_manual::SearchRequest {
+                query: args.query.expect("validated browser.manual search query"),
+                max_results: args.max_results,
+                context_lines: args.context_lines,
+            }) {
                 Ok(response) => serde_json::to_value(response).unwrap_or_else(|error| {
                     browser_error_value(format!("browser_manual_serialize_failed:{error}"))
                 }),
@@ -1503,26 +1481,23 @@ impl AgentMcpServer {
         let started = Instant::now();
         let name = args.name.clone();
         let idle_timeout_seconds = args.idle_timeout_seconds;
-        let runtime = self.browser_runtime().await;
+        let runtime = &self.state.browser_runtime;
         let runtime_app_version = runtime
-            .as_ref()
-            .map(|runtime| runtime.descriptor.app_version.clone());
-        let value = match runtime {
-            Some(runtime) => match runtime
-                .manager
-                .acquire(&name, Duration::from_secs(idle_timeout_seconds))
-                .await
-            {
-                Ok(()) => json!({
-                    "name": name,
-                    "state": "ready",
-                    "idleTimeoutSeconds": idle_timeout_seconds,
-                    "appVersion": runtime.descriptor.app_version,
-                    "channel": runtime.descriptor.channel,
-                }),
-                Err(error) => browser_error_value(error),
-            },
-            None => browser_runtime_unavailable_value(),
+            .browser_info(&args.browser_id)
+            .map(|info| info.extension_version);
+        let value = match runtime
+            .acquire(&args.browser_id, &name, idle_timeout_seconds)
+            .await
+        {
+            Ok(browser) => json!({
+                "name": name,
+                "state": "ready",
+                "idleTimeoutSeconds": idle_timeout_seconds,
+                "browserId": browser.browser_id,
+                "extensionVersion": browser.extension_version,
+                "apiVersion": browser.api_version,
+            }),
+            Err(error) => json!({"error": error}),
         };
         self.audit_browser(BrowserAuditContext {
             tool: "browser.acquire",
@@ -1549,25 +1524,19 @@ impl AgentMcpServer {
         let code_sha256 = Some(browser_sha256(&args.code));
         let timeout_ms = args.timeout_ms.unwrap_or(20_000);
         let title = args.title.as_deref().map(bounded_browser_title);
-        let runtime = self.browser_runtime().await;
+        let runtime = &self.state.browser_runtime;
         let runtime_app_version = runtime
-            .as_ref()
-            .map(|runtime| runtime.descriptor.app_version.clone());
-        let (mut value, pending_result) = match runtime {
-            Some(runtime) => match runtime.manager.repl(&name, &args.code, timeout_ms).await {
-                Ok(result) => match serde_json::to_value(&result) {
-                    Ok(value) if value.is_object() => (value, Some(result)),
-                    Ok(_) => (browser_error_value("browser_repl_result_invalid"), None),
-                    Err(error) => (
-                        browser_error_value(format!(
-                            "browser_repl_result_serialize_failed:{error}"
-                        )),
-                        None,
-                    ),
-                },
-                Err(error) => (browser_error_value(error), None),
+            .lease_browser_info(&name)
+            .map(|info| info.extension_version);
+        let (mut value, pending_result) = match runtime.repl(&name, &args.code, timeout_ms).await {
+            Ok(result) => match serde_json::to_value(&result) {
+                Ok(value) => (value, Some(result)),
+                Err(error) => (
+                    browser_error_value(format!("browser_repl_result_serialize_failed:{error}")),
+                    None,
+                ),
             },
-            None => (browser_runtime_unavailable_value(), None),
+            Err(error) => (json!({"error": error}), None),
         };
         self.audit_browser(BrowserAuditContext {
             tool: "browser.repl",
@@ -1587,7 +1556,7 @@ impl AgentMcpServer {
             let marker = self.stash_browser_repl_result(result);
             value
                 .as_object_mut()
-                .expect("serialized CallToolResult checked as object")
+                .expect("serialized CallToolResult is an object")
                 .insert(
                     BROWSER_REPL_RESULT_MARKER.to_string(),
                     Value::String(marker),
@@ -1600,16 +1569,13 @@ impl AgentMcpServer {
         let args: BrowserLeaseArgs = from_value(arguments)?;
         let started = Instant::now();
         let name = args.name;
-        let runtime = self.browser_runtime().await;
+        let runtime = &self.state.browser_runtime;
         let runtime_app_version = runtime
-            .as_ref()
-            .map(|runtime| runtime.descriptor.app_version.clone());
-        let value = match runtime {
-            Some(runtime) => match runtime.manager.reset(&name).await {
-                Ok(()) => json!({"name": name, "state": "ready"}),
-                Err(error) => browser_error_value(error),
-            },
-            None => browser_runtime_unavailable_value(),
+            .lease_browser_info(&name)
+            .map(|info| info.extension_version);
+        let value = match runtime.reset(&name).await {
+            Ok(()) => json!({"name": name, "state": "ready"}),
+            Err(error) => json!({"error": error}),
         };
         self.audit_browser(BrowserAuditContext {
             tool: "browser.reset",
@@ -1632,16 +1598,13 @@ impl AgentMcpServer {
         let args: BrowserLeaseArgs = from_value(arguments)?;
         let started = Instant::now();
         let name = args.name;
-        let runtime = self.browser_runtime().await;
+        let runtime = &self.state.browser_runtime;
         let runtime_app_version = runtime
-            .as_ref()
-            .map(|runtime| runtime.descriptor.app_version.clone());
-        let value = match runtime {
-            Some(runtime) => match runtime.manager.release(&name).await {
-                Ok(released) => json!({"name": name, "released": released}),
-                Err(error) => browser_error_value(error),
-            },
-            None => browser_runtime_unavailable_value(),
+            .lease_browser_info(&name)
+            .map(|info| info.extension_version);
+        let value = match runtime.release(&name).await {
+            Ok(released) => json!({"name": name, "released": released}),
+            Err(error) => json!({"error": error}),
         };
         self.audit_browser(BrowserAuditContext {
             tool: "browser.release",
@@ -1662,33 +1625,7 @@ impl AgentMcpServer {
 
     async fn dispatch_browser_list(&self, arguments: Value) -> Result<Value> {
         let _: EmptyArgs = from_value(arguments)?;
-        let Some(runtime) = self.browser_runtime().await else {
-            return Ok(browser_runtime_unavailable_list_value());
-        };
-        let mut leases = runtime
-            .manager
-            .list()
-            .await
-            .into_iter()
-            .map(browser_lease_value)
-            .collect::<Vec<_>>();
-        leases.sort_unstable_by(|left, right| {
-            left.get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .cmp(
-                    right
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                )
-        });
-        Ok(json!({
-            "runtimeAvailable": true,
-            "appVersion": runtime.descriptor.app_version,
-            "channel": runtime.descriptor.channel,
-            "leases": leases,
-        }))
+        Ok(serde_json::to_value(self.state.browser_runtime.list())?)
     }
 
     async fn audit_browser(&self, context: BrowserAuditContext) {
@@ -2250,6 +2187,7 @@ struct BrowserManualArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BrowserAcquireArgs {
+    browser_id: String,
     name: String,
     idle_timeout_seconds: u64,
 }
@@ -2644,6 +2582,11 @@ fn validate_browser_manual_args(
 }
 
 fn validate_browser_acquire_args(args: &BrowserAcquireArgs) -> Result<()> {
+    if args.browser_id.is_empty() {
+        return Err(anyhow::anyhow!(
+            "browser.acquire browserId must be nonempty"
+        ));
+    }
     if !(1..=86_400).contains(&args.idle_timeout_seconds) {
         return Err(anyhow::anyhow!(
             "browser.acquire idleTimeoutSeconds must be 1..=86400"
@@ -2675,17 +2618,6 @@ fn validate_browser_repl_args(args: &BrowserReplArgs) -> Result<()> {
         return Err(anyhow::anyhow!("browser.repl title exceeds 128 characters"));
     }
     Ok(())
-}
-
-fn browser_runtime_unavailable_value() -> Value {
-    browser_error_value("browser_runtime_unavailable")
-}
-
-fn browser_runtime_unavailable_list_value() -> Value {
-    json!({
-        "runtimeAvailable": false,
-        "leases": [],
-    })
 }
 
 fn browser_error_value(reason: impl std::fmt::Display) -> Value {
@@ -2796,26 +2728,6 @@ fn browser_report_arguments(arguments: &Value) -> Value {
         );
     }
     Value::Object(reported)
-}
-
-fn browser_lease_value(snapshot: crate::browser_manager::BrowserLeaseSnapshot) -> Value {
-    let mut value = json!({
-        "name": snapshot.name,
-        "state": browser_state_label(snapshot.state),
-        "idleTimeoutSeconds": snapshot.idle_timeout.as_secs().min(86_400),
-    });
-    if let Some(remaining) = snapshot.remaining_idle {
-        value["remainingIdleSeconds"] = json!(remaining.as_secs().min(86_400));
-    }
-    value
-}
-
-fn browser_state_label(state: crate::browser_manager::BrowserLeaseState) -> &'static str {
-    match state {
-        crate::browser_manager::BrowserLeaseState::Initializing => "initializing",
-        crate::browser_manager::BrowserLeaseState::Ready => "ready",
-        crate::browser_manager::BrowserLeaseState::Closing => "closing",
-    }
 }
 
 enum FileReadRequests {

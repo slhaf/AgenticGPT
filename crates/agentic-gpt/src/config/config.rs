@@ -10,7 +10,7 @@ pub(crate) use email::{EmailAccountConfig, EmailConfig, EmailPolicy, EmailTls};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
-use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -339,62 +339,45 @@ impl Default for HubConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct BrowserConfig {
+    #[serde(default = "default_browser_listen_addr")]
+    pub(crate) listen_addr: SocketAddr,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) runtime: Option<ExplicitBrowserRuntimeConfig>,
-    #[serde(default, skip_serializing_if = "ManagedBrowserConfig::is_default")]
-    pub(crate) managed: ManagedBrowserConfig,
+    pub(crate) pairing_token: Option<String>,
 }
 
-impl BrowserConfig {
-    fn is_empty(&self) -> bool {
-        self.runtime.is_none() && self.managed.is_default()
-    }
+fn default_browser_listen_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 39421))
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ManagedBrowserConfig {
-    #[serde(default = "default_managed_browser_enabled")]
-    pub(crate) enabled: bool,
-    #[serde(default)]
-    pub(crate) auto_provision: bool,
-}
-
-impl Default for ManagedBrowserConfig {
+impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
-            enabled: default_managed_browser_enabled(),
-            auto_provision: false,
+            listen_addr: default_browser_listen_addr(),
+            pairing_token: None,
         }
     }
 }
 
-impl ManagedBrowserConfig {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
+impl fmt::Debug for BrowserConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserConfig")
+            .field("listen_addr", &self.listen_addr)
+            .field(
+                "pairing_token",
+                &self.pairing_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
     }
 }
 
-fn default_managed_browser_enabled() -> bool {
-    true
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ExplicitBrowserRuntimeConfig {
-    pub(crate) app_version: Option<String>,
-    pub(crate) channel: Option<String>,
-    pub(crate) node_repl_path: Option<String>,
-    pub(crate) node_path: Option<String>,
-    pub(crate) browser_client_path: Option<String>,
-    pub(crate) browser_service_path: Option<String>,
-    pub(crate) codex_home: Option<String>,
-    pub(crate) codex_cli_path: Option<String>,
-    #[serde(default)]
-    pub(crate) node_module_dirs: Vec<String>,
+impl BrowserConfig {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1718,6 +1701,14 @@ impl Config {
     }
 
     pub(crate) fn validate_local(&self) -> Result<()> {
+        if self
+            .browser
+            .pairing_token
+            .as_ref()
+            .is_some_and(|token| token.is_empty() || token.trim() != token)
+        {
+            return Err(anyhow!("browser_pairing_token_invalid"));
+        }
         self.events.validate()?;
         self.email.validate()?;
         self.room.secret.validate()?;
@@ -1897,6 +1888,12 @@ fn prune_sparse_value(value: &mut Value, defaults: &Value, root: bool) {
 }
 
 pub(crate) fn redact_config_secrets(value: &mut Value) {
+    if let Some(token) = value
+        .pointer_mut("/browser/pairingToken")
+        .filter(|token| !token.is_null())
+    {
+        *token = Value::String("[REDACTED]".to_owned());
+    }
     if let Some(key) = value.pointer_mut("/tunnel/apiKey") {
         *key = Value::String("[REDACTED]".to_owned());
     }
@@ -3306,50 +3303,22 @@ mod tests {
     }
 
     #[test]
-    fn explicit_browser_runtime_round_trips_through_sparse_write_and_import() {
+    fn browser_pairing_round_trips_through_config_write_and_import() {
         let mut config = Config::default_config().unwrap();
-        config.browser.runtime = Some(ExplicitBrowserRuntimeConfig {
-            app_version: Some("26.1.2".to_string()),
-            channel: Some("prod".to_string()),
-            node_repl_path: Some("/opt/runtime/node_repl".to_string()),
-            node_path: Some("/opt/runtime/node".to_string()),
-            browser_client_path: Some("/opt/runtime/chrome/scripts/browser-client.mjs".to_string()),
-            browser_service_path: Some(
-                "/opt/runtime/chrome/scripts/browser-service.mjs".to_string(),
-            ),
-            codex_home: Some("/opt/runtime/home".to_string()),
-            codex_cli_path: Some("/opt/runtime/codex".to_string()),
-            node_module_dirs: vec!["/opt/runtime/modules".to_string()],
-        });
+        config.browser.listen_addr = "127.0.0.1:42424".parse().unwrap();
+        config.browser.pairing_token = Some("test-pairing-token".to_owned());
         let path = temp_config_path();
         write_config_with_backup(&path, &config).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.browser, config.browser);
         assert_eq!(
-            sparse_config_value(&loaded, false).unwrap()["browser"],
-            serde_json::to_value(&config.browser).unwrap()
+            Config::import(&path).unwrap().config.browser,
+            config.browser
         );
-        let imported = Config::import(&path).unwrap();
-        assert_eq!(imported.config.browser, config.browser);
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn managed_browser_policy_round_trips_non_default_values() {
-        let mut config = Config::default_config().unwrap();
-        config.browser.managed.enabled = false;
-        config.browser.managed.auto_provision = true;
-
-        let path = temp_config_path();
-        write_config_with_backup(&path, &config).unwrap();
-        let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(written["browser"]["managed"]["enabled"], json!(false));
-        assert_eq!(written["browser"]["managed"]["autoProvision"], json!(true));
-
-        let loaded = Config::load(&path).unwrap();
-        assert_eq!(loaded.browser.managed, config.browser.managed);
-        let imported = Config::import(&path).unwrap();
-        assert_eq!(imported.config.browser.managed, config.browser.managed);
+        assert_eq!(
+            sparse_config_value(&loaded, true).unwrap()["browser"]["pairingToken"],
+            "[REDACTED]"
+        );
         let _ = fs::remove_file(path);
     }
 }

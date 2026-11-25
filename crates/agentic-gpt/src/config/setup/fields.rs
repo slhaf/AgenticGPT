@@ -49,9 +49,6 @@ impl SetupField {
                 let Some(entry) = entries.get(index) else {
                     return Vec::new();
                 };
-                if entry.kind == "object" {
-                    return vec!["automatic".into(), "explicit".into()];
-                }
                 if !entry.choices.is_empty() {
                     return entry.choices.clone();
                 }
@@ -100,6 +97,11 @@ impl SetupField {
 
     /// Fields containing secret values or references and shown with masked input.
     pub(crate) fn is_secret_reference(self) -> bool {
+        if let Self::Catalog(index) = self {
+            return super::model::catalog_entries()
+                .get(index)
+                .is_some_and(|entry| entry.sensitive);
+        }
         matches!(
             self,
             Self::HttpMcpBearerToken

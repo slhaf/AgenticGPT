@@ -32,7 +32,7 @@ install -d ~/.local/bin
 install -m 0755 agentic-gpt ~/.local/bin/
 ```
 
-Ensure `~/.local/bin` is in `PATH`. Archives also contain `agentic-gpt-hub` and `agentic-browser-host` for Hub deployments and a self-hosted Browser backend respectively; install them as needed.
+Ensure `~/.local/bin` is in `PATH`. Archives also contain `agentic-gpt-hub` for Hub deployments. Install the Agentic Browser extension in the Chrome profile you want to control.
 
 **Before upgrading an older deployment to 0.11.0, read the [release notes and upgrade steps](docs/release-notes-v0.11.0.md).**
 

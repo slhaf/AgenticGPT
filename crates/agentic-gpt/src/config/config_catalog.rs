@@ -35,7 +35,10 @@ pub(crate) fn snapshot(config: &Config) -> Result<Value> {
     if value["shell"].get("initFile").is_none() {
         value["shell"]["initFile"] = json!(config::DEFAULT_SHELL_INIT_FILE);
     }
-    value["browser"] = json!({"managed":config.browser.managed,"runtime":config.browser.runtime});
+    value["browser"] = json!({
+        "listenAddr": config.browser.listen_addr,
+        "pairingToken": config.browser.pairing_token,
+    });
     if value.get("tunnel").is_none() {
         value["tunnel"] = Value::Null;
     }
@@ -86,6 +89,7 @@ fn sensitive_leaf(path: &[String]) -> bool {
         parts.as_slice(),
         ["hub", "agentSecret"]
             | ["httpMcp", "bearerToken"]
+            | ["browser", "pairingToken"]
             | ["tunnel", "apiKey"]
             | ["email", "account", "password"]
             | [
@@ -142,31 +146,11 @@ pub(crate) fn field_label(path: &[String], language: UiLanguage) -> Option<&'sta
             ("Configuration API update approval", "配置 API 修改确认策略")
         }
         ["backupLimit"] => ("Configuration backups to keep", "配置备份保留上限"),
-        ["browser", "managed", "enabled"] => {
-            ("Use managed browser runtime", "使用托管浏览器运行环境")
-        }
-        ["browser", "managed", "autoProvision"] => (
-            "Automatically prepare browser runtime",
-            "自动准备浏览器运行环境",
+        ["browser", "listenAddr"] => (
+            "Browser WebSocket listen address",
+            "浏览器 WebSocket 监听地址",
         ),
-        ["browser", "runtime"] => ("Explicit browser runtime", "显式浏览器运行环境"),
-        ["browser", "runtime", "appVersion"] => ("Application version", "应用版本"),
-        ["browser", "runtime", "channel"] => ("Release channel", "发布通道"),
-        ["browser", "runtime", "nodeReplPath"] => ("Node REPL entry path", "Node REPL 入口路径"),
-        ["browser", "runtime", "nodePath"] => ("Node.js executable path", "Node.js 可执行文件路径"),
-        ["browser", "runtime", "browserClientPath"] => {
-            ("Browser client module path", "浏览器客户端模块路径")
-        }
-        ["browser", "runtime", "browserServicePath"] => {
-            ("Browser service entry path", "浏览器服务入口路径")
-        }
-        ["browser", "runtime", "codexHome"] => ("Codex data directory", "Codex 数据目录"),
-        ["browser", "runtime", "codexCliPath"] => {
-            ("Codex CLI executable path", "Codex CLI 可执行文件路径")
-        }
-        ["browser", "runtime", "nodeModuleDirs"] => {
-            ("Node module search directories", "Node 模块查找目录")
-        }
+        ["browser", "pairingToken"] => ("Browser pairing token", "浏览器配对密钥"),
         ["skills", "maxFiles"] => ("Maximum files per skill package", "技能包文件数上限"),
         ["skills", "maxFileBytes"] => (
             "Maximum skill file size (bytes)",
@@ -236,10 +220,8 @@ fn description(path: &[String]) -> String {
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
         ["config", "updatePolicy"] => "allow 允许配置 API 修改；confirm 必须取得明确批准。确认不可用、拒绝、超时或取消均不写入；修改本策略按修改前的有效值授权。",
-        ["browser", "managed", "enabled"] => "允许使用托管 Browser 运行环境；禁用不影响显式配置的运行环境。变更可能需要重建 Browser 租约。",
-        ["browser", "managed", "autoProvision"] => "允许 Browser 在首次需要时准备缺失依赖；准备结果仍受本机环境影响。",
-        ["browser", "runtime", "nodeModuleDirs"] => "按顺序设置 Node 模块查找目录；使用 set 替换有序列表。",
-        ["browser", "runtime", _] => "显式 Browser 运行环境字段；null 表示未指定。变更后重建运行环境，旧租约可能失效。路径与外部依赖会在准备或调用时检查。",
+        ["browser", "listenAddr"] => "接受扩展 WebSocket 连接的 IP 地址和端口。默认仅监听本机。",
+        ["browser", "pairingToken"] => "用于认证浏览器扩展。设置密钥并启用 Browser 工具集后开始监听，查询和预览会脱敏。",
         ["mcpServers"] => "以服务 ID 为 key 的映射。ID 可含点、下划线和连字符，长度 1–64；用真实路径段寻址。新建条目必须包含 enabled、transport 及对应 url。",
         ["mcpServers", "{serverId}", "transport"] => "streamable-http 使用 HTTP(S) URL；stdio 使用启动命令且不支持 bearer auth。新调用使用新配置，进行中调用保持原快照。",
         ["mcpServers", "{serverId}", "auth", "token"] => "Bearer token；查询、预览和报告脱敏，stdio 传输不允许设置 auth。",
@@ -256,8 +238,8 @@ fn description(path: &[String]) -> String {
 fn shape() -> Result<Value> {
     let mut value = serde_json::to_value(Config::default_config()?)?;
     value["browser"] = json!({
-        "managed": serde_json::to_value(config::ManagedBrowserConfig::default())?,
-        "runtime": serde_json::to_value(serde_json::from_value::<config::ExplicitBrowserRuntimeConfig>(json!({}))?)?
+        "listenAddr": config::BrowserConfig::default().listen_addr,
+        "pairingToken": null,
     });
     value["shell"] = json!({"initFile": null});
     value["tunnel"] = serde_json::to_value(config::TunnelConfig::default())?;
@@ -319,7 +301,7 @@ pub(crate) fn entries() -> Result<Vec<ConfigEntry>> {
                         .map(String::as_str)
                         .collect::<Vec<_>>()
                         .as_slice(),
-                    ["browser", "runtime"] | ["email", "account"] | ["tunnel"]
+                    ["email", "account"] | ["tunnel"]
                 );
             let choices = match path
                 .iter()
@@ -490,7 +472,7 @@ fn chapter(section: &str) -> &'static str {
         "http-mcp" => "HTTP MCP 入口属于 standalone。监听和认证由 HTTP owner 更新；旧已接纳请求完成后关闭旧会话。新地址绑定失败尽可能保留旧监听；外部凭据引用仍须可解析。",
         "mcp" => "这是以稳定 server ID 为 key 的映射。ID 中的点是一个路径段；用同一批操作补齐 enabled、transport、url 及可选 auth。下游客户端按调用创建，进行中调用保留原快照。",
         "tunnel" => "Tunnel 身份、凭据和客户端启动参数保存后须手动重启；hubReporting.enabled 控制运行上报，detail 更新报告内容策略，二者都不控制或断开 Hub 辅助连接。连接关闭时保留上报设置并暂停发送。自动故障恢复沿用原启动契约。",
-        "browser" => "显式 runtime 优先于托管发现。字段修改会准备新运行环境并排空旧调用，重建后旧租约失效；准备失败保留可用旧 owner，不重放浏览器操作。",
+        "browser" => "Browser 工具集与配对密钥启用扩展监听。改地址或密钥后连接和租约需要重新建立；扩展可以重连。",
         "email" => "工具集可先启用，调用邮件工具前需填写完整 account；密码使用 env:/file: 引用。不完整账户不会开始后台同步。账户切换等待在途操作结束并释放旧 owner，保留邮件存储；其他设置按新请求快照使用，不重放发送。",
         "room" => "仓库路径切换只切换并初始化新目标，不迁移已有内容。Secret 后端和凭据由自身 owner 重新建立；策略及 syncWaitTimeoutMs 直接更新，已接纳请求保留快照。",
         "skills" => "新安装读取新的限制；并发上限降低不取消正在运行的安装，待其完成后逐步达到新上限。",

@@ -4,16 +4,6 @@ mod agent_info;
 mod audit;
 #[path = "room/bootstrap.rs"]
 mod bootstrap;
-#[path = "browser/browser_config_server.rs"]
-mod browser_config_server;
-#[path = "browser/browser_discovery.rs"]
-mod browser_discovery;
-#[path = "browser/browser_distribution.rs"]
-mod browser_distribution;
-#[path = "browser/browser_kernel.rs"]
-mod browser_kernel;
-#[path = "browser/browser_manager.rs"]
-mod browser_manager;
 #[path = "browser/browser_manual.rs"]
 mod browser_manual;
 #[path = "browser/browser_runtime.rs"]
@@ -125,13 +115,6 @@ use anyhow::Result;
 pub(crate) use config::WorkerProfile;
 
 fn main() -> Result<()> {
-    if std::env::var_os("AGENTIC_BROWSER_CONFIG_ADAPTER").is_some() {
-        match std::env::args().nth(1).as_deref() {
-            Some("app-server") => return browser_config_server::run(),
-            Some("sandbox") => std::process::exit(1),
-            _ => {}
-        }
-    }
     // Keep Obscura and V8 on a short-lived, single-threaded worker lifecycle.
     if std::env::args().nth(1).as_deref() == Some("__email-render-worker") {
         return email_render::worker();

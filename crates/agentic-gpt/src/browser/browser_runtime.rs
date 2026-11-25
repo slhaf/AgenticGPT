@@ -1,558 +1,712 @@
-use anyhow::{anyhow, Result};
-use serde_json::Value;
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::config::ExplicitBrowserRuntimeConfig;
+use anyhow::Context;
+use futures_util::{SinkExt, StreamExt};
+use parking_lot::Mutex;
+use rmcp::model::CallToolResult;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct BrowserRuntimeDescriptor {
-    pub(crate) app_version: String,
-    pub(crate) channel: String,
-    pub(crate) node_repl_path: PathBuf,
-    pub(crate) node_path: PathBuf,
-    pub(crate) browser_client_path: PathBuf,
-    pub(crate) browser_service_path: PathBuf,
-    pub(crate) codex_home: PathBuf,
-    pub(crate) codex_cli_path: Option<PathBuf>,
-    pub(crate) node_module_dirs: Vec<PathBuf>,
-    pub(crate) trusted_code_paths: Vec<PathBuf>,
-    pub(crate) docs_root: PathBuf,
+const API_VERSION: u32 = 1;
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+
+type Reply = Result<Value, BrowserError>;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct BrowserError {
+    pub(crate) code: String,
+    pub(crate) message: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct NodeReplLaunchSpec {
-    pub(crate) program: PathBuf,
-    pub(crate) cwd: PathBuf,
-    pub(crate) env_overrides: BTreeMap<String, String>,
-}
-
-pub(crate) fn build_node_repl_launch_spec(
-    runtime: &BrowserRuntimeDescriptor,
-    base_env: &BTreeMap<String, String>,
-) -> Result<NodeReplLaunchSpec> {
-    let cwd = runtime
-        .browser_client_path
-        .parent()
-        .and_then(Path::parent)
-        .filter(|path| {
-            path.components()
-                .any(|component| matches!(component, Component::Normal(_)))
-        })
-        .ok_or_else(|| anyhow!("browser_runtime_cwd_invalid"))?
-        .to_path_buf();
-
-    let node_path = path_to_env_string(&runtime.node_path, "node_path")?;
-    let codex_home = path_to_env_string(&runtime.codex_home, "codex_home")?;
-    let browser_service_path =
-        path_to_env_string(&runtime.browser_service_path, "browser_service_path")?;
-
-    let mut trusted_code_paths = Vec::new();
-    if let Some(value) = base_env.get("NODE_REPL_TRUSTED_CODE_PATHS") {
-        trusted_code_paths.extend(std::env::split_paths(value));
-    }
-    for path in &runtime.trusted_code_paths {
-        if !trusted_code_paths.contains(path) {
-            trusted_code_paths.push(path.clone());
+impl BrowserError {
+    fn new(code: &str, message: &str) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
         }
     }
-    let trusted_code_paths = std::env::join_paths(&trusted_code_paths)
-        .map_err(|_| anyhow!("browser_runtime_trusted_code_paths_invalid"))?
-        .to_str()
-        .ok_or_else(|| anyhow!("browser_runtime_trusted_code_paths_invalid"))?
-        .to_string();
 
-    let mut env_overrides = base_env.clone();
-    env_overrides.insert(
-        "NODE_REPL_TRUSTED_CODE_PATHS".to_string(),
-        trusted_code_paths,
-    );
-    env_overrides.insert("NODE_REPL_NODE_PATH".to_string(), node_path);
-    env_overrides.insert("CODEX_HOME".to_string(), codex_home);
-    if let Some(codex_cli_path) = runtime.codex_cli_path.as_deref() {
-        env_overrides.insert(
-            "CODEX_CLI_PATH".to_string(),
-            path_to_env_string(codex_cli_path, "codex_cli_path")?,
-        );
-    }
-    env_overrides.insert(
-        "BROWSER_USE_CODEX_APP_VERSION".to_string(),
-        runtime.app_version.clone(),
-    );
-    env_overrides.insert(
-        "BROWSER_USE_CODEX_APP_BUILD_FLAVOR".to_string(),
-        runtime.channel.clone(),
-    );
-
-    let mut trusted_services = match base_env.get("NODE_REPL_TRUSTED_SERVICES") {
-        Some(value) => serde_json::from_str(value)
-            .map_err(|_| anyhow!("browser_runtime_trusted_services_invalid"))?,
-        None => Value::Object(serde_json::Map::new()),
-    };
-    trusted_services
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("browser_runtime_trusted_services_invalid"))?
-        .insert("browser".to_string(), Value::String(browser_service_path));
-    let trusted_services = serde_json::to_string(&trusted_services)
-        .map_err(|_| anyhow!("browser_runtime_trusted_services_invalid"))?;
-    env_overrides.insert("NODE_REPL_TRUSTED_SERVICES".to_string(), trusted_services);
-
-    if !runtime.node_module_dirs.is_empty() {
-        let joined = std::env::join_paths(&runtime.node_module_dirs)
-            .map_err(|_| anyhow!("browser_runtime_node_module_dirs_invalid"))?;
-        let joined = joined
-            .to_str()
-            .ok_or_else(|| anyhow!("browser_runtime_path_not_utf8:node_module_dirs"))?;
-        env_overrides.insert("NODE_REPL_NODE_MODULE_DIRS".to_string(), joined.to_string());
+    fn disconnected() -> Self {
+        Self::new("browser_disconnected", "Browser connection closed")
     }
 
-    Ok(NodeReplLaunchSpec {
-        program: runtime.node_repl_path.clone(),
-        cwd,
-        env_overrides,
-    })
-}
-
-fn path_to_env_string(path: &Path, field: &str) -> Result<String> {
-    path.to_str()
-        .map(ToString::to_string)
-        .ok_or_else(|| anyhow!("browser_runtime_path_not_utf8:{field}"))
-}
-
-pub(crate) fn default_desktop_registry_path() -> Result<PathBuf> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow!("browser_runtime_home_directory_unavailable"))?;
-    Ok(home.join(".local/state/openai-codex/chrome-native-hosts-v2.json"))
-}
-
-pub(crate) fn discover_desktop_runtime(registry_path: &Path) -> Result<BrowserRuntimeDescriptor> {
-    let bytes =
-        fs::read(registry_path).map_err(|_| anyhow!("browser_runtime_registry_read_failed"))?;
-    let registry: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| anyhow!("browser_runtime_registry_invalid_json"))?;
-    let registry = registry
-        .as_object()
-        .ok_or_else(|| anyhow!("browser_runtime_registry_invalid_structure"))?;
-    let entries = registry
-        .get("entries")
-        .ok_or_else(|| anyhow!("browser_runtime_entries_missing"))?
-        .as_array()
-        .ok_or_else(|| anyhow!("browser_runtime_entries_invalid"))?;
-    if entries.is_empty() {
-        return Err(anyhow!("browser_runtime_entries_empty"));
+    fn expired() -> Self {
+        Self::new("browser_lease_expired", "Browser lease is no longer active")
     }
 
-    let selected = entries
-        .iter()
-        .filter_map(|entry| {
-            let entry = entry.as_object()?;
-            let updated_at = entry.get("updatedAt")?.as_str()?;
-            (!updated_at.is_empty()).then_some((updated_at, entry))
-        })
-        .max_by(|(left, _), (right, _)| left.cmp(right))
-        .map(|(_, entry)| entry)
-        .ok_or_else(|| anyhow!("browser_runtime_updated_at_unusable"))?;
-
-    let app_version = required_string(selected.get("appVersion"), "appVersion")?;
-    let channel = required_string(selected.get("channel"), "channel")?;
-    required_string(selected.get("updatedAt"), "updatedAt")?;
-
-    let paths = selected
-        .get("paths")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("browser_runtime_paths_invalid"))?;
-    let node_repl_path = required_path(paths.get("nodeReplPath"), "paths.nodeReplPath")?;
-    let node_path = required_path(paths.get("nodePath"), "paths.nodePath")?;
-    let browser_client_path =
-        required_path(paths.get("browserClientPath"), "paths.browserClientPath")?;
-    let browser_service_path =
-        required_path(paths.get("browserServicePath"), "paths.browserServicePath")?;
-    let codex_home = required_path(paths.get("codexHome"), "paths.codexHome")?;
-    let codex_cli_path = optional_path(paths.get("codexCliPath"), "paths.codexCliPath")?;
-    let node_module_dirs = optional_path_list(paths.get("nodeModuleDirs"))?;
-    let trusted_code_paths = derive_trusted_code_paths(&codex_home, &node_module_dirs);
-    let docs_root = derive_docs_root(&browser_client_path)?;
-
-    Ok(BrowserRuntimeDescriptor {
-        app_version,
-        channel,
-        node_repl_path,
-        node_path,
-        browser_client_path,
-        browser_service_path,
-        codex_home,
-        codex_cli_path,
-        node_module_dirs,
-        trusted_code_paths,
-        docs_root,
-    })
-}
-
-pub(crate) fn explicit_runtime_descriptor(
-    config: &ExplicitBrowserRuntimeConfig,
-) -> Result<BrowserRuntimeDescriptor> {
-    let app_version = explicit_string(config.app_version.as_deref(), "appVersion")?;
-    let channel = explicit_string(config.channel.as_deref(), "channel")?;
-    let node_repl_path = explicit_path(config.node_repl_path.as_deref(), "nodeReplPath")?;
-    let node_path = explicit_path(config.node_path.as_deref(), "nodePath")?;
-    let browser_client_path =
-        explicit_path(config.browser_client_path.as_deref(), "browserClientPath")?;
-    let browser_service_path =
-        explicit_path(config.browser_service_path.as_deref(), "browserServicePath")?;
-    let codex_home = explicit_path(config.codex_home.as_deref(), "codexHome")?;
-    let codex_cli_path = explicit_optional_path(config.codex_cli_path.as_deref(), "codexCliPath")?;
-    let node_module_dirs = config
-        .node_module_dirs
-        .iter()
-        .enumerate()
-        .map(|(index, path)| explicit_path(Some(path), &format!("nodeModuleDirs[{index}]")))
-        .collect::<Result<Vec<_>>>()?;
-    let trusted_code_paths = derive_trusted_code_paths(&codex_home, &node_module_dirs);
-    let docs_root = derive_docs_root(&browser_client_path)
-        .map_err(|_| anyhow!("browser_runtime_explicit_docs_root_invalid"))?;
-
-    Ok(BrowserRuntimeDescriptor {
-        app_version,
-        channel,
-        node_repl_path,
-        node_path,
-        browser_client_path,
-        browser_service_path,
-        codex_home,
-        codex_cli_path,
-        node_module_dirs,
-        trusted_code_paths,
-        docs_root,
-    })
-}
-
-fn explicit_string(value: Option<&str>, field: &str) -> Result<String> {
-    let value = value.ok_or_else(|| anyhow!("browser_runtime_explicit_required:{field}"))?;
-    if value.is_empty() {
-        return Err(anyhow!("browser_runtime_explicit_empty:{field}"));
+    fn invalid_result() -> Self {
+        Self::new(
+            "browser_result_invalid",
+            "Browser returned an invalid result",
+        )
     }
-    Ok(value.to_string())
 }
 
-fn explicit_path(value: Option<&str>, field: &str) -> Result<PathBuf> {
-    let value = explicit_string(value, field)?;
-    let path = PathBuf::from(&value);
-    if !path.is_absolute() {
-        return Err(anyhow!("browser_runtime_explicit_relative:{field}"));
-    }
-    Ok(path)
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserInfo {
+    pub(crate) browser_id: String,
+    pub(crate) browser_name: String,
+    pub(crate) extension_version: String,
+    pub(crate) api_version: u32,
+    pub(crate) connected: bool,
+    pub(crate) busy: bool,
 }
 
-fn explicit_optional_path(value: Option<&str>, field: &str) -> Result<Option<PathBuf>> {
-    value
-        .map(|value| explicit_path(Some(value), field))
-        .transpose()
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LeaseInfo {
+    name: String,
+    browser_id: String,
 }
 
-pub(crate) fn derive_trusted_code_paths(
-    codex_home: &Path,
-    node_module_dirs: &[PathBuf],
-) -> Vec<PathBuf> {
-    let mut paths = Vec::with_capacity(1 + node_module_dirs.len());
-    for path in std::iter::once(codex_home).chain(node_module_dirs.iter().map(PathBuf::as_path)) {
-        if !paths.contains(&path.to_path_buf()) {
-            paths.push(path.to_path_buf());
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserList {
+    runtime_available: bool,
+    browsers: Vec<BrowserInfo>,
+    leases: Vec<LeaseInfo>,
+}
+
+#[derive(Clone)]
+struct Connection {
+    id: Uuid,
+    info: BrowserInfo,
+    requests: mpsc::Sender<Request>,
+    stop: CancellationToken,
+}
+
+struct Lease {
+    connection: Uuid,
+    browser_id: String,
+    id: Option<String>,
+    acquiring: bool,
+}
+
+#[derive(Default)]
+struct Registry {
+    connections: BTreeMap<String, Connection>,
+    offline_browsers: BTreeMap<String, BrowserInfo>,
+    leases: BTreeMap<String, Lease>,
+}
+
+impl Registry {
+    fn disconnect(&mut self, connection: &Connection) {
+        let browser_id = &connection.info.browser_id;
+        if self.connections.get(browser_id).map(|entry| entry.id) == Some(connection.id) {
+            let mut info = self
+                .connections
+                .remove(browser_id)
+                .expect("matched connection")
+                .info;
+            info.connected = false;
+            info.busy = false;
+            self.offline_browsers.insert(browser_id.clone(), info);
         }
-    }
-    paths
-}
-
-fn required_string(value: Option<&Value>, field: &str) -> Result<String> {
-    let value = value.ok_or_else(|| anyhow!("browser_runtime_required_field_missing:{field}"))?;
-    let value = value
-        .as_str()
-        .ok_or_else(|| anyhow!("browser_runtime_required_field_invalid:{field}"))?;
-    if value.is_empty() {
-        return Err(anyhow!("browser_runtime_required_field_empty:{field}"));
-    }
-    Ok(value.to_string())
-}
-
-fn required_path(value: Option<&Value>, field: &str) -> Result<PathBuf> {
-    Ok(PathBuf::from(required_string(value, field)?))
-}
-
-fn optional_path(value: Option<&Value>, field: &str) -> Result<Option<PathBuf>> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => required_string(Some(value), field)
-            .map(PathBuf::from)
-            .map(Some),
-    }
-}
-
-fn optional_path_list(value: Option<&Value>) -> Result<Vec<PathBuf>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let values = value
-        .as_array()
-        .ok_or_else(|| anyhow!("browser_runtime_node_module_dirs_invalid"))?;
-    values
-        .iter()
-        .map(|value| {
-            required_string(Some(value), "paths.nodeModuleDirs")
-                .map(PathBuf::from)
-                .map_err(|_| anyhow!("browser_runtime_node_module_dirs_invalid"))
-        })
-        .collect()
-}
-
-pub(crate) fn derive_docs_root(browser_client_path: &Path) -> Result<PathBuf> {
-    let bundle_root = browser_client_path
-        .parent()
-        .and_then(|parent| parent.parent())
-        .filter(|path| {
-            path.components()
-                .any(|component| matches!(component, Component::Normal(_)))
-        })
-        .ok_or_else(|| anyhow!("browser_runtime_docs_root_invalid"))?;
-    Ok(bundle_root.join("docs"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
-
-    fn fixture_path(label: &str) -> PathBuf {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "agentic-gpt-browser-runtime-{label}-{}-{timestamp}-{id}.json",
-            std::process::id()
-        ))
+        self.leases
+            .retain(|_, lease| lease.connection != connection.id);
     }
 
-    fn write_fixture(label: &str, value: Value) -> PathBuf {
-        let path = fixture_path(label);
-        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        path
-    }
-
-    fn valid_entry(updated_at: &str, bundle: &str, include_node_module_dirs: bool) -> Value {
-        let mut paths = json!({
-            "nodeReplPath": format!("/opt/openai/{bundle}/scripts/node-repl.mjs"),
-            "nodePath": format!("/opt/openai/{bundle}/bin/node"),
-            "browserClientPath": format!("/opt/openai/{bundle}/scripts/browser-client.mjs"),
-            "browserServicePath": format!("/opt/openai/{bundle}/scripts/browser-service.mjs"),
-            "codexHome": format!("/opt/openai/{bundle}/codex"),
-            "codexCliPath": format!("/opt/openai/{bundle}/bin/codex"),
+    fn lease_ended(&mut self, connection: Uuid, lease_id: &str) {
+        self.leases.retain(|_, lease| {
+            if lease.connection == connection && lease.id.as_deref() == Some(lease_id) {
+                lease.id = None;
+                return lease.acquiring;
+            }
+            true
         });
-        if include_node_module_dirs {
-            paths["nodeModuleDirs"] = json!([
-                format!("/opt/openai/{bundle}/node_modules"),
-                format!("/opt/openai/{bundle}/shared/node_modules")
-            ]);
+    }
+
+    fn acquire_failed(&mut self, name: &str, connection: Uuid) {
+        if let Some(lease) = self
+            .leases
+            .get_mut(name)
+            .filter(|lease| lease.connection == connection)
+        {
+            if lease.id.is_some() {
+                lease.acquiring = false;
+            } else {
+                self.leases.remove(name);
+            }
         }
-        json!({
-            "appVersion": format!("{bundle}-version"),
-            "channel": "stable",
-            "updatedAt": updated_at,
-            "paths": paths,
-        })
     }
+}
 
-    fn discover_fixture(label: &str, entries: Vec<Value>) -> Result<BrowserRuntimeDescriptor> {
-        let path = write_fixture(label, json!({ "schemaVersion": 2, "entries": entries }));
-        let result = discover_desktop_runtime(&path);
-        let _ = fs::remove_file(path);
-        result
+struct Request {
+    message: Value,
+    effect: RequestEffect,
+    reply: oneshot::Sender<Reply>,
+}
+
+enum RequestEffect {
+    Acquire(String),
+    Lease { id: String, release: bool },
+}
+
+impl RequestEffect {
+    fn apply(self, registry: &mut Registry, connection: &Connection, reply: Reply) -> Reply {
+        match self {
+            Self::Acquire(name) => {
+                let reply = reply.and_then(|result| {
+                    let id = result
+                        .get("leaseId")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(BrowserError::invalid_result)?;
+                    let lease = registry
+                        .leases
+                        .get_mut(&name)
+                        .filter(|lease| lease.connection == connection.id)
+                        .ok_or_else(BrowserError::expired)?;
+                    lease.id = Some(id.into());
+                    lease.acquiring = false;
+                    Ok(result)
+                });
+                if reply.is_err() {
+                    registry.acquire_failed(&name, connection.id);
+                }
+                reply
+            }
+            Self::Lease { id, release } => {
+                if (release
+                    && reply
+                        .as_ref()
+                        .is_ok_and(|value| value.get("released") == Some(&Value::Bool(true))))
+                    || reply
+                        .as_ref()
+                        .is_err_and(|error| error.code == "browser_lease_expired")
+                {
+                    registry.lease_ended(connection.id, &id);
+                }
+                reply
+            }
+        }
     }
+}
 
-    #[test]
-    fn selects_greatest_updated_at_and_maps_selected_entry() {
-        let descriptor = discover_fixture(
-            "selection",
-            vec![
-                valid_entry("2026-01-01T00:00:00Z", "older", true),
-                valid_entry("2026-03-01T00:00:00Z", "latest", true),
-            ],
-        )
-        .unwrap();
+#[derive(Clone, Eq, PartialEq)]
+struct ListenerConfig {
+    address: SocketAddr,
+    token_digest: [u8; 32],
+    agent_id: String,
+}
 
-        assert_eq!(descriptor.app_version, "latest-version");
-        assert_eq!(descriptor.channel, "stable");
-        assert_eq!(
-            descriptor.node_repl_path,
-            PathBuf::from("/opt/openai/latest/scripts/node-repl.mjs")
-        );
-        assert_eq!(
-            descriptor.node_path,
-            PathBuf::from("/opt/openai/latest/bin/node")
-        );
-        assert_eq!(
-            descriptor.browser_client_path,
-            PathBuf::from("/opt/openai/latest/scripts/browser-client.mjs")
-        );
-        assert_eq!(
-            descriptor.browser_service_path,
-            PathBuf::from("/opt/openai/latest/scripts/browser-service.mjs")
-        );
-        assert_eq!(
-            descriptor.codex_home,
-            PathBuf::from("/opt/openai/latest/codex")
-        );
-        assert_eq!(
-            descriptor.codex_cli_path,
-            Some(PathBuf::from("/opt/openai/latest/bin/codex"))
-        );
-        assert_eq!(
-            descriptor.node_module_dirs,
-            vec![
-                PathBuf::from("/opt/openai/latest/node_modules"),
-                PathBuf::from("/opt/openai/latest/shared/node_modules")
-            ]
-        );
-        assert_eq!(
-            descriptor.trusted_code_paths,
-            vec![
-                PathBuf::from("/opt/openai/latest/codex"),
-                PathBuf::from("/opt/openai/latest/node_modules"),
-                PathBuf::from("/opt/openai/latest/shared/node_modules"),
-            ]
-        );
+struct Listener {
+    config: ListenerConfig,
+    stop: CancellationToken,
+    task: JoinHandle<TcpListener>,
+}
 
-        let reversed = discover_fixture(
-            "selection-reversed",
-            vec![
-                valid_entry("2026-03-01T00:00:00Z", "latest", true),
-                valid_entry("2026-01-01T00:00:00Z", "older", true),
-            ],
-        )
-        .unwrap();
-        assert_eq!(reversed, descriptor);
-    }
+#[derive(Default)]
+pub(crate) struct BrowserRuntime {
+    registry: Arc<Mutex<Registry>>,
+    listener: tokio::sync::Mutex<Option<Listener>>,
+}
 
-    #[test]
-    fn derives_ordered_deduplicated_trusted_code_paths() {
-        let mut entry = valid_entry("2026-03-01T00:00:00Z", "latest", false);
-        entry["paths"]["nodeModuleDirs"] = json!([
-            "/opt/openai/latest/codex",
-            "/opt/openai/latest/node_modules",
-            "/opt/openai/latest/codex",
-        ]);
-
-        let descriptor = discover_fixture("trusted-code-paths", vec![entry]).unwrap();
-
-        assert_eq!(
-            descriptor.trusted_code_paths,
-            vec![
-                PathBuf::from("/opt/openai/latest/codex"),
-                PathBuf::from("/opt/openai/latest/node_modules"),
-            ]
-        );
-    }
-
-    #[test]
-    fn derives_docs_root_from_browser_client_path() {
-        let descriptor = discover_fixture(
-            "docs-root",
-            vec![valid_entry("2026-03-01T00:00:00Z", "latest", true)],
-        )
-        .unwrap();
-
-        assert_eq!(
-            descriptor.docs_root,
-            PathBuf::from("/opt/openai/latest/docs")
-        );
-    }
-
-    #[test]
-    fn absent_node_module_dirs_defaults_to_empty() {
-        let descriptor = discover_fixture(
-            "node-modules-absent",
-            vec![valid_entry("2026-03-01T00:00:00Z", "latest", false)],
-        )
-        .unwrap();
-
-        assert!(descriptor.node_module_dirs.is_empty());
-    }
-
-    #[test]
-    fn absent_codex_cli_path_is_supported() {
-        let mut entry = valid_entry("2026-03-01T00:00:00Z", "latest", false);
-        entry["paths"]
-            .as_object_mut()
-            .unwrap()
-            .remove("codexCliPath");
-
-        let descriptor = discover_fixture("codex-cli-absent", vec![entry]).unwrap();
-        assert_eq!(descriptor.codex_cli_path, None);
-
-        let spec = build_node_repl_launch_spec(&descriptor, &BTreeMap::new()).unwrap();
-        assert!(!spec.env_overrides.contains_key("CODEX_CLI_PATH"));
-    }
-
-    #[test]
-    fn empty_entries_are_rejected() {
-        let error = discover_fixture("entries-empty", Vec::new()).unwrap_err();
-        assert_eq!(error.to_string(), "browser_runtime_entries_empty");
-    }
-
-    #[test]
-    fn missing_or_empty_required_fields_are_rejected() {
-        let mut missing_app_version = valid_entry("2026-03-01T00:00:00Z", "latest", false);
-        missing_app_version
-            .as_object_mut()
-            .unwrap()
-            .remove("appVersion");
-        let error = discover_fixture("app-version-missing", vec![missing_app_version]).unwrap_err();
-        assert!(error
-            .to_string()
-            .starts_with("browser_runtime_required_field_missing:appVersion"));
-
-        let mut empty_node_path = valid_entry("2026-03-01T00:00:00Z", "latest", false);
-        empty_node_path["paths"]["nodePath"] = json!("");
-        let error = discover_fixture("node-path-empty", vec![empty_node_path]).unwrap_err();
-        assert!(error
-            .to_string()
-            .starts_with("browser_runtime_required_field_empty:paths.nodePath"));
-    }
-
-    #[test]
-    fn malformed_latest_entry_does_not_fall_back_to_older_valid_entry() {
-        let latest = json!({
-            "appVersion": "latest-version",
-            "channel": "stable",
-            "updatedAt": "2026-03-01T00:00:00Z",
-            "paths": "malformed"
+impl BrowserRuntime {
+    pub(crate) async fn configure(
+        &self,
+        address: SocketAddr,
+        token: Option<&str>,
+        agent_id: &str,
+    ) -> anyhow::Result<()> {
+        let mut current = self.listener.lock().await;
+        let Some(token) = token else {
+            if let Some(listener) = current.take() {
+                listener.stop.cancel();
+                listener.task.await.context("stop browser listener")?;
+            }
+            return Ok(());
+        };
+        let config = ListenerConfig {
+            address,
+            token_digest: Sha256::digest(token.as_bytes()).into(),
+            agent_id: agent_id.into(),
+        };
+        if current
+            .as_ref()
+            .is_some_and(|listener| listener.config == config)
+        {
+            return Ok(());
+        }
+        let socket = if current
+            .as_ref()
+            .is_some_and(|listener| listener.config.address == address)
+        {
+            let listener = current
+                .take()
+                .expect("same address has an existing listener");
+            listener.stop.cancel();
+            listener.task.await.context("stop browser listener")?
+        } else {
+            let socket = TcpListener::bind(address)
+                .await
+                .with_context(|| format!("bind browser listener on {address}"))?;
+            if let Some(listener) = current.take() {
+                listener.stop.cancel();
+                listener.task.await.context("stop browser listener")?;
+            }
+            socket
+        };
+        let stop = CancellationToken::new();
+        *current = Some(Listener {
+            config: config.clone(),
+            task: tokio::spawn(run_listener(
+                socket,
+                config,
+                self.registry.clone(),
+                stop.clone(),
+            )),
+            stop,
         });
-        let error = discover_fixture(
-            "latest-malformed",
-            vec![valid_entry("2026-01-01T00:00:00Z", "older", false), latest],
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "browser_runtime_paths_invalid");
+        Ok(())
     }
 
-    #[test]
-    fn malformed_json_is_rejected_with_browser_runtime_context() {
-        let path = fixture_path("malformed-json");
-        fs::write(&path, b"{").unwrap();
-        let error = discover_desktop_runtime(&path).unwrap_err();
-        let _ = fs::remove_file(path);
-        assert_eq!(error.to_string(), "browser_runtime_registry_invalid_json");
+    pub(crate) async fn shutdown(&self) {
+        if let Some(listener) = self.listener.lock().await.take() {
+            listener.stop.cancel();
+            let _ = listener.task.await;
+        }
     }
 
-    #[test]
-    fn client_path_without_bundle_parent_is_rejected() {
-        let mut entry = valid_entry("2026-03-01T00:00:00Z", "latest", false);
-        entry["paths"]["browserClientPath"] = json!("scripts/browser-client.mjs");
-        let error = discover_fixture("docs-root-invalid", vec![entry]).unwrap_err();
-        assert_eq!(error.to_string(), "browser_runtime_docs_root_invalid");
+    pub(crate) fn list(&self) -> BrowserList {
+        let registry = self.registry.lock();
+        let mut browsers: Vec<_> = registry
+            .connections
+            .values()
+            .map(|connection| &connection.info)
+            .chain(registry.offline_browsers.values())
+            .cloned()
+            .collect();
+        browsers.sort_unstable_by(|first, second| first.browser_id.cmp(&second.browser_id));
+        BrowserList {
+            runtime_available: !registry.connections.is_empty(),
+            browsers,
+            leases: registry
+                .leases
+                .iter()
+                .filter(|(_, lease)| lease.id.is_some())
+                .map(|(name, lease)| LeaseInfo {
+                    name: name.clone(),
+                    browser_id: lease.browser_id.clone(),
+                })
+                .collect(),
+        }
     }
+
+    pub(crate) fn browser_info(&self, browser_id: &str) -> Option<BrowserInfo> {
+        self.registry
+            .lock()
+            .connections
+            .get(browser_id)
+            .map(|connection| connection.info.clone())
+    }
+
+    pub(crate) fn lease_browser_info(&self, name: &str) -> Option<BrowserInfo> {
+        let registry = self.registry.lock();
+        let lease = registry.leases.get(name)?;
+        registry
+            .connections
+            .get(&lease.browser_id)
+            .map(|connection| connection.info.clone())
+    }
+
+    pub(crate) async fn acquire(
+        &self,
+        browser_id: &str,
+        name: &str,
+        idle_timeout_seconds: u64,
+    ) -> Result<BrowserInfo, BrowserError> {
+        let (connection, reply) = {
+            let mut registry = self.registry.lock();
+            let connection = registry
+                .connections
+                .get(browser_id)
+                .cloned()
+                .ok_or_else(|| {
+                    BrowserError::new("browser_not_connected", "Selected browser is not connected")
+                })?;
+            if let Some(lease) = registry.leases.get_mut(name) {
+                if lease.connection != connection.id || lease.acquiring {
+                    return Err(BrowserError::new(
+                        "browser_busy",
+                        "Lease name is already in use",
+                    ));
+                }
+                lease.acquiring = true;
+            } else {
+                registry.leases.insert(
+                    name.into(),
+                    Lease {
+                        connection: connection.id,
+                        browser_id: browser_id.into(),
+                        id: None,
+                        acquiring: true,
+                    },
+                );
+            }
+            let reply = connection.send(
+                json!({"type":"acquire", "name":name, "idleTimeoutSeconds":idle_timeout_seconds}),
+                RequestEffect::Acquire(name.into()),
+            );
+            if reply.is_err() {
+                registry.acquire_failed(name, connection.id);
+            }
+            (connection, reply?)
+        };
+        connection.wait(reply, CONTROL_TIMEOUT).await?;
+        Ok(connection.info)
+    }
+
+    pub(crate) async fn repl(
+        &self,
+        name: &str,
+        code: &str,
+        timeout_ms: u64,
+    ) -> Result<CallToolResult, BrowserError> {
+        let reply = self
+            .command(
+                name,
+                json!({"type":"repl", "code":code, "timeoutMs":timeout_ms}),
+                false,
+                Duration::from_millis(timeout_ms) + CONTROL_TIMEOUT,
+            )
+            .await?;
+        serde_json::from_value(reply).map_err(|_| BrowserError::invalid_result())
+    }
+
+    pub(crate) async fn reset(&self, name: &str) -> Result<(), BrowserError> {
+        self.command(name, json!({"type":"reset"}), false, CONTROL_TIMEOUT)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn release(&self, name: &str) -> Result<bool, BrowserError> {
+        match self
+            .command(name, json!({"type":"release"}), true, CONTROL_TIMEOUT)
+            .await
+        {
+            Ok(reply) => reply
+                .get("released")
+                .and_then(Value::as_bool)
+                .ok_or_else(BrowserError::invalid_result),
+            Err(error) if error.code == "browser_lease_expired" => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn command(
+        &self,
+        name: &str,
+        mut message: Value,
+        release: bool,
+        timeout: Duration,
+    ) -> Reply {
+        let (connection, reply) = {
+            let registry = self.registry.lock();
+            let lease = registry
+                .leases
+                .get(name)
+                .ok_or_else(BrowserError::expired)?;
+            let id = lease.id.as_ref().ok_or_else(|| {
+                BrowserError::new("browser_busy", "Browser lease is being acquired")
+            })?;
+            let connection = registry
+                .connections
+                .get(&lease.browser_id)
+                .cloned()
+                .ok_or_else(BrowserError::disconnected)?;
+            message["leaseId"] = json!(id);
+            let reply = connection.send(
+                message,
+                RequestEffect::Lease {
+                    id: id.clone(),
+                    release,
+                },
+            )?;
+            (connection, reply)
+        };
+        connection.wait(reply, timeout).await
+    }
+}
+
+impl Connection {
+    fn send(
+        &self,
+        mut message: Value,
+        effect: RequestEffect,
+    ) -> Result<oneshot::Receiver<Reply>, BrowserError> {
+        if self.stop.is_cancelled() {
+            return Err(BrowserError::disconnected());
+        }
+        message["requestId"] = json!(Uuid::new_v4().to_string());
+        let (reply, receive) = oneshot::channel();
+        self.requests
+            .try_send(Request {
+                message,
+                effect,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    BrowserError::new("browser_busy", "Browser request queue is full")
+                }
+                mpsc::error::TrySendError::Closed(_) => BrowserError::disconnected(),
+            })?;
+        Ok(receive)
+    }
+
+    async fn wait(&self, reply: oneshot::Receiver<Reply>, timeout: Duration) -> Reply {
+        match tokio::time::timeout(timeout, reply).await {
+            Ok(result) => result.unwrap_or_else(|_| Err(BrowserError::disconnected())),
+            Err(_) => {
+                self.stop.cancel();
+                Err(BrowserError::new(
+                    "browser_response_timeout",
+                    "Browser did not respond",
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum Incoming {
+    Hello {
+        token: String,
+        browser_id: String,
+        browser_name: String,
+        api_version: u32,
+        extension_version: String,
+    },
+    Ping,
+    Status {
+        busy: bool,
+    },
+    Result {
+        request_id: String,
+        #[serde(flatten)]
+        reply: WireReply,
+    },
+    LeaseEnded {
+        lease_id: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireReply {
+    Success {
+        result: serde_json::Map<String, Value>,
+    },
+    Failure {
+        error: BrowserError,
+    },
+}
+
+async fn run_listener(
+    socket: TcpListener,
+    config: ListenerConfig,
+    registry: Arc<Mutex<Registry>>,
+    stop: CancellationToken,
+) -> TcpListener {
+    let config = Arc::new(config);
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => {},
+            accepted = socket.accept() => match accepted {
+                Ok((socket, _)) => {
+                    connections.spawn(serve_connection(socket, config.clone(), registry.clone(), stop.child_token()));
+                }
+                Err(error) => {
+                    crate::utils::log_warn(format!("browser listener accept failed: {error}"));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            },
+        }
+    }
+    connections.shutdown().await;
+    *registry.lock() = Registry::default();
+    socket
+}
+
+async fn serve_connection(
+    stream: TcpStream,
+    config: Arc<ListenerConfig>,
+    registry: Arc<Mutex<Registry>>,
+    stop: CancellationToken,
+) {
+    let handshake = async {
+        let websocket_config = WebSocketConfig::default()
+            .max_message_size(Some(16 * 1024 * 1024))
+            .max_frame_size(Some(16 * 1024 * 1024));
+        let mut socket =
+            tokio_tungstenite::accept_async_with_config(stream, Some(websocket_config))
+                .await
+                .ok()?;
+        let hello = match socket.next().await {
+            Some(Ok(Message::Text(text))) => serde_json::from_str::<Incoming>(&text).ok(),
+            _ => None,
+        };
+        let info = validate_hello(hello, &config);
+        let response = match &info {
+            Ok(_) => json!({"type":"welcome", "apiVersion":API_VERSION, "agentId":config.agent_id}),
+            Err(error) => json!({"type":"error", "error":error}),
+        };
+        socket
+            .send(Message::Text(response.to_string().into()))
+            .await
+            .ok()?;
+        Some((socket, info.ok()?))
+    };
+    let result = tokio::select! {
+        _ = stop.cancelled() => None,
+        result = tokio::time::timeout(Duration::from_secs(10), handshake) => result.ok().flatten(),
+    };
+    let Some((mut socket, info)) = result else {
+        return;
+    };
+    let (requests, mut incoming_requests) = mpsc::channel::<Request>(32);
+    let connection = Connection {
+        id: Uuid::new_v4(),
+        info,
+        requests,
+        stop: stop.clone(),
+    };
+    {
+        let mut registry = registry.lock();
+        registry
+            .offline_browsers
+            .remove(&connection.info.browser_id);
+        if let Some(old) = registry
+            .connections
+            .insert(connection.info.browser_id.clone(), connection.clone())
+        {
+            registry.disconnect(&old);
+            old.stop.cancel();
+        }
+    }
+    let session = async {
+        let mut pending = BTreeMap::<String, Request>::new();
+        loop {
+            tokio::select! {
+                request = incoming_requests.recv(), if pending.len() < 32 => {
+                    let Some(request) = request else { break };
+                    let id = request.message["requestId"].as_str().expect("assigned request ID").to_owned();
+                    if socket.send(Message::Text(request.message.to_string().into())).await.is_err() { break }
+                    pending.insert(id, request);
+                }
+                message = tokio::time::timeout(Duration::from_secs(90), socket.next()) => {
+                    match message {
+                        Ok(Some(Ok(Message::Text(text)))) => {
+                            let Ok(message) = serde_json::from_str::<Incoming>(&text) else { break };
+                            match message {
+                                Incoming::Ping => {
+                                    if socket.send(Message::Text(r#"{"type":"pong"}"#.into())).await.is_err() { break }
+                                }
+                                Incoming::Status { busy } => {
+                                    if let Some(entry) = registry.lock().connections.get_mut(&connection.info.browser_id).filter(|entry| entry.id == connection.id) {
+                                        entry.info.busy = busy;
+                                    }
+                                }
+                                Incoming::Result { request_id, reply } => {
+                                    if let Some(request) = pending.remove(&request_id) {
+                                        let reply = match reply {
+                                            WireReply::Success { result } => Ok(Value::Object(result)),
+                                            WireReply::Failure { error } => Err(error),
+                                        };
+                                        let outcome = request.effect.apply(&mut registry.lock(), &connection, reply);
+                                        let _ = request.reply.send(outcome);
+                                    }
+                                }
+                                Incoming::LeaseEnded { lease_id } => registry.lock().lease_ended(connection.id, &lease_id),
+                                Incoming::Hello { .. } => break,
+                            }
+                        }
+                        Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {
+                            if socket.flush().await.is_err() { break }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = stop.cancelled() => {},
+        _ = session => {},
+    }
+    registry.lock().disconnect(&connection);
+}
+
+fn validate_hello(
+    hello: Option<Incoming>,
+    config: &ListenerConfig,
+) -> Result<BrowserInfo, BrowserError> {
+    let Some(Incoming::Hello {
+        token,
+        browser_id,
+        browser_name,
+        api_version,
+        extension_version,
+    }) = hello
+    else {
+        return Err(BrowserError::new(
+            "browser_hello_required",
+            "Expected a browser hello message",
+        ));
+    };
+    let digest = Sha256::digest(token.as_bytes());
+    let difference = digest
+        .iter()
+        .zip(config.token_digest)
+        .fold(0u8, |value, (actual, expected)| value | (actual ^ expected));
+    if difference != 0 {
+        return Err(BrowserError::new(
+            "browser_auth_failed",
+            "Pairing token was rejected",
+        ));
+    }
+    if api_version != API_VERSION {
+        return Err(BrowserError::new(
+            "browser_api_version_unsupported",
+            "Browser API version is unsupported",
+        ));
+    }
+    if [&browser_id, &browser_name, &extension_version]
+        .iter()
+        .any(|value| value.trim().is_empty() || value.len() > 256)
+    {
+        return Err(BrowserError::new(
+            "browser_hello_invalid",
+            "Browser identity fields are invalid",
+        ));
+    }
+    Ok(BrowserInfo {
+        browser_id,
+        browser_name,
+        extension_version,
+        api_version,
+        connected: true,
+        busy: true,
+    })
 }

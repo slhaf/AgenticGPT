@@ -1724,7 +1724,7 @@ pub(crate) fn catalog_entries() -> Vec<crate::config_catalog::ConfigEntry> {
                 .filter(|entry| {
                     let path = entry.path.join(".");
                     !entry.path.iter().any(|part| part == "*")
-                        && (entry.kind != "object" || path == "browser.runtime")
+                        && entry.kind != "object"
                         && entry.kind != "map"
                         && (path.starts_with("browser.")
                             || path.starts_with("skills.")
@@ -1868,24 +1868,15 @@ impl CatalogDraft {
                 for part in &entry.path {
                     current = &current[part];
                 }
-                let missing = current.is_null();
                 let current = if current.is_null() {
                     entry.default_value.as_ref().unwrap_or(&entry.example)
                 } else {
                     current
                 };
-                let text = if entry.kind == "object" {
-                    if missing {
-                        "automatic".to_owned()
-                    } else {
-                        "explicit".to_owned()
-                    }
-                } else {
-                    current
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| current.to_string())
-                };
+                let text = current
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| current.to_string());
                 (index, text)
             })
             .collect();
@@ -1905,25 +1896,6 @@ impl CatalogDraft {
                     && self.values.get(index) != self.initial.get(index)
             })
             .map(|(index, entry)| {
-                if entry.kind == "object" {
-                    return Ok(
-                        if self
-                            .values
-                            .get(&index)
-                            .is_some_and(|value| value == "automatic")
-                        {
-                            agentic_gpt_protocol::ConfigChange::Unset {
-                                path: entry.path.clone(),
-                            }
-                        } else {
-                            agentic_gpt_protocol::ConfigChange::Set {
-                                path: entry.path.clone(),
-                                value: serde_json::json!({}),
-                            }
-                        },
-                    );
-                }
-
                 crate::config_catalog::parse_cli_change(
                     &entry.path.join("."),
                     self.values

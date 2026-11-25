@@ -39,7 +39,6 @@ impl Fixture {
             config.clone(),
             crate::state::RuntimeModel::local(crate::state::CapabilityProfile::Room),
             false,
-            None,
             PrivateStatePaths::for_test(root.join("state")),
         )
         .unwrap();

@@ -188,7 +188,6 @@ mod tests {
             config,
             crate::state::RuntimeModel::local(crate::state::CapabilityProfile::Room),
             false,
-            None,
             crate::private_state::PrivateStatePaths::for_test(root.join("private")),
         )
         .unwrap();

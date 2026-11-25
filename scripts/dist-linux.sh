@@ -13,7 +13,6 @@ TARGETS=(
 BINS=(
   "agentic-gpt"
   "agentic-gpt-hub"
-  "agentic-browser-host"
 )
 BUILD_DIR="${CARGO_TARGET_DIR:-target}"
 

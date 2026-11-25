@@ -4,9 +4,9 @@ use std::sync::{Arc, Weak};
 
 use agentic_gpt_protocol::{AgentMessage, AgentRole};
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
-use crate::{browser_manager::BrowserRuntimeManager, browser_runtime::BrowserRuntimeDescriptor};
+use crate::browser_runtime::BrowserRuntime;
 use crate::{config::Config, confirmation, process, skills};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,47 +153,6 @@ pub(crate) struct Capabilities {
 }
 
 #[derive(Clone)]
-pub(crate) struct BrowserRuntimeContext {
-    pub(crate) descriptor: BrowserRuntimeDescriptor,
-    pub(crate) manager: Arc<BrowserRuntimeManager>,
-}
-
-impl BrowserRuntimeContext {
-    pub(crate) fn new(
-        descriptor: BrowserRuntimeDescriptor,
-        launch_spec: crate::browser_runtime::NodeReplLaunchSpec,
-    ) -> Arc<Self> {
-        let manager =
-            BrowserRuntimeManager::new(launch_spec, descriptor.browser_client_path.clone());
-        Arc::new(Self {
-            descriptor,
-            manager,
-        })
-    }
-}
-
-pub(crate) struct BrowserRuntimeSlot {
-    pub(crate) inner: Mutex<Option<Arc<BrowserRuntimeContext>>>,
-    pub(crate) changed: watch::Sender<()>,
-}
-
-impl BrowserRuntimeSlot {
-    pub(crate) fn new(initial: Option<Arc<BrowserRuntimeContext>>) -> Self {
-        let (changed, _) = watch::channel(());
-        Self {
-            inner: Mutex::new(initial),
-            changed,
-        }
-    }
-}
-
-impl Default for BrowserRuntimeSlot {
-    fn default() -> Self {
-        Self::new(None)
-    }
-}
-
-#[derive(Clone)]
 pub(crate) struct AppState {
     /// Immutable connection identity, never a local state owner.
     pub(crate) transport_agent_id: String,
@@ -205,7 +164,7 @@ pub(crate) struct AppState {
     pub(crate) secret: Arc<crate::secret::SecretService>,
     #[allow(dead_code)]
     pub(crate) process_history: std::sync::Arc<crate::process_history::ProcessHistoryStore>,
-    pub(crate) browser_runtime: Arc<BrowserRuntimeSlot>,
+    pub(crate) browser_runtime: Arc<BrowserRuntime>,
     pub(crate) config_runtime: Arc<crate::config_runtime::ConfigRuntime>,
     pub(crate) runtime: RuntimeModel,
     pub(crate) started_at: DateTime<Utc>,

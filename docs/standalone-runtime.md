@@ -161,7 +161,7 @@ Normal 与 Room profile 选择工具集预设，而不是固定最终接口面�
 Room 核心预设额外选择 `room.bootstrap`、`room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
 `config`、`room.email`、`room.secret` 在两个预设中都默认关闭；显式 `toolsets.enabled` 是最终依据。
 七个 Room 子工具集分别控制 API 和相应资源，聚合 `room` 不再是合法值。Bootstrap 对应公开的 `bootstrap`、`bootstrap.read` 名称。
-工具集开关决定工具是否出现在列表中，不代表依赖资源已经就绪。Browser runtime 缺失时，已启用的 Browser 工具仍可发现；需要 runtime 的调用返回 `browser_runtime_unavailable`，`browser.list` 报告现有状态。Room 仓库暂不可初始化时，已启用的 Diary、Notebook、State 和 Maintenance 工具仍可发现；根目录存在且可读时，读取仍可能成功，只有所需资源不可用时才报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时返回就绪状态，路径不合法时返回错误。
+工具集开关决定工具是否出现在列表中，不代表依赖资源已经就绪。Browser 工具集启用后，`browser.manual` 支持离线读取内置 SDK，`browser.list` 报告扩展连接和占用状态。Room 仓库暂不可初始化时，已启用的 Diary、Notebook、State 和 Maintenance 工具仍可发现；根目录存在且可读时，读取仍可能成功，只有所需资源不可用时才报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时返回就绪状态，路径不合法时返回错误。
 
 这些过滤器只会从已公布的工具表面移除名称，不会暴露仅供 dispatch 使用的别名。
 

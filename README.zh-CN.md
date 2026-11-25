@@ -32,7 +32,7 @@ install -d ~/.local/bin
 install -m 0755 agentic-gpt ~/.local/bin/
 ```
 
-请确保 `~/.local/bin` 在 `PATH` 中。发行包还包含 `agentic-gpt-hub` 和 `agentic-browser-host`，分别用于 Hub 部署和自托管 Browser backend，按需安装即可。
+请确保 `~/.local/bin` 在 `PATH` 中。发行包还包含用于部署 Hub 的 `agentic-gpt-hub`。如需控制 Chrome，请在目标 profile 安装 Agentic Browser 扩展。
 
 **从旧版本升级到 0.11.0 前，请先阅读[发布说明与升级步骤](docs/release-notes-v0.11.0.md)。**
 
