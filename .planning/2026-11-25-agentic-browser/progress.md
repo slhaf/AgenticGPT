@@ -9,3 +9,8 @@
 - 临时验证器位于 /tmp/agentic-browser-verify.1xcWxl/verify.mjs，构建机临时目录 /tmp/agentic-browser-check.oDoG0Q。计划真实运行两个 Agentic、两个 profile、扩展配置 UI、状态、租约互斥、执行中断线和重开浏览器。
 - Agentic 远程 check、build、test（498 通过）和严格 Clippy 均通过。保留了离线手册、本地 MCP、跨 WebSocket 的多模态结果和脚本正文不进入审计的保障。
 - Agentic Browser 扩展锁定依赖安装、TypeScript 检查和 Chrome MV3 生产构建通过。第一次真实联调已通过离线手册、通过实际设置页面配对、弹窗连接状态和重启 profile 保持身份。临时验证器调整为识别工具结果的 isError，继续验证互斥及 REPL。
+
+- Agentic 接入提交 3b5860c。扩展实现与重新命名提交 e81ef14，类型检查和 ZIP 生产构建通过，产物为 app/chrome-extension/.output/agentic-browser-0.1.0-chrome.zip。
+- 最终 remote-build test 498 通过、0 失败，remote-build lint 通过。
+- Chromium 158 中使用两个实际 profile 与两个隔离 Agentic 进程，验证设置页配对、弹窗状态、重启自动重连、profile 独占与跨 profile 并行、REPL 状态、元素引用与输入、结构化数据和截图、死循环超时与重置、执行中断线交接、空闲释放，以及跨 35 秒空闲窗口保留租约状态。
+- 依据联调结果修正 Browser 生命周期日志错误码，并让启动监听沿用配置应用锁。已清理验证用独立 HOME、Chromium profile 与临时脚本。

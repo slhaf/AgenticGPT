@@ -1,6 +1,6 @@
 # Agentic Browser JavaScript SDK v1
 
-`browser.repl` 提供 `browser` 和 `nodeRepl`，支持在代码中使用 `await`。要跨调用保留值，请赋给 `globalThis`。同一租约内的调用依次执行。
+`browser.repl` 提供 `browser` 和 `nodeRepl`，支持在代码中使用 `await`。要跨调用保留值，请赋给 `globalThis`。同一租约一次运行一段脚本。上一段还在执行时，新 `repl` 会返回 `browser_busy`。
 
 ## 标签页
 

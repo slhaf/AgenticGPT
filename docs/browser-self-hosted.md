@@ -18,9 +18,13 @@ Install Agentic Browser in a Chrome or Chromium profile. The extension connects 
 }
 ```
 
+Use a distinct listen port for each Agentic instance running on the same host.
+
 Across hosts or containers, configure an address reachable from the browser. A TLS reverse proxy in front of the Agentic listener lets the extension use `wss://`, encrypting pairing credentials, scripts, and page results in transit. For Neko, load the extension in its persistent Chromium profile and keep that browser running.
 
 To upgrade from the official Browser runtime, replace the old `browser` section with the listener and pairing configuration shown here. Install and verify the new extension, then remove the old Native Messaging registration, host mount, and shared socket from the deployment.
+
+When changing the listen address, Agentic tries to bind the new address first. If the old and new addresses overlap on the same port, such as when switching from loopback to all interfaces, save the configuration and restart Agentic to apply the new address.
 
 ## Verify calls
 

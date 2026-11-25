@@ -353,7 +353,7 @@ impl AgentMcpServer {
                 .and_then(|error| error.get("code"))
                 .and_then(Value::as_str)
                 .map(bounded_error_code)
-        } else if is_browser_repl {
+        } else if name.starts_with("browser.") {
             browser_error_code_from_value(&value)
         } else {
             value

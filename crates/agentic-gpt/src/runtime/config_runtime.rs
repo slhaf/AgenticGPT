@@ -293,7 +293,8 @@ async fn configure_browser(state: &AppState, config: &Config) -> Result<()> {
 }
 
 pub(crate) async fn start_browser_listener(state: &AppState) {
-    let config = state.config.read().await;
+    let _apply = state.config_runtime.apply_lock.lock().await;
+    let config = state.config.read().await.clone();
     if let Err(error) = configure_browser(state, &config).await {
         crate::utils::log_warn(format!("browser listener failed: {error}"));
         state
