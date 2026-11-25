@@ -8,3 +8,5 @@
 - [complete] 验证两个仓库的发布入口和实际 Chrome 链路，记录提交与结果。
 
 用户已确认多对多配对、整个 profile 独占和扩展生命周期。首版工具支持显式选择 browserId。Agentic 的 Rust 编译、测试和重型验证走既有 remote-build。
+
+- [complete] 更新 MCP 初始化说明，核对 Browser 配置热重载。
