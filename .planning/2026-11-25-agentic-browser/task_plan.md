@@ -15,10 +15,10 @@
 ## 连接恢复与 SDK 扩展
 
 - [complete] 让 Agentic 在绑定失败后按最新 Browser 配置重试，恢复后报告实际监听状态。
-- [in_progress] 规范化和去重扩展配对地址，交付 Neko Chromium 的持久启动参数。
-- [in_progress] 在构建机验证延迟绑定和配对，部署至 Room，冷启动 Neko 并从实际 Room MCP 连接器回传截图。
-- [pending] 扩展 SDK 的标签导航、等待、iframe、定位器读取和表单动作，以及文档上下文中的 JavaScript。
-- [pending] 扩展全页、区域及元素截图，增加坐标点击和滚动，验证大结果错误与图片回传。
-- [pending] 同步内嵌手册，提交各阶段，构建最终扩展并验证 Room 实际入口。
+- [complete] 规范化和去重扩展配对地址，交付 Neko Chromium 的持久启动参数。
+- [complete] 在构建机验证延迟绑定和配对，部署至 Room，冷启动 Neko 并从实际 Room MCP 连接器回传截图。
+- [complete] 扩展 SDK 的标签导航、等待、iframe、定位器读取和表单动作，以及文档上下文中的 JavaScript。
+- [complete] 扩展全页、区域及元素截图，增加坐标点击和滚动，验证大结果错误与图片回传。
+- [in_progress] 同步内嵌手册，提交各阶段，构建最终产物并验证 Room 实际入口。
 
 本轮先搁置文件上传下载。剪贴板、JS 弹窗、历史和用户接管按实际用例另排。

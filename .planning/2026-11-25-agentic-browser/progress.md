@@ -20,3 +20,6 @@
 - Agentic 监听重试及 listenerReady、扩展地址去重补丁进入远端构建。去重在保存时提示，后台只连接每个规范化地址的第一条已存配置。
 - 配对去重提交 23d1e33。构建机通过锁定依赖的 TypeScript 和 ZIP 构建，实际 Chromium 验证旧重复项仅建一条连接、弹窗提示、移除后直接保存、同 profile 重启回收租约。
 - Agentic 远端 fmt、严格 Clippy 和标准 Linux 发布构建通过。隔离网络命名空间内重现地址未配置时的真实绑定失败，地址加入后未修改配置即恢复，热更目标地址失败时旧监听运行，新地址出现后自动切换。
+- Agentic 监听修复 9fc9cd6 已部署 Room，实际 connector 显示 listenerReady=true，Laptop 和 Room Neko 均恢复在线。Neko Chromium 从持久启动参数自动加载去重扩展并恢复同一 browserId。Room MCP 实际 browser.repl 返回原生 PNG，确认可渲染测试页面，已关闭测试标签页并释放租约。
+- SDK 增量采用扩展 0.2.0 识别，WebSocket 协议仍为 v1。Frame 通过 documentId 绑定已选文档，操作和快照沿用脚本注入。CDP 评估绑定目标文档的主页面上下文，跨站 iframe 使用扁平子会话。视觉操作维持 CSS 像素坐标与 PNG 回传。
+- 远程生产构建及 Chromium 158 联调通过。验证了标签导航和等待、语义定位及原生表单、三个 iframe（含两个相同地址的跨站文档）、文档求值与旧 frame 失效、坐标点击和滚动。MCP 通过三张原生 PNG 传回全页、区域和元素截图，超限返回 browser_result_too_large 后浏览器仍在线。
