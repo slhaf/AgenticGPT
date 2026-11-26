@@ -22,6 +22,8 @@ Agentic Browser 是安装在 Chrome 或 Chromium profile 内的扩展。它主�
 
 跨宿主或容器连接时，扩展应使用实际能访问的 Agentic 地址。可在 Agentic 监听器前部署 TLS 反向代理，在扩展中填写 `wss://` 地址，以加密传输配对凭据、脚本和网页结果。运行 Neko 时，将解压后的扩展目录和 Chromium profile 挂载到持久存储。把 `--load-extension=<容器内的扩展目录>` 加入 Chromium 启动参数，容器重启后也会加载扩展。
 
+为现有 profile 更新解压安装的扩展时，在原目录替换文件，再到 `chrome://extensions` 为 Agentic Browser 点「重新加载」，即可保留已保存的配对。仅重启 Chromium 时，可能出现版本号已更新、后台仍在执行旧脚本的情况。重新加载后，用 `browser.repl` 执行一项新版 SDK 操作确认更新生效。
+
 从官方 Browser runtime 升级时，将原 `browser` 配置替换为上述监听和配对字段，安装新扩展并确认可用。随后可移除部署中的旧 Native Messaging 注册、host 挂载和共享 socket。
 
 监听绑定失败时，Agentic 会按退避间隔重试，例如配置的网络地址晚于进程启动就绪。通过 `browser.list` 的 `listenerReady` 查看监听情况，通过 `runtimeAvailable` 查看是否有浏览器连接。变更监听地址时，Agentic 会先尝试绑定新地址。若新旧地址占用同一端口，例如从本机地址改为所有地址，配置保存后重启 Agentic 即可应用新监听。

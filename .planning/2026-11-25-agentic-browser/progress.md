@@ -23,3 +23,5 @@
 - Agentic 监听修复 9fc9cd6 已部署 Room，实际 connector 显示 listenerReady=true，Laptop 和 Room Neko 均恢复在线。Neko Chromium 从持久启动参数自动加载去重扩展并恢复同一 browserId。Room MCP 实际 browser.repl 返回原生 PNG，确认可渲染测试页面，已关闭测试标签页并释放租约。
 - SDK 增量采用扩展 0.2.0 识别，WebSocket 协议仍为 v1。Frame 通过 documentId 绑定已选文档，操作和快照沿用脚本注入。CDP 评估绑定目标文档的主页面上下文，跨站 iframe 使用扁平子会话。视觉操作维持 CSS 像素坐标与 PNG 回传。
 - 远程生产构建及 Chromium 158 联调通过。验证了标签导航和等待、语义定位及原生表单、三个 iframe（含两个相同地址的跨站文档）、文档求值与旧 frame 失效、坐标点击和滚动。MCP 通过三张原生 PNG 传回全页、区域和元素截图，超限返回 browser_result_too_large 后浏览器仍在线。
+- 扩展 e29976b 与 Agentic 手册 52431cf 已部署。Room Neko 首次升级后出现新 manifest 版本沿用旧后台脚本的情况。通过调试接口核实实际脚本为 0.1.0 并显式重载扩展，运行中的脚本与 0.2.0 构建产物一致。
+- 再次重启 Neko Chromium 后保留原 browserId 并自动上线。实际 Room MCP 可查阅新版手册，完成导航等待、定位和文档求值，返回 `image/png` 原生 `image` 块，裁图尺寸 700×250。测试标签页已关闭，租约释放。ZIP 和解压目录已从远程构建机取回。
