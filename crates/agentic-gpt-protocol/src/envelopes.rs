@@ -21,11 +21,6 @@ use super::process::{
     ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecRequest, ProcessInfo,
     ProcessListRequest, ProcessReadRequest,
 };
-use super::room::{
-    RoomDiaryActiveRequest, RoomDiaryReadRequest, RoomMaintenanceStatusRequest,
-    RoomMaintenanceSubmitRequest, RoomNotebookReadRequest, RoomNotebookRecentRequest,
-    RoomNotebookSearchRequest, RoomStateListRequest, RoomStateReadRequest,
-};
 use super::secret::{
     RoomSecretDeleteRequest, RoomSecretGetRequest, RoomSecretListRequest, RoomSecretUpsertRequest,
 };
@@ -215,51 +210,6 @@ pub enum HubCommand {
         request_id: String,
         payload: RoomSecretDeleteRequest,
     },
-    #[serde(rename = "room.diary.active")]
-    RoomDiaryActive {
-        request_id: String,
-        payload: RoomDiaryActiveRequest,
-    },
-    #[serde(rename = "room.diary.read")]
-    RoomDiaryRead {
-        request_id: String,
-        payload: RoomDiaryReadRequest,
-    },
-    #[serde(rename = "room.notebook.recent")]
-    RoomNotebookRecent {
-        request_id: String,
-        payload: RoomNotebookRecentRequest,
-    },
-    #[serde(rename = "room.notebook.search")]
-    RoomNotebookSearch {
-        request_id: String,
-        payload: RoomNotebookSearchRequest,
-    },
-    #[serde(rename = "room.notebook.read")]
-    RoomNotebookRead {
-        request_id: String,
-        payload: RoomNotebookReadRequest,
-    },
-    #[serde(rename = "room.state.list")]
-    RoomStateList {
-        request_id: String,
-        payload: RoomStateListRequest,
-    },
-    #[serde(rename = "room.state.read")]
-    RoomStateRead {
-        request_id: String,
-        payload: RoomStateReadRequest,
-    },
-    #[serde(rename = "room.maintenance.status")]
-    RoomMaintenanceStatus {
-        request_id: String,
-        payload: RoomMaintenanceStatusRequest,
-    },
-    #[serde(rename = "room.maintenance.submit")]
-    RoomMaintenanceSubmit {
-        request_id: String,
-        payload: RoomMaintenanceSubmitRequest,
-    },
     #[serde(rename = "skills.list")]
     SkillsList { request_id: String },
     #[serde(rename = "skills.read")]
@@ -354,15 +304,6 @@ impl HubCommand {
             | Self::RoomSecretGet { request_id, .. }
             | Self::RoomSecretUpsert { request_id, .. }
             | Self::RoomSecretDelete { request_id, .. }
-            | Self::RoomDiaryActive { request_id, .. }
-            | Self::RoomDiaryRead { request_id, .. }
-            | Self::RoomNotebookRecent { request_id, .. }
-            | Self::RoomNotebookSearch { request_id, .. }
-            | Self::RoomNotebookRead { request_id, .. }
-            | Self::RoomStateList { request_id, .. }
-            | Self::RoomStateRead { request_id, .. }
-            | Self::RoomMaintenanceStatus { request_id, .. }
-            | Self::RoomMaintenanceSubmit { request_id, .. }
             | Self::SkillsList { request_id }
             | Self::SkillsRead { request_id, .. }
             | Self::SkillsSearch { request_id, .. }

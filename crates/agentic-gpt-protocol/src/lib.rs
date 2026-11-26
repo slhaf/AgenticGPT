@@ -7,7 +7,6 @@ mod identity_config;
 mod mcp;
 mod notification_tmux;
 mod process;
-mod room;
 mod secret;
 mod skills;
 
@@ -20,125 +19,8 @@ pub use identity_config::*;
 pub use mcp::*;
 pub use notification_tmux::*;
 pub use process::*;
-pub use room::*;
 pub use secret::*;
 pub use skills::*;
-
-#[cfg(test)]
-mod room_v2_contract_tests {
-    use super::*;
-
-    #[test]
-    fn maintenance_v2_shapes_close_slots_bound_wait_and_separate_sync() {
-        let slots: Vec<serde_json::Value> = RoomMaintenanceSlot::ALL
-            .iter()
-            .map(|slot| serde_json::to_value(slot).unwrap())
-            .collect();
-        assert_eq!(
-            slots,
-            vec![
-                serde_json::json!("diary.daily"),
-                serde_json::json!("diary.weekly"),
-                serde_json::json!("diary.monthly"),
-                serde_json::json!("notebook"),
-                serde_json::json!("entity"),
-            ]
-        );
-        assert!(
-            serde_json::from_value::<RoomMaintenanceSlot>(serde_json::json!("diary.other"))
-                .is_err()
-        );
-
-        let request: RoomMaintenanceSubmitRequest = serde_json::from_value(serde_json::json!({
-            "items": [{
-                "slot": "entity",
-                "payload": {"entity": "project", "operation": "refresh"}
-            }],
-            "mode": "workflow",
-            "waitSeconds": 31
-        }))
-        .unwrap();
-        assert!(request.has_valid_item_count());
-        assert_eq!(request.effective_wait_seconds(), 30);
-        assert_eq!(
-            serde_json::to_value(&request).unwrap()["items"][0]["payload"]["operation"],
-            "refresh"
-        );
-
-        let response = RoomMaintenanceSubmitResponse {
-            mode: RoomMaintenanceExecutionMode::Local,
-            state: RoomMaintenanceSubmissionState::Applied,
-            local_applied: true,
-            sync: RoomMaintenanceSyncOutcome::Failed,
-            revision: Some("abc123".to_string()),
-        };
-        let response_value = serde_json::to_value(&response).unwrap();
-        assert_eq!(response_value["localApplied"], true);
-        assert_eq!(response_value["state"], "applied");
-        assert_eq!(response_value["sync"], "failed");
-        assert_eq!(
-            serde_json::from_value::<RoomMaintenanceSubmitResponse>(response_value).unwrap(),
-            response
-        );
-
-        let status = RoomMaintenanceStatusResponse {
-            repository: RoomMaintenanceRepositoryStatus {
-                root: "/workspace/room".to_string(),
-                initialized: true,
-                top_level: true,
-                branch: Some("main".to_string()),
-                head: Some("abc123".to_string()),
-                clean: Some(true),
-            },
-            schema: RoomMaintenanceSchemaStatus {
-                schema_version: Some(1),
-                supported: true,
-                ready: true,
-            },
-            scaffold: RoomMaintenanceScaffoldStatus {
-                ready: false,
-                missing_paths: vec!["manual/entity.md".to_string()],
-            },
-            local_executor: RoomMaintenanceLocalExecutorStatus { ready: true },
-            configured_mode: RoomMaintenanceExecutionMode::Local,
-            auto_push: false,
-            workflow: RoomMaintenanceWorkflowStatus {
-                available: true,
-                ready: false,
-            },
-            remote: RoomMaintenanceRemoteStatus {
-                configured: true,
-                available: true,
-            },
-            sync: RoomMaintenanceSyncStatus {
-                upstream_available: true,
-                in_sync: Some(false),
-                local_head: Some("abc123".to_string()),
-                upstream_head: Some("def456".to_string()),
-            },
-            slots: RoomMaintenanceSlot::ALL
-                .iter()
-                .map(|slot| RoomMaintenanceSlotStatus {
-                    slot: *slot,
-                    occupied: false,
-                })
-                .collect(),
-        };
-        let status_value = serde_json::to_value(&status).unwrap();
-        assert_eq!(status_value["schema"]["schemaVersion"], 1);
-        assert_eq!(status_value["schema"]["ready"], true);
-        assert_eq!(status_value["scaffold"]["ready"], false);
-        assert_eq!(status_value["localExecutor"]["ready"], true);
-        assert_eq!(status_value["workflow"]["ready"], false);
-        assert_eq!(status_value["remote"]["available"], true);
-        assert_eq!(status_value["sync"]["inSync"], false);
-        assert_eq!(status_value["slots"].as_array().unwrap().len(), 5);
-        assert_eq!(
-            serde_json::from_value::<RoomMaintenanceStatusResponse>(status_value).unwrap(),
-            status
-        );
-    }
-}
 
 #[cfg(test)]
 mod tmux_tests {

@@ -6,7 +6,7 @@ pub(crate) mod http;
 #[cfg(test)]
 mod tests {
     use super::control::register_connection_role;
-    use super::http::room_notebook_read;
+    use super::http::room_email_list;
     use crate::agents::transport::{post_agent_message, SseConnectQuery};
     use crate::config::RemoteConfirmationConfig;
     use crate::db::init_db;
@@ -17,7 +17,7 @@ mod tests {
     use crate::HubConfig;
     use agentic_gpt_protocol::{
         AgentConnectionMode, AgentMessage, AgentRole, HubCommand, HubCommandEnvelope,
-        RoomNotebookReadRequest,
+        RoomEmailListRequest,
     };
     use axum::body::to_bytes;
     use axum::extract::{Path, Query, State};
@@ -128,12 +128,10 @@ mod tests {
             HeaderValue::from_static("Bearer test-api-key"),
         );
         let task = tokio::spawn(async move {
-            room_notebook_read(
+            room_email_list(
                 State(request_state),
                 action_headers,
-                Json(RoomNotebookReadRequest {
-                    path: "Notebook/topic.md".to_string(),
-                }),
+                Json(RoomEmailListRequest::default()),
             )
             .await
         });
@@ -143,10 +141,14 @@ mod tests {
         let envelope = serde_json::from_str::<HubCommandEnvelope>(&text).unwrap();
         assert!(matches!(
             &envelope.command,
-            HubCommand::RoomNotebookRead { .. }
+            HubCommand::RoomEmailList { .. }
         ));
 
-        let response_data = json!({ "path": "Notebook/topic.md", "content": "# Topic" });
+        let response_data = json!({
+            "items": [],
+            "hasMore": false,
+            "sync": { "initialSyncComplete": true, "state": "ready" }
+        });
         let mut agent_headers = HeaderMap::new();
         agent_headers.insert("x-agent-secret", HeaderValue::from_static("test-secret"));
         let query: SseConnectQuery =

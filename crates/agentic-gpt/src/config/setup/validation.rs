@@ -3,16 +3,12 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config::{
-        RoomMaintenanceMode, ShellInitFile, ToolNamespace, ToolsetConfig, DEFAULT_SHELL_INIT_FILE,
-    };
-    use crate::config_templates::{build_config, OptionalSection, RuntimeMode, SecretValue};
-    use crate::tui::forms::OrderedMultiSelectState;
+    use crate::config::{ShellInitFile, DEFAULT_SHELL_INIT_FILE};
+    use crate::config_templates::{build_config, RuntimeMode, SecretValue};
     use crate::WorkerProfile;
 
     use super::super::model::{
-        ConfirmationDraft, OptionalSectionDraft, RoomDraft, SetupSeed, SetupSession, ShellDraft,
-        ToolsetsDraft,
+        ConfirmationDraft, OptionalSectionDraft, SetupSeed, SetupSession, ShellDraft,
     };
     use super::{build_active_input_unchecked, validate_for_review};
 
@@ -26,22 +22,6 @@ mod tests {
             UiLanguage::En,
             PathBuf::from("/tmp/config.json"),
         )
-    }
-
-    fn toolsets_draft(config: &ToolsetConfig) -> OptionalSectionDraft {
-        OptionalSectionDraft::Toolsets(ToolsetsDraft {
-            selection: OrderedMultiSelectState::new(
-                ToolNamespace::all()
-                    .iter()
-                    .map(|namespace| namespace.as_str().to_string())
-                    .collect(),
-                config
-                    .enabled_names()
-                    .into_iter()
-                    .map(|name| name.to_string())
-                    .collect(),
-            ),
-        })
     }
 
     #[test]
@@ -194,71 +174,19 @@ mod tests {
                 && item.value == "https://hub.example.invalid"
         }));
     }
-    #[test]
-    fn room_settings_remain_editable_while_room_services_are_preconfigured() {
-        let mut session = session(RuntimeMode::Local, WorkerProfile::Normal);
-        let mut toolsets = ToolsetConfig::normal();
-        toolsets.enable(ToolNamespace::RoomDiary);
-        session
-            .save_optional_section(toolsets_draft(&toolsets))
-            .unwrap();
-        assert!(session
-            .available_optional_sections()
-            .contains(&OptionalSection::Room));
-        assert!(session
-            .available_optional_sections()
-            .contains(&OptionalSection::Email));
-        assert!(session
-            .available_optional_sections()
-            .contains(&OptionalSection::RoomSecret));
-
-        session.set_profile(WorkerProfile::Room);
-        assert!(session
-            .available_optional_sections()
-            .contains(&OptionalSection::Room));
-        session.set_profile(WorkerProfile::Normal);
-        assert!(session
-            .available_optional_sections()
-            .contains(&OptionalSection::Room));
-
-        session
-            .save_optional_section(OptionalSectionDraft::Room(RoomDraft {
-                timezone: "Europe/Berlin".to_string(),
-                diary_boundary_hour: "4".to_string(),
-                repository_root: "/tmp/room-repository".to_string(),
-                maintenance_mode: "workflow".to_string(),
-                maintenance_auto_push: true,
-            }))
-            .unwrap();
-
-        let built = build_config(session.build_active_input().unwrap()).unwrap();
-
-        assert_eq!(built.config.toolsets, toolsets);
-        assert_eq!(
-            built.config.room.repository_root,
-            Some(PathBuf::from("/tmp/room-repository"))
-        );
-        assert_eq!(built.config.room.timezone, "Europe/Berlin");
-        assert_eq!(built.config.room.diary_day_boundary_hour, 4);
-        assert_eq!(
-            built.config.room.maintenance.mode,
-            RoomMaintenanceMode::Workflow
-        );
-        assert!(built.config.room.maintenance.auto_push);
-    }
 }
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::config::mcp_servers::{self, McpServerAuthConfig, McpServerConfig};
 use crate::config::{
-    self, default_room_config, ConfirmationProviderConfig, EventNotificationLevel, EventsConfig,
+    self, ConfirmationProviderConfig, EventNotificationLevel, EventsConfig,
     HttpMcpConfig, HubReportingConfig, LimitsConfig, MaxActiveProcesses, PathPolicyConfig,
-    ReportingDetail, RoomConfig, RoomMaintenanceConfig, RoomMaintenanceMode, ShellConfig,
-    ShellInitFile, ToolNamespace, ToolsetConfig, TunnelClientConfig,
+    ReportingDetail, ShellConfig, ShellInitFile, ToolNamespace, TunnelClientConfig,
 };
 use crate::config_templates::{
-    self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
+    build_config, optional_section_is_legal, InitInput, OptionalSection, RuntimeMode, SecretValue,
+    TunnelSecretSource,
 };
 
 use super::model::{
@@ -277,18 +205,7 @@ fn error(field: SetupField, code: &'static str) -> ValidationError {
     ValidationError { field, code }
 }
 
-pub(super) fn section_is_legal(
-    section: OptionalSection,
-    mode: RuntimeMode,
-    toolsets: &ToolsetConfig,
-) -> bool {
-    config_templates::optional_section_is_legal(section, mode, toolsets)
-}
-
-pub(super) fn available_optional_sections(
-    mode: RuntimeMode,
-    toolsets: &ToolsetConfig,
-) -> Vec<OptionalSection> {
+pub(super) fn available_optional_sections(mode: RuntimeMode) -> Vec<OptionalSection> {
     [
         OptionalSection::Identity,
         OptionalSection::Workspace,
@@ -302,7 +219,6 @@ pub(super) fn available_optional_sections(
         OptionalSection::Skills,
         OptionalSection::SecurityPolicy,
         OptionalSection::ConfigManagement,
-        OptionalSection::Room,
         OptionalSection::RoomSecret,
         OptionalSection::Email,
         OptionalSection::TunnelClient,
@@ -310,7 +226,7 @@ pub(super) fn available_optional_sections(
         OptionalSection::Events,
     ]
     .into_iter()
-    .filter(|section| section_is_legal(*section, mode, toolsets))
+    .filter(|section| optional_section_is_legal(*section, mode))
     .collect()
 }
 
@@ -626,14 +542,6 @@ pub(super) fn validate_field(
             OptionalSection::RoomSecret,
             &session.optional_draft(OptionalSection::RoomSecret),
         ),
-        SetupField::RoomTimezone
-        | SetupField::DiaryBoundaryHour
-        | SetupField::RepositoryRoot
-        | SetupField::RoomMaintenanceMode
-        | SetupField::RoomMaintenanceAutoPush => validate_optional(
-            OptionalSection::Room,
-            &session.optional_draft(OptionalSection::Room),
-        ),
         SetupField::TunnelCacheDir | SetupField::TunnelExecutable => validate_optional(
             OptionalSection::TunnelClient,
             &session.optional_draft(OptionalSection::TunnelClient),
@@ -683,8 +591,7 @@ pub(super) fn validate_optional_draft(
     draft: &OptionalSectionDraft,
 ) -> Result<(), ValidationErrors> {
     let section = draft.section();
-    let toolsets = session.effective_toolsets();
-    if !section_is_legal(section, session.selected_mode(), &toolsets) {
+    if !optional_section_is_legal(section, session.selected_mode()) {
         return Err(vec![error(
             first_field(section),
             "config_init_optional_section_invalid",
@@ -798,27 +705,6 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
         (OptionalSection::Email, OptionalSectionDraft::Email(value)) => {
             if let Err((field, code)) = value.to_config() {
                 errors.push(error(field, code));
-            }
-        }
-        (OptionalSection::Room, OptionalSectionDraft::Room(value)) => {
-            required(
-                &value.timezone,
-                SetupField::RoomTimezone,
-                "room_timezone",
-                &mut errors,
-            );
-            match parse_u32_value(&value.diary_boundary_hour) {
-                Ok(hour) if hour <= 23 => {}
-                _ => errors.push(error(
-                    SetupField::DiaryBoundaryHour,
-                    "config_init_number_invalid: diary_boundary_hour",
-                )),
-            }
-            if !matches!(value.maintenance_mode.trim(), "local" | "workflow") {
-                errors.push(error(
-                    SetupField::RoomMaintenanceMode,
-                    "config_init_room_maintenance_mode_invalid",
-                ));
             }
         }
         (OptionalSection::RoomSecret, OptionalSectionDraft::RoomSecret(value)) => {
@@ -1031,7 +917,6 @@ fn required(value: &str, field: SetupField, key: &'static str, errors: &mut Vali
                 "confirmation_language" => {
                     "config_init_required_value_missing: confirmation_language"
                 }
-                "room_timezone" => "config_init_required_value_missing: room_timezone",
                 _ => "config_init_required_value_missing",
             },
         ));
@@ -1071,10 +956,6 @@ fn parse_max_active_processes(value: &str, errors: &mut ValidationErrors) {
 
 fn parse_usize_value(value: &str) -> Result<usize, ()> {
     value.trim().parse::<usize>().map_err(|_| ())
-}
-
-fn parse_u32_value(value: &str) -> Result<u32, ()> {
-    value.trim().parse::<u32>().map_err(|_| ())
 }
 
 fn number_code(field: SetupField) -> &'static str {
@@ -1160,7 +1041,6 @@ fn configured_draft(
             .mcp_servers
             .clone()
             .map(OptionalSectionDraft::McpServers),
-        OptionalSection::Room => drafts.room.clone().map(OptionalSectionDraft::Room),
         OptionalSection::RoomSecret => drafts
             .room_secret
             .clone()
@@ -1375,41 +1255,11 @@ fn apply_optional_draft(
                     .map_err(|(field, code)| vec![error(field, code)])?,
             );
         }
-        (OptionalSection::Room, OptionalSectionDraft::Room(value)) => {
-            let diary_day_boundary_hour =
-                value.diary_boundary_hour.trim().parse().map_err(|_| {
-                    vec![error(
-                        SetupField::DiaryBoundaryHour,
-                        "config_init_number_invalid: diary_boundary_hour",
-                    )]
-                })?;
-            let maintenance_mode = match value.maintenance_mode.trim() {
-                "local" => RoomMaintenanceMode::Local,
-                "workflow" => RoomMaintenanceMode::Workflow,
-                _ => {
-                    return Err(vec![error(
-                        SetupField::RoomMaintenanceMode,
-                        "config_init_room_maintenance_mode_invalid",
-                    )]);
-                }
-            };
-            input.room = Some(RoomConfig {
-                secret: default_room_config().secret,
-                repository_root: optional_path(&value.repository_root),
-                timezone: value.timezone.trim().to_string(),
-                diary_day_boundary_hour,
-                maintenance: RoomMaintenanceConfig {
-                    mode: maintenance_mode,
-                    auto_push: value.maintenance_auto_push,
-                },
-                skills: default_room_config().skills,
-            });
-        }
         (OptionalSection::RoomSecret, OptionalSectionDraft::RoomSecret(value)) => {
             let secret = value
                 .to_config()
                 .map_err(|(field, code)| vec![error(field, code)])?;
-            input.room.get_or_insert_with(default_room_config).secret = secret;
+            input.room_secret = Some(secret);
         }
         (OptionalSection::TunnelClient, OptionalSectionDraft::TunnelClient(value)) => {
             input.tunnel_client = Some(TunnelClientConfig {
@@ -1566,7 +1416,6 @@ fn first_field(section: OptionalSection) -> SetupField {
         | OptionalSection::Skills
         | OptionalSection::SecurityPolicy
         | OptionalSection::ConfigManagement => SetupField::Catalog(0),
-        OptionalSection::Room => SetupField::RoomTimezone,
         OptionalSection::RoomSecret => SetupField::RoomSecretServerUrl,
         OptionalSection::Email => SetupField::EmailImapHost,
         OptionalSection::TunnelClient => SetupField::TunnelCacheDir,

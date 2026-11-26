@@ -88,11 +88,6 @@ pub(crate) enum SetupField {
     RoomSecretUpsertPolicy,
     RoomSecretDeletePolicy,
     RoomSecretSyncWaitTimeoutMs,
-    RoomTimezone,
-    DiaryBoundaryHour,
-    RepositoryRoot,
-    RoomMaintenanceMode,
-    RoomMaintenanceAutoPush,
     TunnelCacheDir,
     TunnelExecutable,
     HubReportingEnabled,
@@ -326,15 +321,13 @@ impl ToolsetsDraft {
         }
     }
     pub(crate) fn to_config(&self) -> Result<ToolsetConfig, ()> {
-        let mut config = ToolsetConfig::room();
-        for namespace in ToolNamespace::all().iter().copied() {
-            config.disable(namespace);
-        }
-        for name in self.selection.selected() {
-            let namespace = ToolNamespace::parse(name).map_err(|_| ())?;
-            config.enable(namespace);
-        }
-        Ok(config)
+        let enabled = self
+            .selection
+            .selected()
+            .iter()
+            .map(|name| ToolNamespace::parse(name).map_err(|_| ()))
+            .collect::<Result<_, _>>()?;
+        Ok(ToolsetConfig { enabled })
     }
 
     pub(crate) fn toggle_room_group(&mut self) {
@@ -654,15 +647,6 @@ impl RoomSecretDraft {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RoomDraft {
-    pub(crate) timezone: String,
-    pub(crate) diary_boundary_hour: String,
-    pub(crate) repository_root: String,
-    pub(crate) maintenance_mode: String,
-    pub(crate) maintenance_auto_push: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TunnelClientDraft {
     pub(crate) cache_dir: String,
     pub(crate) executable: String,
@@ -715,7 +699,6 @@ pub(crate) struct OptionalDrafts {
     pub(crate) toolsets: Option<ToolsetsDraft>,
     pub(crate) shell: Option<ShellDraft>,
     pub(crate) mcp_servers: Option<McpServersDraft>,
-    pub(crate) room: Option<RoomDraft>,
     pub(crate) room_secret: Option<RoomSecretDraft>,
     pub(crate) email: Option<EmailDraft>,
     pub(crate) tunnel_client: Option<TunnelClientDraft>,
@@ -733,7 +716,6 @@ pub(crate) enum OptionalSectionDraft {
     Sandbox(SandboxDraft),
     Toolsets(ToolsetsDraft),
     McpServers(McpServersDraft),
-    Room(RoomDraft),
     RoomSecret(RoomSecretDraft),
     Email(EmailDraft),
     TunnelClient(TunnelClientDraft),
@@ -765,7 +747,6 @@ impl OptionalSectionDraft {
             Self::Sandbox(_) => OptionalSection::Sandbox,
             Self::Toolsets(_) => OptionalSection::Toolsets,
             Self::McpServers(_) => OptionalSection::McpServers,
-            Self::Room(_) => OptionalSection::Room,
             Self::RoomSecret(_) => OptionalSection::RoomSecret,
             Self::Email(_) => OptionalSection::Email,
             Self::TunnelClient(_) => OptionalSection::TunnelClient,
@@ -918,9 +899,9 @@ impl SetupSession {
         &mut self.hub
     }
     pub(crate) fn optional_draft(&self, section: OptionalSection) -> OptionalSectionDraft {
-        self.optional.get(section).unwrap_or_else(|| {
-            default_optional_draft_for_profile(self.language, section, self.selected_profile)
-        })
+        self.optional
+            .get(section)
+            .unwrap_or_else(|| default_optional_draft(self.language, section))
     }
 
     pub(crate) fn auxiliary_hub_connection_enabled(&self) -> bool {
@@ -934,7 +915,7 @@ impl SetupSession {
             .toolsets
             .as_ref()
             .and_then(|draft| draft.to_config().ok())
-            .unwrap_or_else(|| ToolsetConfig::for_profile(self.selected_profile))
+            .unwrap_or_default()
     }
 
     pub(crate) fn set_mode(&mut self, mode: RuntimeMode) {
@@ -946,8 +927,7 @@ impl SetupSession {
     }
 
     pub(crate) fn available_optional_sections(&self) -> Vec<OptionalSection> {
-        let toolsets = self.effective_toolsets();
-        validation::available_optional_sections(self.selected_mode, &toolsets)
+        validation::available_optional_sections(self.selected_mode)
     }
 
     pub(crate) fn section_status(&self, section: OptionalSection) -> SectionStatus {
@@ -978,7 +958,7 @@ impl SetupSession {
             }
             _ => self.policy_enabled(),
         };
-        if !validation::section_is_legal(section, self.selected_mode, &toolsets) {
+        if !crate::config_templates::optional_section_is_legal(section, self.selected_mode) {
             return SectionStatus::NotApplicable;
         }
 
@@ -988,31 +968,24 @@ impl SetupSession {
 
         let changed_toolset = match section {
             OptionalSection::Browser => {
-                self.toolset_differs_from_default(ToolNamespace::Browser, &toolsets)
+                toolset_differs_from_default(ToolNamespace::Browser, &toolsets)
             }
             OptionalSection::Skills => {
-                self.toolset_differs_from_default(ToolNamespace::Skills, &toolsets)
+                toolset_differs_from_default(ToolNamespace::Skills, &toolsets)
             }
             OptionalSection::ConfigManagement => {
-                self.toolset_differs_from_default(ToolNamespace::Config, &toolsets)
+                toolset_differs_from_default(ToolNamespace::Config, &toolsets)
             }
             OptionalSection::McpServers => {
-                self.toolset_differs_from_default(ToolNamespace::Mcp, &toolsets)
+                toolset_differs_from_default(ToolNamespace::Mcp, &toolsets)
             }
             OptionalSection::Email => {
-                self.toolset_differs_from_default(ToolNamespace::RoomEmail, &toolsets)
+                toolset_differs_from_default(ToolNamespace::RoomEmail, &toolsets)
             }
             OptionalSection::RoomSecret => {
-                self.toolset_differs_from_default(ToolNamespace::RoomSecret, &toolsets)
+                toolset_differs_from_default(ToolNamespace::RoomSecret, &toolsets)
             }
-            OptionalSection::Room => ToolNamespace::all()
-                .iter()
-                .copied()
-                .filter(|namespace| namespace.uses_room_repository())
-                .any(|namespace| self.toolset_differs_from_default(namespace, &toolsets)),
-            OptionalSection::Toolsets => {
-                toolsets != ToolsetConfig::for_profile(self.selected_profile)
-            }
+            OptionalSection::Toolsets => toolsets != ToolsetConfig::default(),
             _ => false,
         };
         if changed_toolset || !self.draft_matches_default(section, &draft) {
@@ -1028,15 +1001,6 @@ impl SetupSession {
             .get(&OptionalSection::SecurityPolicy)
             .and_then(|draft| catalog_bool_value(draft, &["policy", "enabled"]))
             .unwrap_or(true)
-    }
-
-    fn toolset_differs_from_default(
-        &self,
-        namespace: ToolNamespace,
-        toolsets: &ToolsetConfig,
-    ) -> bool {
-        toolsets.is_enabled(namespace)
-            != ToolsetConfig::for_profile(self.selected_profile).is_enabled(namespace)
     }
 
     fn section_is_closed(
@@ -1057,11 +1021,6 @@ impl SetupSession {
             }
             OptionalSection::Email => !toolsets.is_enabled(ToolNamespace::RoomEmail),
             OptionalSection::RoomSecret => !toolsets.is_enabled(ToolNamespace::RoomSecret),
-            OptionalSection::Room => !ToolNamespace::all()
-                .iter()
-                .copied()
-                .filter(|namespace| namespace.uses_room_repository())
-                .any(|namespace| toolsets.is_enabled(namespace)),
             OptionalSection::Toolsets => toolsets.enabled.is_empty(),
             OptionalSection::SecurityPolicy => !policy_enabled,
             OptionalSection::Sandbox => {
@@ -1080,14 +1039,9 @@ impl SetupSession {
         section: OptionalSection,
         draft: &OptionalSectionDraft,
     ) -> bool {
-        let default =
-            default_optional_draft_for_profile(self.language, section, self.selected_profile);
+        let default = default_optional_draft(self.language, section);
         if let OptionalSectionDraft::Identity(current) = draft {
-            let ui_default = default_optional_draft_for_profile(
-                self.language,
-                OptionalSection::Identity,
-                self.selected_profile,
-            );
+            let ui_default = default_optional_draft(self.language, OptionalSection::Identity);
             let persisted_default = Config::default_config()
                 .expect("default config")
                 .display_name;
@@ -1130,16 +1084,6 @@ impl SetupSession {
             }
             (OptionalSectionDraft::Limits(current), OptionalSectionDraft::Limits(default)) => {
                 limits_match(current, default)
-            }
-            (OptionalSectionDraft::Room(current), OptionalSectionDraft::Room(default)) => {
-                current.timezone == default.timezone
-                    && numeric_text_matches(
-                        &current.diary_boundary_hour,
-                        &default.diary_boundary_hour,
-                    )
-                    && paths_match_one(&current.repository_root, &default.repository_root)
-                    && current.maintenance_mode == default.maintenance_mode
-                    && current.maintenance_auto_push == default.maintenance_auto_push
             }
             (OptionalSectionDraft::Events(current), OptionalSectionDraft::Events(default)) => {
                 numeric_text_matches(&current.low_ttl_seconds, &default.low_ttl_seconds)
@@ -1326,6 +1270,10 @@ impl StandaloneDraft {
     }
 }
 
+fn toolset_differs_from_default(namespace: ToolNamespace, toolsets: &ToolsetConfig) -> bool {
+    toolsets.is_enabled(namespace) != ToolsetConfig::default().is_enabled(namespace)
+}
+
 impl OptionalDrafts {
     fn get(&self, section: OptionalSection) -> Option<OptionalSectionDraft> {
         match section {
@@ -1345,7 +1293,6 @@ impl OptionalDrafts {
                 .mcp_servers
                 .clone()
                 .map(OptionalSectionDraft::McpServers),
-            OptionalSection::Room => self.room.clone().map(OptionalSectionDraft::Room),
             OptionalSection::RoomSecret => self
                 .room_secret
                 .clone()
@@ -1381,7 +1328,6 @@ impl OptionalDrafts {
             OptionalSectionDraft::Shell(value) => self.shell = Some(value),
             OptionalSectionDraft::Toolsets(value) => self.toolsets = Some(value),
             OptionalSectionDraft::McpServers(value) => self.mcp_servers = Some(value),
-            OptionalSectionDraft::Room(value) => self.room = Some(value),
             OptionalSectionDraft::RoomSecret(value) => self.room_secret = Some(value),
             OptionalSectionDraft::Email(value) => self.email = Some(value),
             OptionalSectionDraft::TunnelClient(value) => self.tunnel_client = Some(value),
@@ -1397,14 +1343,6 @@ impl OptionalDrafts {
 pub(crate) fn default_optional_draft(
     language: UiLanguage,
     section: OptionalSection,
-) -> OptionalSectionDraft {
-    default_optional_draft_for_profile(language, section, WorkerProfile::Normal)
-}
-
-pub(crate) fn default_optional_draft_for_profile(
-    language: UiLanguage,
-    section: OptionalSection,
-    profile: WorkerProfile,
 ) -> OptionalSectionDraft {
     match section {
         OptionalSection::Browser
@@ -1446,19 +1384,12 @@ pub(crate) fn default_optional_draft_for_profile(
             init_file_path: DEFAULT_SHELL_INIT_FILE.to_string(),
         }),
         OptionalSection::Toolsets => OptionalSectionDraft::Toolsets(ToolsetsDraft::from_config(
-            &ToolsetConfig::for_profile(profile),
+            &ToolsetConfig::default(),
         )),
         OptionalSection::McpServers => OptionalSectionDraft::McpServers(McpServersDraft::default()),
         OptionalSection::Email => OptionalSectionDraft::Email(EmailDraft::from_config(
             &crate::config::EmailConfig::default(),
         )),
-        OptionalSection::Room => OptionalSectionDraft::Room(RoomDraft {
-            timezone: "Asia/Shanghai".to_string(),
-            diary_boundary_hour: "5".to_string(),
-            repository_root: String::new(),
-            maintenance_mode: "local".to_string(),
-            maintenance_auto_push: false,
-        }),
         OptionalSection::RoomSecret => OptionalSectionDraft::RoomSecret(RoomSecretDraft::default()),
         OptionalSection::TunnelClient => OptionalSectionDraft::TunnelClient(TunnelClientDraft {
             cache_dir: DEFAULT_TUNNEL_CACHE_DIR.to_string(),
@@ -1542,18 +1473,6 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
                 .collect(),
         }),
         email: Some(EmailDraft::from_config(&config.email)),
-        room: Some(RoomDraft {
-            timezone: config.room.timezone.clone(),
-            diary_boundary_hour: config.room.diary_day_boundary_hour.to_string(),
-            repository_root: config
-                .room
-                .repository_root
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            maintenance_mode: format!("{:?}", config.room.maintenance.mode).to_lowercase(),
-            maintenance_auto_push: config.room.maintenance.auto_push,
-        }),
         room_secret: Some(RoomSecretDraft::from_config(&config.room.secret)),
         tunnel_client: tunnel.map(|tunnel| TunnelClientDraft {
             cache_dir: tunnel.client.cache_dir.to_string_lossy().into_owned(),

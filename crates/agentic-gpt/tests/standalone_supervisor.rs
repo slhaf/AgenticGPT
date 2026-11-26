@@ -245,21 +245,11 @@ fn run_smoke(
             .map_err(|error| error.to_string())?;
     config["mode"] = Value::String("standalone".to_string());
     config["profile"] = Value::String(profile.to_string());
-    config["toolsets"]["enabled"] = if profile == "room" {
-        json!([
-            "agent",
-            "file",
-            "mcp",
-            "process",
-            "skills",
-            "room.diary",
-            "room.notebook",
-            "room.state",
-            "room.maintenance"
-        ])
-    } else {
-        json!(["agent", "file", "mcp", "process", "skills"])
-    };
+    let mut toolsets = vec!["agent", "file", "mcp", "process", "skills"];
+    if profile == "room" {
+        toolsets.push("room.email");
+    }
+    config["toolsets"]["enabled"] = json!(toolsets);
     config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String("~/.agentic_gpt/workspace".to_string());
     set_fixture_path_policy(&mut config, &[&workspace]);
@@ -352,7 +342,7 @@ fn run_smoke(
             "worker response did not contain tool output: {response_text}"
         ));
     }
-    let room_tool = "room.diary.active";
+    let room_tool = "room.email.list";
     if profile == "room" && !listed.to_string().contains(room_tool) {
         return Err(format!(
             "room worker response did not advertise Room tools: {listed}"

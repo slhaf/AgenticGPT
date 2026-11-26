@@ -76,12 +76,6 @@ mod process;
 mod process_history;
 #[path = "process/model.rs"]
 mod process_model;
-#[path = "room/room_maintenance.rs"]
-mod room_maintenance;
-#[path = "room/room_reads.rs"]
-mod room_reads;
-#[path = "room/room_repository.rs"]
-mod room_repository;
 #[path = "room/secret/mod.rs"]
 mod secret;
 

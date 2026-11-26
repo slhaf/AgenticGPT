@@ -15,7 +15,7 @@ use crate::{
         rejection_error, slim_mcp_batch_response, slim_mcp_response, slim_process_batch_response,
         slim_process_cancel_response, slim_process_list_response, slim_process_response,
     },
-    process, room_maintenance, room_reads, skills,
+    process, skills,
     state::AppState,
     tmux,
 };
@@ -443,40 +443,6 @@ async fn dispatch_inner(
             serde_json::to_value(payload)?,
         )
         .await),
-        HubCommand::RoomDiaryActive { payload, .. } => map_room_read_result(
-            room_reads::diary_active(&state, payload).await,
-            "room_diary_active_failed",
-        ),
-        HubCommand::RoomDiaryRead { payload, .. } => map_room_read_result(
-            room_reads::diary_read(&state, payload).await,
-            "room_diary_read_failed",
-        ),
-        HubCommand::RoomNotebookRecent { payload, .. } => map_room_read_result(
-            room_reads::notebook_recent(&state, payload).await,
-            "room_notebook_recent_failed",
-        ),
-        HubCommand::RoomNotebookSearch { payload, .. } => map_room_read_result(
-            room_reads::notebook_search(&state, payload).await,
-            "room_notebook_search_failed",
-        ),
-        HubCommand::RoomNotebookRead { payload, .. } => map_room_read_result(
-            room_reads::notebook_read(&state, payload).await,
-            "room_notebook_read_failed",
-        ),
-        HubCommand::RoomStateList { payload, .. } => map_room_read_result(
-            room_reads::state_list(&state, payload).await,
-            "room_state_list_failed",
-        ),
-        HubCommand::RoomStateRead { payload, .. } => map_room_read_result(
-            room_reads::state_read(&state, payload).await,
-            "room_state_read_failed",
-        ),
-        HubCommand::RoomMaintenanceStatus { payload, .. } => {
-            map_room_maintenance_result(room_maintenance::status(&state, payload).await, "status")
-        }
-        HubCommand::RoomMaintenanceSubmit { payload, .. } => {
-            map_room_maintenance_result(room_maintenance::submit(&state, payload).await, "submit")
-        }
         HubCommand::SkillsList { .. } => {
             map_skills_result(skills::list(&state).await, "skills_list_failed")
         }
@@ -548,70 +514,6 @@ fn normalize_group(
         })
     })
 }
-fn map_room_read_result<T: serde::Serialize>(
-    result: std::result::Result<T, anyhow::Error>,
-    default_code: &str,
-) -> Result<serde_json::Value> {
-    Ok(match result {
-        Ok(result) => serde_json::to_value(result)?,
-        Err(error) => room_read_error(default_code, error),
-    })
-}
-
-fn room_read_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
-    let reason = error.to_string();
-    let code = reason
-        .split([':', ';'])
-        .next()
-        .filter(|value| {
-            value.starts_with("room_")
-                && value.len() <= 128
-                && value
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
-        })
-        .unwrap_or(default_code);
-    let message = reason.chars().take(512).collect::<String>();
-    serde_json::json!({ "error": { "code": code, "message": message } })
-}
-
-fn map_room_maintenance_result<T: serde::Serialize>(
-    result: std::result::Result<T, anyhow::Error>,
-    operation: &str,
-) -> Result<serde_json::Value> {
-    Ok(match result {
-        Ok(result) => serde_json::to_value(result)?,
-        Err(error) => room_maintenance_error(operation, error),
-    })
-}
-
-pub(crate) fn room_maintenance_error(
-    operation: &str,
-    error: impl std::fmt::Display,
-) -> serde_json::Value {
-    let reason = error.to_string();
-    let code = reason
-        .split([':', ';'])
-        .next()
-        .filter(|code| {
-            code.starts_with("room_maintenance_")
-                && code.len() <= 128
-                && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        })
-        .unwrap_or("room_maintenance_failed");
-    let detail = reason.chars().take(384).collect::<String>();
-    let message = format!("room maintenance {operation} failed: {detail}")
-        .chars()
-        .take(512)
-        .collect::<String>();
-    serde_json::json!({
-        "error": {
-            "code": code,
-            "message": message
-        }
-    })
-}
-
 fn map_skills_result<T: serde::Serialize>(
     result: std::result::Result<T, anyhow::Error>,
     default_code: &str,

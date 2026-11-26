@@ -6,9 +6,7 @@ use crate::config::{Config, RuntimeMode};
 use crate::config::{PathPolicyConfig, TunnelConfig};
 use crate::startup::reload_live_config_once;
 use crate::state::{AppState, CapabilityProfile, RuntimeModel};
-use agentic_gpt_protocol::{
-    AgentMessage, HubCommand, RoomDiaryActiveRequest, RoomEmailListRequest,
-};
+use agentic_gpt_protocol::{AgentMessage, HubCommand, RoomEmailListRequest};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -69,11 +67,6 @@ fn command_test_state(
     config.policy.path.read_only = Vec::new();
     config.policy.path.default_action = crate::config::PathDefaultAction::Allow;
     config.policy.path.write = Vec::new();
-    config.toolsets = if profile == CapabilityProfile::Room {
-        config::ToolsetConfig::room()
-    } else {
-        config::ToolsetConfig::normal()
-    };
     config.workspace_root = workspace_root;
     let (tx, rx) = mpsc::unbounded_channel();
     let private_state =
@@ -105,7 +98,6 @@ fn command_test_state(
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
-            room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(skills::SkillLeaseManager::new()),
             skill_installs: Arc::new(skill_installs::InstallManager::new()),
@@ -387,13 +379,13 @@ async fn normal_hub_rejects_current_room_commands_without_room_profile() {
         .write()
         .await
         .toolsets
-        .enable(config::ToolNamespace::RoomDiary);
+        .enable(config::ToolNamespace::RoomEmail);
 
     hub::handle_hub_command(
         state,
-        HubCommand::RoomDiaryActive {
+        HubCommand::RoomEmailList {
             request_id: "req-room".to_string(),
-            payload: RoomDiaryActiveRequest::default(),
+            payload: RoomEmailListRequest::default(),
         },
         None,
     )
@@ -401,28 +393,6 @@ async fn normal_hub_rejects_current_room_commands_without_room_profile() {
     .unwrap();
     let response = recv_response(&mut rx).await;
     assert_eq!(response["error"]["code"], "room_agent_required");
-}
-
-#[tokio::test]
-async fn room_mode_dispatches_current_diary_command() {
-    let workspace = unique_temp_dir("room-current-diary").join("workspace");
-    fs::create_dir_all(workspace.join("room")).unwrap();
-    let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
-
-    hub::handle_hub_command(
-        state,
-        HubCommand::RoomDiaryActive {
-            request_id: "req-room-diary".to_string(),
-            payload: RoomDiaryActiveRequest::default(),
-        },
-        None,
-    )
-    .await
-    .unwrap();
-    let response = recv_response(&mut rx).await;
-    assert_eq!(response["daily"]["path"], "Diary/Daily/current.md");
-    assert_eq!(response["daily"]["available"], false);
-    assert_eq!(response["daily"]["issue"], "missing");
 }
 
 #[test]
@@ -886,84 +856,6 @@ async fn standalone_live_reload_applies_valid_mcp_map_and_rejects_invalid_candid
         "an invalid candidate must not partially reload shell initialization",
     );
     let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn standalone_live_reload_bootstraps_room_repository_before_maintenance_submit(
-) -> anyhow::Result<()> {
-    let root = unique_temp_dir("standalone-live-room-reload");
-    let config_path = root.join("config.json");
-    let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace)?;
-    let (mut state, _rx) = command_test_state(CapabilityProfile::Normal, workspace.clone());
-    state.config_path.clone_from(&config_path);
-    state.runtime = RuntimeModel::tunnel(CapabilityProfile::Normal, false);
-    let mut initial = state.config.read().await.clone();
-    initial.workspace_root = workspace.clone();
-    initial.tunnel = Some(TunnelConfig {
-        tunnel_id: "tunnel_test".to_string(),
-        api_key: "env:AGENTIC_TUNNEL_API_KEY".to_string(),
-        ..TunnelConfig::default()
-    });
-    let live_room_root = workspace.join("room-live");
-    let candidate_room_root = workspace.join("room-candidate");
-    initial.room.repository_root = Some(live_room_root.clone());
-    assert!(!initial
-        .toolsets
-        .is_enabled(config::ToolNamespace::RoomMaintenance));
-    assert!(!room_repository::repository_root(&initial).exists());
-    *state.config.write().await = initial.clone();
-
-    let mut candidate = initial.clone();
-    candidate.room.repository_root = Some(candidate_room_root.clone());
-    candidate
-        .toolsets
-        .enable(config::ToolNamespace::RoomMaintenance);
-    fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
-
-    reload_live_config_once(&state).await?;
-
-    let live = state.config.read().await.clone();
-    assert_eq!(live.room.repository_root, candidate.room.repository_root);
-    assert!(!live_room_root.exists());
-    let room_root = room_repository::repository_root(&live);
-    assert_eq!(room_root, candidate_room_root);
-    assert!(room_root.join(".git").is_dir());
-    for relative in room_repository::scaffold_paths() {
-        assert!(
-            room_root.join(relative).is_file(),
-            "missing Room scaffold file: {relative}"
-        );
-    }
-
-    let response = room_maintenance::submit(
-        &state,
-        agentic_gpt_protocol::RoomMaintenanceSubmitRequest {
-            items: vec![agentic_gpt_protocol::RoomMaintenanceRequestItem {
-                slot: agentic_gpt_protocol::RoomMaintenanceSlot::Notebook,
-                payload: serde_json::json!({
-                    "path": "Notebook/live-reload.md",
-                    "title": "Live reload",
-                    "body": "Bootstrapped",
-                }),
-            }],
-            mode: Some(agentic_gpt_protocol::RoomMaintenanceExecutionMode::Local),
-            wait_seconds: None,
-        },
-    )
-    .await?;
-    assert_eq!(
-        response.state,
-        agentic_gpt_protocol::RoomMaintenanceSubmissionState::Applied
-    );
-    assert!(response.local_applied);
-    assert_eq!(
-        fs::read_to_string(room_root.join("Notebook/live-reload.md"))?,
-        "# Live reload\n\nBootstrapped\n"
-    );
-
-    let _ = fs::remove_dir_all(root);
-    Ok(())
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {

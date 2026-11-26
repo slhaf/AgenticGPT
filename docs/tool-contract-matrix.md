@@ -4,9 +4,7 @@
 
 确定性的 Agent 语料集和 `scripts/check_contract_parity.py` 是当前行为的运行时/schema 权威依据。本矩阵仅作说明：`scripts/evaluate_tool_contracts.py` 的形状预测探针不能证明 schema 有效，也不能证明请求会被派发。
 
-工具集启用只表示工具可被发现和调用，不代表依赖运行环境或数据仓库已就绪。Browser 工具集启用后可以离线读手册。`browser.list` 的 `listenerReady` 表示扩展 WebSocket 监听已启动，`runtimeAvailable` 表示至少有一个扩展连接；监听已就绪但尚无浏览器连接时前者为 `true`、后者为 `false`。选择离线浏览器申请租约会返回 `browser_not_connected`。Room 仓库暂不可初始化时，已启用的 Room 工具仍保留；根目录存在且可读时，读取仍可能成功，只有所需资源不可用时才报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时用现有状态字段报告就绪情况，路径不合法时返回错误。
-
-当前远程 Room 调用方应协调配对的 Hub 和 Agent 工件，并从 [`../openapi/hub.yaml`](../openapi/hub.yaml) 刷新导入的 schema。当前九项 Room 文档／维护操作使用现有语义 Agent DTO 和 camelCase JSON 请求体：`room.diary.active`/`room.diary.read`、`room.notebook.recent`/`room.notebook.search`/`room.notebook.read`、`room.state.list`/`room.state.read`，以及 `room.maintenance.status`/`room.maintenance.submit`。空请求使用 `{}`；远程 Room 操作均不接受 `agentId`。`room.notebook.recent` 和 `room.notebook.search` 现在返回当前 Markdown 预览/结果，不再返回已退役的 passage 型 JSONL 格式。
+工具集启用后，相关工具可被发现和调用。组件会分别报告所需运行环境与服务的就绪状态。Browser 工具集启用后可以离线读手册。`browser.list` 的 `listenerReady` 表示扩展 WebSocket 监听已启动，`runtimeAvailable` 表示至少有一个扩展连接；监听已就绪但尚无浏览器连接时前者为 `true`、后者为 `false`。选择离线浏览器申请租约会返回 `browser_not_connected`。
 
 ## Agent 准入与副作用边界（WP2）
 
@@ -14,13 +12,12 @@
 
 本地 Unix、Tunnel stdio、HTTP MCP 工作进程、Hub 命令和 CLI 路径保留各自不同的封装/身份验证/错误封套。Agent 审计来源前缀分别为 `local:`、`tunnel:`、`http:`、`hub:` 和 `localadmin:`。CLI 接口面仅包含现有四项本地 tmux 管理操作：`tmux.listSessions`、`tmux.attach`、`tmux.createSession` 和 `tmux.closeSession`；MCP `tmux.sessions`、`tmux.panes`、`tmux.exec` 和 `tmux.pasteText` 是单独的 MCP 操作，不是 CLI 别名。共享 Skill 执行和 Process 结果投影仍由 Agent 操作/资源层负责。
 
-Normal 不代表 Room：Normal 运行时需显式启用相应 `room.*` 子工具集才可使用对应 Room 能力。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力行为。实际副作用仍由策略、路径、确认、租约和资源所有者控制；不能因此声称外部 MCP、Browser JavaScript、tmux、tunnel 子进程或 Browser 宿主副作用受到通用 OS 沙箱保护。
+Normal 与 Room 角色各自通过工具集启用本地邮件和密码库。Hub 邮件、密码库和 Skills 请求发往活动 Room。实际副作用仍由策略、路径、确认、租约和资源所有者控制；不能因此声称外部 MCP、Browser JavaScript、tmux、tunnel 子进程或 Browser 宿主副作用受到通用 OS 沙箱保护。
 
 ## Standalone 公布接口面与命名空间预设
 
-Standalone 提供 Normal 和 Room 工具集预设。Normal 不选择任何 `room.*` 子项，Room 额外选择 `room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
-`config`、`room.email`、`room.secret` 默认不选中。六个 Room 子工具集独立控制发现、准入和资源启停，没有聚合 `room` 授权开关。
-各子工具集对应同名前缀的 API。显式 `toolsets.enabled` 是最终依据，不暴露 dispatch-only 别名。
+Standalone 的 Normal 和 Room 角色使用相同的默认工具集。实际启用项由 `toolsets.enabled` 决定。
+`config`、`room.email` 和 `room.secret` 默认关闭。邮件和密码库工具集分别控制发现、准入和服务启停。
 
 Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路径策略、审计和 Process 注册表。Standalone 调用不接受仅 Hub 支持的 `agentId` 字段；所有受影响请求均拒绝旧 `needConfirm`／`confirmMethod` 字段。
 
@@ -66,17 +63,6 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `tmux.panes` | 列出/捕获窗格；不提交输入。 | `action`；capture 必须指定目标；list 可按会话筛选。 | 捕获历史默认 160 行，且有界。 | 与 action 不兼容的字段会被拒绝，不会忽略。 | Normal + Room；Hub Full 使用拆分后的 tmux 名称。 |
 | `tmux.exec` | 向 shell 窗格提交结构化命令；不声称命令已经执行完成。 | `target`、`program`；可选 args/wait/capture/confirmation。 | 提交后的等待/历史均有界。 | shell/策略/确认错误；检查窗格或 Process 结果以确认完成状态。 | Normal + Room；Hub Full 的 `tmux.exec` 对应相同契约。 |
 | `tmux.pasteText` | 将文本粘贴到非 shell 窗格/TUI；不执行 shell 命令。 | `target`、`text`；可选 `submit`、`acquireConfirmation`。 | 文本/历史均有界。 | 拒绝 shell 窗格；基础决策为 Confirm，未获准不写入窗格。 | Normal + Room；Hub Full 对应相同契约。 |
-| `room.diary.active` | 读取活动的 Daily、Weekly 和 Monthly Room 日记文档；不修改内容。 | 空 JSON 对象。 | 返回三层有界 Markdown 结果；每层报告经过验证的路径、可用性和可选类型化问题。 | 按层报告文档缺失、不可读或 UTF-8 无效；只读、可安全重试。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-| `room.diary.read` | 按语义层级和周期读取一份指定 Room 日记文档；不读取任意路径。 | `layer`、`period`；period 为 `current`、每日日期或按序排列的周/月日期范围。 | 一份有界 Markdown 文档。 | 拒绝无效周期；缺失或不可读文档作为类型化层问题返回。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-| `room.notebook.recent` | 读取当前 Room Notebook 中近期、有界的 Markdown 预览；不修改内容。 | 可选 `limit`。 | `limit` 默认为 20，范围为 1–100；预览有上限。 | 缺失或格式错误的文档会转为有界警告；只读发现。此公开名称现在使用当前 Markdown DTO，而非已退役的 passage/JSONL 格式。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-| `room.notebook.search` | 在当前 Room Notebook Markdown 中搜索不区分大小写的子串；不修改内容。 | 必填 `query`；可选 `limit`。 | `query` 不能为空，且最多 256 个 Unicode 字符；`limit` 默认为 20，范围为 1–100。 | 空查询、超长查询和无效 limit 返回类型化验证错误；只读。此公开名称现在使用当前 Markdown DTO，而非已退役的 passage/JSONL 格式。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-| `room.notebook.read` | 读取一份指定的当前 Room Notebook Markdown 文档；不读取任意仓库路径。 | 必填且经过验证的 Notebook 相对 `.md` `path`。 | 一份有界 Markdown 文档；内容上限为 512 KiB。 | 不安全、非 Markdown、缺失或超大的路径返回类型化错误；只读。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-| `room.state.list` | 列出确定排序的 Room state entity 文档；不修改内容。 | 空 JSON 对象。 | 返回 `State/entities` 下排序后的 `.md` entity。 | 跳过 symlink 和非文件；格式错误的仓库根目录返回类型化错误；只读。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-| `room.state.read` | 读取一份指定的 Room state entity Markdown 文档；不读取任意路径。 | 必填且安全的 entity 文件名 stem `entity`。 | 读取 `State/entities` 下的一份有界 Markdown 文档；内容上限为 512 KiB。 | 不安全或缺失的 entity、超大内容均返回类型化错误；只读。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-| `room.maintenance.status` | 检查 Room 仓库、脚手架、执行器、工作流、远端、同步和 slot 就绪状态；不修改内容。 | 空 JSON 对象。 | 仓库路径合法且可检查时，返回有界状态、heads、缺失路径和五 slot 占用情况。 | 只读；就绪状态的各个维度保持独立；路径不合法时返回类型化错误。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-| `room.maintenance.submit` | 通过仓库所有者的执行器应用一至五项经过验证的 Room 维护请求。 | `items`，各项含唯一 `slot`/`payload`；可选 `mode` 和 `waitSeconds`。 | items 数量为 1–5；mode 为 `local` 或 `workflow`；wait 默认为 0 秒，上限为 30 秒。 | 分别报告准入、本地应用、语义提交和远端/工作流同步；操作具有破坏性，但限于仓库范围。等待超时不会取消维护操作，也没有单独的等待 API。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
-
-当前九个 Room 文档／维护名称在本地 Agent MCP、Hub Full MCP 以及九个 `/v1/room/<namespace>/<action>` POST 路由上构成同一套语义契约。Hub 只选择已捕获的活动 Room 租约，并负责路由/回执，不拥有 Room 文件或内容。通用运行回执可能含有有界操作结果，但不是 Room 内容的权威来源。
 
 ## Room 密钥接口
 
@@ -120,11 +106,6 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `tmux.createSession`、`tmux.closeSession` | 创建/关闭持久 workspace；不属于通用进程生命周期。 | `agentId`、name/cwd；close 可能需要确认。 | cwd 受策略检查；优先复用。 | close 具有破坏性；不隐式恢复数据。 | 仅 Full；与本地语义相同。 |
 | `mcp.listServers`、`mcp.listTools` | 在受管理调用前发现下游 MCP 路由/schema。 | 汇总已连接 Agent 时，`mcp.listServers` 可省略 `agentId`；`listTools` 必须提供 `agentId`、`serverId`。 | 元数据有界。 | 只读；传输/Agent 错误明确。 | 仅 Full；对应 HTTP `/v1/mcp/servers|tools`。 |
 | `mcp.callTool` | 将一次下游 MCP 调用作为受管理 Process 启动；不是 Agent 原生文件工具。 | `agentId`、`serverId`、`toolName`；可选 `group`、JSON 对象 `arguments`、有界等待/截止时间。 | 返回 Process 响应；使用 `process.read` 或 `process.cancel` 查看生命周期。 | Hub 没有原生 `file.read` 或 `file.edit`。通用 Process 桥接不是类型化的 MCP 图像内容接口；不得依赖它保留 `file.read` 图像 Content blocks。 | 仅 Full；对应 HTTP `/v1/mcp/callTool`。 |
-| `room.diary.active`、`room.diary.read` | 通过捕获的活动 Room 租约读取当前或指定语义 Diary Markdown；不修改内容或访问任意路径。 | `diary.active` 使用 `{}`；`diary.read` 必须提供 `layer` 和 `period`；无 `agentId`。 | 返回有界层级结果；daily/weekly/monthly 周期规则由 Agent 强制执行。 | 活动 Room 缺失返回 `room_not_active`（404），租约冲突返回 `room_state_conflict`（409），传输等待超时为 504，Agent 语义错误仍返回 JSON 错误。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/diary/active|read`。 |
-| `room.notebook.recent`、`room.notebook.search`、`room.notebook.read` | 通过活动 Room 租约读取当前 Notebook Markdown 预览、搜索当前 Markdown，或读取一份指定且经过验证的文档。 | `recent` 可选 `limit`；`search` 必须提供 `query`，可选 `limit`；`read` 必须提供 `path`；无 `agentId`。 | `limit` 默认 20，范围 1–100；搜索 `query` 不能为空且最多 256 个 Unicode 字符；Markdown 内容上限为 512 KiB。`recent`/`search` 返回当前 Markdown DTO，不是已退役的 passage/JSONL 结果。 | 按契约将缺失/格式错误文件转为有界警告；不安全路径和验证错误为类型化错误。活动租约/传输状态遵循当前 Room 投影。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/notebook/recent|search|read`。 |
-| `room.state.list`、`room.state.read` | 列出或读取 Agent 所有的 `State/entities` 根目录下有界、非 symlink 的 Markdown entity。 | `list` 使用 `{}`；`read` 必须提供安全的 entity stem `entity`；无 `agentId`。 | 按序列出 entity；读取内容上限为 512 KiB。 | 不安全/缺失 entity 和格式错误根目录为类型化错误；活动租约/传输状态遵循当前 Room 投影。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/state/list|read`。 |
-| `room.maintenance.status` | 检查 Agent 所有的仓库、schema/scaffold、执行器、workflow/remote、sync 和五 slot 就绪状态；不修改内容。 | `{}`；无 `agentId`。 | 有界状态以及可选 heads/缺失路径。 | 只读；各就绪维度保持独立，错误明确。活动租约/传输状态遵循当前 Room 投影。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/maintenance/status`。 |
-| `room.maintenance.submit` | 通过现有 Agent 仓库所有者提交明确的语义维护请求；不是 passage append/update/remove 别名。 | `items`（1–5 个唯一 `slot`/`payload`）；可选 `mode`（`local`/`workflow`）和 `waitSeconds`（0–30）；无 `agentId`。 | wait 默认 0；local/workflow 结果和同步结果保持区分。等待超时不会取消维护；没有单独等待 API，也不隐含新增确认门。 | 现有锁、clean-tree、路径、预期变更、执行器、Git 和 workflow 控制仍具权威性。活动租约/传输状态遵循当前 Room 投影。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/maintenance/submit`。 |
 | `skills.list`、`skills.read`、`skills.search`、`skills.active` | 发现/读取/搜索活动 Room Skill。 | 按 read/search 具体操作提供相应字段；无 `agentId`。 | 摘要/内容有界。 | 无效/缺失/过期 Skill 状态明确。 | 仅 Full；对应 HTTP Room Skills 端点。 |
 | `skills.activate`、`skills.deactivate` | 仅更改 Skill 激活状态；不执行 Skill，也不授予权限。 | `id`；无 `agentId`。 | 幂等状态操作。 | 允许停用过期/缺失 Skill，并报告结果。 | 仅 Full；Standalone 的 `skills.setActive` 合并两种意图。 |
 | `skills.install`、`skills.install.get`、`skills.install.cancel` | 活动 Room Skill 的异步安装生命周期。 | install 必须提供 `id`、`source`；get/cancel 必须提供 `installId`；无 `agentId`。 | 等待默认 5 秒、最多 30 秒；等待超时不会取消；取消必须显式请求。 | 提供协作式取消/原子提交证据。 | 仅 Full；对应 HTTP Room 安装端点。 |
@@ -133,10 +114,6 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 Hub 转发到在线 Agent 的单目标业务响应（包括业务错误响应）会在原 JSON 根级附带 `events` 面板；无目标、Agent 离线、请求超时或 Hub cache fallback 不附面板，也不以零值或旧快照代替。在线 native cache-only Hub 工具可额外进行一次 best-effort 面板查询，失败时省略。三个 `event.*` 工具沿现有 Agent API 面提供，不依赖 Process/Skills 工具集开关，也不新增可配置 namespace；Coordinator 仍仅公布前述八项工具。
 
 无目标的 `mcp.listServers` 聚合发现不生成各 Agent 的事件面板，也不消耗曝光次数；指定单一 Agent 的发现调用仍正常附带面板。
-
-这九个 HTTP 路由中，JSON 格式错误或缺少必填请求字段时，提取器返回 `422 text/plain`。通过身份验证后的语义响应使用现有 JSON 投影：Room 未激活返回 `room_not_active`（404），租约冲突返回 `room_state_conflict`（409），传输等待超时返回 504；其他 Agent 侧语义验证错误仍为 400，除非适用现有的特定未找到/冲突映射。
-
-在线 Agent 的 Room 业务错误保留根级 `events`：九个路由的 HTTP 400，以及 `notebook.read`／`state.read` 的 Agent 未找到错误 HTTP 404，使用支持可选面板的严格 schema。Hub 自身的 `room_not_active`、租约冲突及传输超时不附面板；错误的 HTTP 状态码本身不决定事件来源。
 
 ## 审查规则
 

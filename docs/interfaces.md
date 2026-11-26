@@ -19,8 +19,8 @@ Agent 通过一个范围狭窄的内部准入边界处理请求，不引入新�
 - `privateevent.inject` 仅允许 Unix 本地入口，`event.panel/settle` 仅允许 Hub。
 - 通知投递继续检查通知能力。
 
-其余普通操作先检查工具集，再检查既有能力条件。Skills 仍要求运行时 Skills 能力，Hub 的
-Room 语义读取、维护、邮件与密钥操作仍要求 Room Profile。如果开关与能力
+其余普通操作先检查工具集，再检查运行时能力。Skills 需要运行时 Skills 能力，Hub 下发的
+邮件与密钥操作要求 Agent 使用 `profile=room`。如果开关与能力
 同时不满足，普通操作先返回工具集拒绝。共享操作层普通工具集的错误码为
 `toolset_required`（包括 Room 子工具集）；本地 MCP 的调用时可用性过滤仍保留
 自己的协议错误封套。
@@ -36,9 +36,9 @@ Room 语义读取、维护、邮件与密钥操作仍要求 Room Profile。如�
 HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上有所不同，而共享 Agent
 操作使用同一套值/错误和精简 Process/Skill 结果层。
 
-Normal 并不等于 Room：Normal 运行时需显式启用相应 `room.*` 子工具集才可使用对应 Room 能力。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
+Normal 和 Room 角色可在本地分别启用邮件或密码库工具集。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
 
-配置保存与运行态应用分别报告：只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据与 client 启动参数保留显式重启边界，待重启字段不阻止其他设置应用。Hub、HTTP、Browser、邮件账户、Secret 后端、Room 根目录和 Skills 安装并发由具体所有者局部协调，保留进程注册表与持久任务。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已准入操作保留各自快照，不自动重放副作用。完整边界见[配置生效说明](configuration.zh-CN.md#热加载与重启边界)。
+配置保存与运行态应用分别报告：只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据与 client 启动参数保留显式重启边界，待重启字段不阻止其他设置应用。Hub、HTTP、Browser、邮件账户、Secret 后端和 Skills 安装并发由具体所有者局部协调，保留进程注册表与持久任务。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已准入操作保留各自快照，不自动重放副作用。完整边界见[配置生效说明](configuration.zh-CN.md#热加载与重启边界)。
 
 Tmux 工具集决定是否准备 tmux 会话。Browser 工具集控制扩展监听和 Browser 工具。启用后可通过 `browser.manual` 离线查阅 SDK，`browser.list` 以 `listenerReady` 报告扩展监听是否启动，以 `runtimeAvailable` 报告是否至少有一个扩展连接，并列出连接及占用。浏览器连接关闭后，其租约失效。
 
@@ -128,11 +128,7 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 - `POST /v1/room/skills/install/get`：通过有界长轮询查询安装状态。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消安装。
 - `POST /v1/room/skills/install/cancel`：在原子提交之前请求幂等的协作式取消。
 - `POST /v1/room/skills/run`：运行活动 workspace Skill 在 `scripts/` 下的可执行脚本。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消执行。使用响应中的实际 `agentId` 和 `processId` 调用 `process.read` 或 `process.cancel`；此运行端点的输入不接收 `agentId`。
-- `POST /v1/room/diary/active` 和 `POST /v1/room/diary/read`：通过捕获的活动 Room 租约读取当前或一个经过验证的 Diary 层。请求分别使用 `RoomDiaryActiveRequest` 或 `RoomDiaryReadRequest`；响应分别为 `RoomDiaryActiveResponse` 或 `RoomDiaryReadResponse`。
-- `POST /v1/room/notebook/recent`、`POST /v1/room/notebook/search` 和 `POST /v1/room/notebook/read`：读取有界的当前 Markdown 预览、搜索当前 Markdown，或读取一份经过验证的 Notebook 文档。`recent` 和 `search` 使用 `RoomNotebookResultsResponse`；`read` 使用 `RoomNotebookReadResponse`。
-- `POST /v1/room/state/list` 和 `POST /v1/room/state/read`：列出或读取有界的 `State/entities` Markdown 文档，分别使用 `RoomStateListResponse` 或 `RoomStateReadResponse`。
 - `POST /v1/room/secret/list`、`get`、`upsert` 和 `delete`：通过活动 Room Agent 查询账号组、读取密码／当前 TOTP、创建或更新、移入回收站。请求不接收 `agentId`，并要求 Agent 的 `room.secret` 工具集开启；敏感内容不走持久回执／重放路径，见下方[Room 密钥](#room-密钥)。
-- `POST /v1/room/maintenance/status` 和 `POST /v1/room/maintenance/submit`：检查由仓库所有者负责的就绪状态，或提交明确的语义维护请求。响应分别为 `RoomMaintenanceStatusResponse` 和 `RoomMaintenanceSubmitResponse`；submit 使用现有 local/workflow 模式及有界等待契约。
 
 Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirmation` 对象：
 
@@ -155,14 +151,9 @@ Process exec/batch 及 tmux exec/paste/create/close 使用可选 `acquireConfirm
 - 需要确认的文件修改返回 `file_confirmation_unavailable`，不会应用文件变更；确认拒绝仍使用
   `file_confirmation_denied`。
 
-上述九个 Room 文档／维护端点在 JSON 请求体中使用当前的 camelCase Agent 请求/响应 DTO。
-空请求 DTO 仍须传入 `{}`；没有端点接受 `agentId` 选择器。它们解析并捕获活动
-Room 租约：Room 不存在时返回 `room_not_active`（404），租约不一致/已替换时返回
-`room_state_conflict`（409），Hub 派发错误按上述原因返回 500/502/503/504。Agent 输入错误返回 400，资源缺失和冲突分别返回 404/409，内部读取、写入或维护失败返回 500。Full MCP 以当前描述符公布相同的九个名称；
-Coordinator 既不公布也不派发 Room 操作。
-
-JSON 格式错误或缺少必需请求字段时，Axum JSON 提取器会返回 HTTP 422 和
-`text/plain`；Agent 语义验证错误仍以 JSON 错误响应返回，采用本文所述的输入、缺失、冲突和内部故障投影。
+Hub HTTP 和 Full MCP 将 Room 邮件、密码库和 Skills 请求发往调用开始时的活动 Room，参数省略
+`agentId`。HTTP 在没有活动 Room 时返回 `room_not_active`（404），连接冲突时返回
+`room_state_conflict`（409），等待 Agent 响应超时时返回 504。
 
 `/v1/info` 刻意只返回安全元数据：Hub 版本、公共基础 URL、超时设置、远程确认
 状态、Agent 数量以及待处理请求/进程数。不得暴露密钥、确认回调 URL 或私有配置值。
@@ -199,32 +190,6 @@ Hub HTTP `process.read`、`process.list` 以及对应的 Apps MCP 进程检查�
 Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗口为 24 小时；窗口结束后，只压缩符合条件的已完成负载：`runId`、请求/Agent 身份、命令哈希、状态以及冲突/未知/墓碑证据仍会保留。重放和去重所需的身份/哈希证据仍受保护；未知和冲突记录不会压缩。因此 `AgentRun` 会分别报告 `resultRetained` 和 `resultOmitted`；负载被省略不能证明命令未运行。
 
 等待超时或传输超时不等于远程取消，只会结束本地等待；匹配的迟到回执或结果仍可能到达。只有观察到终止证据时才报告取消；缓存快照或缺失响应都不能推断远程进程已经停止。
-
-### 当前 Room 边界与协调请求投影
-
-当前 Agent 文档／维护 Room 接口面是上述九项远程操作的权威来源。Hub Full 通过捕获的活动 Room 租约转发这些操作；它不会读取仓库、拥有 Room 文件、解释 Git 状态，也不会创建第二份内容存储。通用 Hub 运行回执可能为状态/迟到结果检查保留有界操作结果，但该回执不是 Room 内容的权威来源。
-
-读取范围属于当前契约：
-
-- Notebook `limit` 默认值为 20，范围是 1–100。
-- 搜索 `query` 不能为空，且最多 256 个 Unicode 字符。
-- Notebook 和 State Markdown 读取会拒绝超过现有 512 KiB 上限的内容。
-- Diary 周期可以是 `current`、严格格式的日日期，或按顺序排列的周/月日期区间。
-- `room.notebook.recent` 和 `room.notebook.search` 保留原公开名称，但现在返回当前 Markdown
-  DTO（`path`、`title`、`contentPreview`、`truncated`、`effectiveAt`），不再返回已退役的
-  passage/JSONL 格式。
-
-维护操作仍须明确提交，且由 Agent 所有。`room.maintenance.status` 为只读。`room.maintenance.submit` 接受一至五个唯一语义 slot、可选 `local` 或 `workflow` 模式，以及范围为 0–30 的 `waitSeconds`（默认值为 0）。workflow 等待只观察消费/快进；超时只结束等待，不会取消已提交的维护操作。现有仓库、路径、symlink、锁、clean-tree、预期变更、执行器和 Git 控制仍然有效。没有单独的维护等待 API，也不承诺新增确认机制。
-
-从已退役 Room JSONL 名称迁移的调用方必须选择明确的当前语义操作。旧 append/update/remove
-或 passage/日期选择语义不会自动转换为 `room.maintenance.submit`。迁移时：
-
-1. 为更改 Room 内容的调用方构造文档规定的 slot/payload 请求，或弃用旧调用。
-2. 同时升级配对的 Hub 和 Agent 工件。
-3. 刷新 [`../openapi/hub.yaml`](../openapi/hub.yaml) 并迁移所有调用方。
-4. 在移除旧调用前验证实时活动 Room 路径。
-
-历史发布/迁移记录仍是历史记录，不是当前错误或兼容性契约。
 
 ## Room 密钥
 

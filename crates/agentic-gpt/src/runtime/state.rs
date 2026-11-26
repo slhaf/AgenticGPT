@@ -117,23 +117,17 @@ impl RuntimeModel {
         match (self.transport, self.profile) {
             (Transport::Hub, CapabilityProfile::Normal) => Capabilities {
                 skills: false,
-                diary: false,
-                notebook: false,
                 notifications: true,
             },
             (Transport::Hub, CapabilityProfile::Room)
             | (Transport::TunnelStdio, CapabilityProfile::Room)
             | (Transport::LocalUnix, CapabilityProfile::Room) => Capabilities {
                 skills: true,
-                diary: true,
-                notebook: true,
                 notifications: true,
             },
             (Transport::TunnelStdio, CapabilityProfile::Normal)
             | (Transport::LocalUnix, CapabilityProfile::Normal) => Capabilities {
                 skills: true,
-                diary: false,
-                notebook: false,
                 notifications: false,
             },
         }
@@ -143,8 +137,6 @@ impl RuntimeModel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Capabilities {
     pub(crate) skills: bool,
-    pub(crate) diary: bool,
-    pub(crate) notebook: bool,
     pub(crate) notifications: bool,
 }
 
@@ -174,7 +166,6 @@ pub(crate) struct AppState {
     pub(crate) temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
     pub(crate) mcp_concurrency: Arc<process::McpConcurrency>,
     #[allow(dead_code)] // Serialized Room maintenance starts using this in Phase 3.
-    pub(crate) room_repository_writes: Arc<Mutex<()>>,
     pub(crate) skills_writes: Arc<Mutex<()>>,
     pub(crate) skill_leases: Arc<skills::SkillLeaseManager>,
     pub(crate) skill_installs: Arc<crate::skill_installs::InstallManager>,

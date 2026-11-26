@@ -251,51 +251,6 @@ pub(super) async fn call_app_tool(
                 .room_email_operate(Parameters(decode_args(arguments)?))
                 .await
         }
-        "room.diary.active" => {
-            server
-                .room_diary_active(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.diary.read" => {
-            server
-                .room_diary_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.notebook.recent" => {
-            server
-                .room_notebook_recent(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.notebook.search" => {
-            server
-                .room_notebook_search(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.notebook.read" => {
-            server
-                .room_notebook_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.state.list" => {
-            server
-                .room_state_list(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.state.read" => {
-            server
-                .room_state_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.maintenance.status" => {
-            server
-                .room_maintenance_status(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.maintenance.submit" => {
-            server
-                .room_maintenance_submit(Parameters(decode_args(arguments)?))
-                .await
-        }
         "skills.list" => server.skills_list().await,
         "skills.read" => {
             server

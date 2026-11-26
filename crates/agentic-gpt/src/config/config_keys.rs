@@ -23,7 +23,6 @@ pub(crate) enum ConfigValueKind {
     ReportingDetail,
     RuntimeMode,
     WorkerProfile,
-    RoomMaintenanceMode,
     PolicyAction,
     SecretPolicy,
     EmailAccount,
@@ -51,7 +50,6 @@ impl ConfigValueKind {
             Self::ReportingDetail => "reporting-detail",
             Self::RuntimeMode => "runtime-mode",
             Self::WorkerProfile => "worker-profile",
-            Self::RoomMaintenanceMode => "room-maintenance-mode",
             Self::PolicyAction => "policy-action",
             Self::SecretPolicy => "secret-policy",
             Self::EmailAccount => "email-account-object-or-null",
@@ -71,7 +69,6 @@ impl ConfigValueKind {
             Self::ReportingDetail => Some(&["metadata", "full"]),
             Self::RuntimeMode => Some(&["standalone", "hub", "local"]),
             Self::WorkerProfile => Some(&["normal", "room"]),
-            Self::RoomMaintenanceMode => Some(&["local", "workflow"]),
             Self::EventNotificationLevel => Some(&["low", "medium", "high", "off"]),
             _ => None,
         }
@@ -866,56 +863,6 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "移入垃圾箱策略：allow、confirm 或 deny。",
         "confirm",
         set_email_trash_policy
-    ),
-    config_key!(
-        "room.repositoryRoot",
-        Room,
-        NullablePath,
-        true,
-        "Room repository root path, or null to use the workspace default.",
-        "Room 仓库根目录；使用 null 可恢复工作区默认值。",
-        "null",
-        set_repository_root
-    ),
-    config_key!(
-        "room.timezone",
-        Room,
-        String,
-        false,
-        "IANA timezone used by room diary operations.",
-        "房间日记操作使用的 IANA 时区。",
-        "Asia/Shanghai",
-        set_room_timezone
-    ),
-    config_key!(
-        "room.diaryDayBoundaryHour",
-        Room,
-        NonNegativeInteger,
-        false,
-        "Hour at which a diary day starts, from 0 through 23.",
-        "日记日期开始的小时，范围为 0 到 23。",
-        "5",
-        set_diary_day_boundary_hour
-    ),
-    config_key!(
-        "room.maintenance.mode",
-        Room,
-        RoomMaintenanceMode,
-        false,
-        "Room maintenance execution mode: local or workflow.",
-        "Room 维护执行模式：local 或 workflow。",
-        "local",
-        set_room_maintenance_mode
-    ),
-    config_key!(
-        "room.maintenance.autoPush",
-        Room,
-        Boolean,
-        false,
-        "Synchronize successful local Room maintenance to the remote when possible.",
-        "本地 Room 维护成功后，尽可能同步到远端。",
-        "false",
-        set_room_maintenance_auto_push
     ),
     config_key!(
         "tunnel.tunnelId",

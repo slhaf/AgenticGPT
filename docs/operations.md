@@ -182,7 +182,7 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 | `applying` | 查看对应连接状态；不要重复提交原用户副作用。 |
 | `failed` | 查看逐项 error 并修复组件环境；已保存配置不整份回滚，旧 owner 可保留时继续服务。 |
 
-Hub、HTTP、Browser、邮件账户、Secret 后端、Room 根目录和 Skills 并发由具体所有者协调，不重建整个 AppState。重配置不会清空 Process 注册表、持久事件、安装账本或发送结果；不会自动重发邮件、重写密钥或重放网页操作。降低安装并发不取消现有任务；关闭 Skills 保留恢复记录，重新启用时恢复排队安装，不重复启动已被 worker 占有的记录。Browser 切换会清理旧租约与 JS 会话，Tmux 已有会话不因工具集关闭而删除。
+Hub、HTTP、Browser、邮件账户、Secret 后端和 Skills 并发由具体所有者协调，不重建整个 AppState。重配置不会清空 Process 注册表、持久事件、安装账本或发送结果；不会自动重发邮件、重写密钥或重放网页操作。降低安装并发不取消现有任务；关闭 Skills 保留恢复记录，重新启用时恢复排队安装，不重复启动已被 worker 占有的记录。Browser 切换会清理旧租约与 JS 会话，Tmux 已有会话不因工具集关闭而删除。
 
 HTTP 监听变更可能使 session/OAuth 状态失效；token 原地更新保留 session 并撤销 OAuth 记录。认证引用不可用时拒绝访问，端口绑定失败由组件重试，不影响其他入口。邮件/Secret 等排空繁忙时保留原 owner 并报告失败；静态校验不检验远程登录可用性。
 
@@ -213,40 +213,6 @@ HTTP 监听变更可能使 session/OAuth 状态失效；token 原地更新保留
    - MCP CallToolResult 使用 `pending`/`included`/`deferred`/`unavailable`/`not_retained`，完整对象不切碎。
 6. 验证 `/mcp`；契约发生变化时刷新 GPT Actions schema。
 7. 如果启用了 Standalone 上报，确认仅上报的连接会拒绝 Hub 执行请求。
-
-### WP-R 当前 Room 契约切换
-
-采用当前九项 Room 契约时，使用以下清洁切换流程。它改变 Hub/Protocol/Agent 的请求和响应投影；不会将 Room 内容迁移到 Hub，也不会添加兼容别名。
-
-1. **盘点配对工件。** 记录 `agentic-gpt --version`、`agentic-gpt-hub --version`、准确的二进制路径和校验和。将 Hub 与 Agent 工件作为一对已验证的版本配对。使用部署当前采用的同一进程调用方式重启（Agent 使用 `agentic-gpt run`，Hub 使用 `agentic-gpt-hub ... serve`）；本流程不会臆造 system service 命令。
-2. **记录有效配置和所有者。** 将 `AGENT_CONFIG` 设为实际 Agent 配置路径（默认是 `~/.agentic_gpt/config.json`），并检查 `agentic-gpt config show --config "$AGENT_CONFIG"` 中的 `workspaceRoot`、`room.repositoryRoot`、`mode` 和 `profile`。Room 仓库路径为 `room.repositoryRoot` 或 `<workspaceRoot>/room`。记录实际 Hub `--db` 和 `--config` 路径（默认值为 `~/.agentic_gpt/hub.sqlite3` 和 `~/.agentic_gpt/hub.json`；部署可设置 `AGENTIC_GPT_HUB_DB` 和 `AGENTIC_GPT_HUB_CONFIG`）。
-3. **暂停两侧工作。** 暂停新的 Hub HTTP/MCP 调用，排空进行中的调用，并记录尚未排空调用的 `runId` 及对应的 Agent 传输账本条目。使用部署现有流程停止 Hub 和受影响的 Agent。等待者超时不等于取消；不得只因 HTTP 等待结束就重放命令。
-4. **替换前备份。** 保留 Agent 配置及其文件权限、完整的已配置 Room 仓库（包括 `.git`），以及部署所需的 Agent 审计/传输文件。将所有 refs 打包为 Git bundle，并同时复制 Room 根目录的文件系统副本，有助于验证。备份 Hub 配置和 SQLite 数据库，并一并保留匹配的 `-wal`、`-shm` 文件（若存在）。备份应设为只读并标注对应工件配对；绝不能用旧副本覆盖较新的数据库或 Room 仓库。
-
-具体备份时，将 `BACKUP_DIR` 设为受保护的目标目录，并使用已记录的路径，而不是猜测服务目录布局：
-
-```bash
-mkdir -p "$BACKUP_DIR"
-cp -a "$AGENT_CONFIG" "$BACKUP_DIR/agent-config.json"
-cp -a "$ROOM_ROOT" "$BACKUP_DIR/room"
-git -C "$ROOM_ROOT" bundle create "$BACKUP_DIR/room.git.bundle" --all
-cp -a "$HUB_CONFIG" "$BACKUP_DIR/hub.json"
-cp -a "$HUB_DB" "$BACKUP_DIR/hub.sqlite3"
-test ! -e "$HUB_DB-wal" || cp -a "$HUB_DB-wal" "$BACKUP_DIR/hub.sqlite3-wal"
-test ! -e "$HUB_DB-shm" || cp -a "$HUB_DB-shm" "$BACKUP_DIR/hub.sqlite3-shm"
-```
-
-如果存在，也应复制 `<workspaceRoot>/.agentic-gpt-audit.jsonl`，以及绑定所有者的 `~/.agentic_gpt/transport-runs.jsonl` 和其 `.lock`、`.recovery`、`.backup` 证据。
-
-如果 `HOME` 或 Agent home 被重定位，应使用部署中的实际 `agentic_home` 路径；绝不要从 Hub 数据库推断传输状态。
-5. **部署并重新连接。** 将 Hub 和 Agent 二进制作为一对替换，保留现有配置路径，并沿用现有参数和密钥引用重启。首先重新连接具备命令能力的 Room Agent；Normal、ReportingOnly、过期或未就绪的连接不得成为 Room 目标。不要添加版本字段、feature flag、别名或双重执行路径。
-6. **验证当前契约。** 确认 `GET /v1/info` 和 `/v1/agents`；随后检查 Full MCP `tools/list` 中存在当前九个 Room 名称（且没有已退役名称），Coordinator `tools/list` 中不存在这些名称。通过已验证身份的 HTTP API，使用当前 camelCase DTO 请求体且不带 `agentId`，分别调用 `/v1/room/diary/active`、`/v1/room/diary/read`、`/v1/room/notebook/recent`、`/v1/room/notebook/search`、`/v1/room/notebook/read`、`/v1/room/state/list`、`/v1/room/state/read`、`/v1/room/maintenance/status` 和 `/v1/room/maintenance/submit`。检查缺少必需 JSON 字段时提取器返回 422 `text/plain`、语义验证错误返回 400 JSON、没有活动 Room 时返回 404、租约冲突返回 409、传输等待超时返回 504。确认成功读取的内容由 Agent 所有且有界；Hub 回执只是有界结果投影。
-7. **验证维护所有权。** 仅在可丢弃或明确获准的 Room 仓库上，通过 `room.maintenance.submit` 以 `local` 模式提交一项已文档化的语义 slot/payload，并确认返回的状态、revision、请求残留清理和 Git 变更都限于声明目标。可丢弃的本地冒烟检查可以使用现有 Notebook payload 形状，例如：
-   `{"items":[{"slot":"notebook","payload":{"path":"Notebook/wp-r-smoke.md","title":"WP-R 冒烟","body":"有界冒烟测试"}}],"mode":"local","waitSeconds":0}`;
-   仓库和目标必须明确可丢弃或已获准。workflow 模式下，应核验 `submitted`/`pending` 与已观察到的同步结果，并确认 `waitSeconds` 0–30 仅限定等待时间，绝不会取消请求。维护测试不得使用已退役的 append/update/remove 形状。
-8. **迁移调用方并完成切换。** 将导入的 OpenAPI 使用方和内部调用方更新为当前九项操作。`recent` 和 `search` 保留原名称，但消费当前 Markdown 预览/结果；旧 passage/JSONL 格式以及旧 append/update/remove/日期选择语义都不会自动转换。只有当前路由、MCP 描述符、Agent 派发和仓库所有者检查均通过后，才能移除旧调用方。
-
-**回滚边界。** 如果验证失败，暂停新调用、停止新版本配对工件、保留所有当前 Hub/Agent/Room 证据，只恢复先前已验证的二进制（必要时保留未变更的配置）。保留最新 Hub 数据库及其 `-wal`/`-shm`、Room `.git`、维护日志、审计和传输账本；不要用旧数据库或 Room 副本覆盖较新结果。重新连接旧版本配对工件，并复核 `/v1/info`、`/v1/agents`、活动 Room 租约安全以及已记录的 `runId`。回滚二进制无法撤回维护提交或已经产生的外部效果；任何内容更正都必须使用现有 Agent/Git 和受控维护权限。没有需要撤销的破坏性数据迁移。
 
 ### Hub Response 所有权切换
 

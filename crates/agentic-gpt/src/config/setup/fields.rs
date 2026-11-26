@@ -17,13 +17,11 @@ impl SetupField {
             Self::RoomSecretGetPolicy
             | Self::RoomSecretUpsertPolicy
             | Self::RoomSecretDeletePolicy => &["allow", "confirm"],
-            Self::RoomMaintenanceMode => &["local", "workflow"],
             Self::ProvisionTunnelSecret
             | Self::HttpMcpEnabled
             | Self::HubEnabled
             | Self::Bubblewrap
-            | Self::HubReportingEnabled
-            | Self::RoomMaintenanceAutoPush => &["false", "true"],
+            | Self::HubReportingEnabled => &["false", "true"],
             Self::HubReportingDetail => &["metadata", "full"],
             Self::EventProcessCompletedLevel
             | Self::EventProcessFailedLevel
@@ -79,7 +77,6 @@ impl SetupField {
             | Self::MaxFileSearchContextLines
             | Self::ProcessResponseBytes
             | Self::RoomSecretSyncWaitTimeoutMs
-            | Self::DiaryBoundaryHour
             | Self::EventsLowTtlSeconds => true,
             Self::Catalog(index) => {
                 super::model::catalog_entries()

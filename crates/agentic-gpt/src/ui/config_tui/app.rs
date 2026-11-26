@@ -1063,7 +1063,7 @@ impl ConfigTuiApp {
         (0..review.row_count())
             .filter(|index| {
                 review.row(*index).is_some_and(|(group, item)| {
-                    pages::review_search_text(group, item, self.session(), self.language)
+                    pages::review_search_text(group, item, self.language)
                         .to_lowercase()
                         .contains(&query)
                 })
@@ -2822,11 +2822,6 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         | SetupField::RoomSecretSyncWaitTimeoutMs => {
             crate::config_templates::OptionalSection::RoomSecret
         }
-        SetupField::RoomTimezone
-        | SetupField::DiaryBoundaryHour
-        | SetupField::RepositoryRoot
-        | SetupField::RoomMaintenanceMode
-        | SetupField::RoomMaintenanceAutoPush => crate::config_templates::OptionalSection::Room,
         SetupField::TunnelCacheDir | SetupField::TunnelExecutable => {
             crate::config_templates::OptionalSection::TunnelClient
         }

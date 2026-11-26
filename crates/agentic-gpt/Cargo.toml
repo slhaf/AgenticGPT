@@ -16,7 +16,6 @@ anyhow.workspace = true
 axum = "0.7"
 base64 = "0.22"
 chrono.workspace = true
-chrono-tz.workspace = true
 clap.workspace = true
 dirs = "6.0"
 futures-util.workspace = true

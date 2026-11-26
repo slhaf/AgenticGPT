@@ -57,18 +57,6 @@ pub(crate) enum ToolNamespace {
     Skills,
     Tmux,
     Browser,
-    #[serde(rename = "room.diary")]
-    #[value(name = "room.diary")]
-    RoomDiary,
-    #[serde(rename = "room.notebook")]
-    #[value(name = "room.notebook")]
-    RoomNotebook,
-    #[serde(rename = "room.state")]
-    #[value(name = "room.state")]
-    RoomState,
-    #[serde(rename = "room.maintenance")]
-    #[value(name = "room.maintenance")]
-    RoomMaintenance,
     #[serde(rename = "room.email")]
     #[value(name = "room.email")]
     RoomEmail,
@@ -88,10 +76,6 @@ impl ToolNamespace {
             Self::Skills,
             Self::Tmux,
             Self::Browser,
-            Self::RoomDiary,
-            Self::RoomNotebook,
-            Self::RoomState,
-            Self::RoomMaintenance,
             Self::RoomEmail,
             Self::RoomSecret,
         ]
@@ -107,32 +91,13 @@ impl ToolNamespace {
             Self::Skills => "skills",
             Self::Tmux => "tmux",
             Self::Browser => "browser",
-            Self::RoomDiary => "room.diary",
-            Self::RoomNotebook => "room.notebook",
-            Self::RoomState => "room.state",
-            Self::RoomMaintenance => "room.maintenance",
             Self::RoomEmail => "room.email",
             Self::RoomSecret => "room.secret",
         }
     }
 
     pub(crate) fn is_room(self) -> bool {
-        matches!(
-            self,
-            Self::RoomDiary
-                | Self::RoomNotebook
-                | Self::RoomState
-                | Self::RoomMaintenance
-                | Self::RoomEmail
-                | Self::RoomSecret
-        )
-    }
-
-    pub(crate) fn uses_room_repository(self) -> bool {
-        matches!(
-            self,
-            Self::RoomDiary | Self::RoomNotebook | Self::RoomState | Self::RoomMaintenance
-        )
+        matches!(self, Self::RoomEmail | Self::RoomSecret)
     }
 
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
@@ -164,8 +129,8 @@ pub(crate) struct ToolsetConfig {
     pub(crate) enabled: BTreeSet<ToolNamespace>,
 }
 
-impl ToolsetConfig {
-    pub(crate) fn normal() -> Self {
+impl Default for ToolsetConfig {
+    fn default() -> Self {
         Self {
             enabled: ToolNamespace::all()
                 .iter()
@@ -174,31 +139,9 @@ impl ToolsetConfig {
                 .collect(),
         }
     }
+}
 
-    pub(crate) fn room() -> Self {
-        Self {
-            enabled: ToolNamespace::all()
-                .iter()
-                .copied()
-                .filter(|namespace| {
-                    !matches!(
-                        namespace,
-                        ToolNamespace::Config
-                            | ToolNamespace::RoomEmail
-                            | ToolNamespace::RoomSecret
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    pub(crate) fn for_profile(profile: WorkerProfile) -> Self {
-        match profile {
-            WorkerProfile::Normal => Self::normal(),
-            WorkerProfile::Room => Self::room(),
-        }
-    }
-
+impl ToolsetConfig {
     pub(crate) fn is_enabled(&self, namespace: ToolNamespace) -> bool {
         self.enabled.contains(&namespace)
     }
@@ -218,12 +161,6 @@ impl ToolsetConfig {
             .filter(|namespace| self.is_enabled(*namespace))
             .map(ToolNamespace::as_str)
             .collect()
-    }
-
-    pub(crate) fn uses_room_repository(&self) -> bool {
-        self.enabled
-            .iter()
-            .any(|namespace| namespace.uses_room_repository())
     }
 }
 
@@ -616,7 +553,7 @@ pub(crate) struct Config {
     pub(crate) limits: LimitsConfig,
     #[serde(default)]
     pub(crate) skills: RoomSkillsConfig,
-    #[serde(default = "default_room_config")]
+    #[serde(default)]
     pub(crate) room: RoomConfig,
     #[serde(default)]
     pub(crate) email: EmailConfig,
@@ -1056,35 +993,11 @@ impl ResolvedMaxActiveProcesses {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum RoomMaintenanceMode {
-    #[default]
-    Local,
-    Workflow,
-}
-
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct RoomMaintenanceConfig {
-    #[serde(default)]
-    pub(crate) mode: RoomMaintenanceMode,
-    #[serde(default)]
-    pub(crate) auto_push: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RoomConfig {
     #[serde(default)]
     pub(crate) secret: RoomSecretConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) repository_root: Option<PathBuf>,
-    pub(crate) timezone: String,
-    #[serde(default = "default_diary_day_boundary_hour")]
-    pub(crate) diary_day_boundary_hour: u32,
-    #[serde(default)]
-    pub(crate) maintenance: RoomMaintenanceConfig,
     #[serde(default, skip_serializing)]
     pub(crate) skills: RoomSkillsConfig,
 }
@@ -1191,7 +1104,7 @@ impl Config {
         Ok(Self {
             mode: RuntimeMode::Standalone,
             profile: WorkerProfile::Normal,
-            toolsets: ToolsetConfig::normal(),
+            toolsets: ToolsetConfig::default(),
             config_api: ConfigApiConfig::default(),
             agent_id: "laptop".to_string(),
             display_name: hostname_fallback(),
@@ -1215,7 +1128,7 @@ impl Config {
                 process_response_bytes: DEFAULT_PROCESS_RESPONSE_BYTES,
             },
             skills: RoomSkillsConfig::default(),
-            room: default_room_config(),
+            room: RoomConfig::default(),
             email: EmailConfig::default(),
             tunnel: None,
             extra: BTreeMap::new(),
@@ -1802,7 +1715,6 @@ fn materialize_import_value(value: &Value) -> Result<Config> {
     )?;
     defaults.mode = mode;
     defaults.profile = profile;
-    defaults.toolsets = ToolsetConfig::for_profile(profile);
     defaults.tunnel = object
         .get("tunnel")
         .is_some_and(Value::is_object)
@@ -2028,17 +1940,6 @@ fn safe_policy(policy: &PolicyConfig) -> SafePolicyRules {
         allow: policy.allow.clone(),
         confirm: policy.confirm.clone(),
         deny: policy.deny.clone(),
-    }
-}
-
-pub(crate) fn default_room_config() -> RoomConfig {
-    RoomConfig {
-        secret: RoomSecretConfig::default(),
-        repository_root: None,
-        timezone: "Asia/Shanghai".to_string(),
-        diary_day_boundary_hour: default_diary_day_boundary_hour(),
-        maintenance: RoomMaintenanceConfig::default(),
-        skills: RoomSkillsConfig::default(),
     }
 }
 
@@ -2315,10 +2216,6 @@ fn secret_reference_kind(reference: &str) -> Option<String> {
     } else {
         Some("invalid".to_string())
     }
-}
-
-pub(crate) fn default_diary_day_boundary_hour() -> u32 {
-    5
 }
 
 pub(crate) fn default_confirmation_language() -> String {
@@ -2631,7 +2528,7 @@ mod tests {
     fn checked_in_v09_config_example_is_strict_and_safe_to_copy() {
         let source = include_str!("../../../../config.example.json");
         let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
-        value["toolsets"] = serde_json::to_value(ToolsetConfig::normal()).unwrap();
+        value["toolsets"] = serde_json::to_value(ToolsetConfig::default()).unwrap();
         let path = temp_config_path();
         fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         let config = Config::load(&path).unwrap();
@@ -2745,31 +2642,6 @@ mod tests {
         assert_eq!(written["limits"]["maxActiveProcesses"], json!(4));
         assert_eq!(written["futureField"]["preserve"], json!(true));
         let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn room_repository_and_maintenance_use_the_v2_json_shape() {
-        let room = RoomConfig {
-            secret: RoomSecretConfig::default(),
-            repository_root: Some(PathBuf::from("/tmp/room-repository")),
-            timezone: "UTC".to_string(),
-            diary_day_boundary_hour: 4,
-            maintenance: RoomMaintenanceConfig {
-                mode: RoomMaintenanceMode::Workflow,
-                auto_push: true,
-            },
-            skills: RoomSkillsConfig::default(),
-        };
-        let value = serde_json::to_value(room).unwrap();
-        assert_eq!(value["repositoryRoot"], json!("/tmp/room-repository"));
-        assert_eq!(value["maintenance"]["mode"], json!("workflow"));
-        assert_eq!(value["maintenance"]["autoPush"], json!(true));
-        assert!(serde_json::from_value::<RoomConfig>(json!({
-            "notebookRoot": "/tmp/legacy",
-            "timezone": "UTC",
-            "diaryDayBoundaryHour": 4
-        }))
-        .is_err());
     }
 
     #[test]
@@ -2894,7 +2766,7 @@ mod tests {
             "policy": SecurityPolicyConfig::default(),
             "mode": "local",
             "profile": "normal",
-            "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
+            "toolsets": serde_json::to_value(ToolsetConfig::default()).unwrap(),
             "workspaceRoot": workspace,
             "futureField": {"enabled": true}
         });
@@ -2916,9 +2788,9 @@ mod tests {
             "policy": SecurityPolicyConfig::default(),
             "mode": "local",
             "profile": "normal",
-            "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
+            "toolsets": serde_json::to_value(ToolsetConfig::default()).unwrap(),
             "tunnel": {"tunnelId": "stale"},
-            "room": {"timezone": "UTC", "diaryDayBoundaryHour": 1}
+            "room": {"secret": {"syncWaitTimeoutMs": 1200}}
         });
         fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
@@ -2930,8 +2802,7 @@ mod tests {
                 .map(|tunnel| tunnel.tunnel_id.as_str()),
             Some("stale")
         );
-        assert_eq!(loaded.room.timezone, "UTC");
-        assert_eq!(loaded.room.diary_day_boundary_hour, 1);
+        assert_eq!(loaded.room.secret.sync_wait_timeout_ms, 1200);
         let _ = fs::remove_file(root);
     }
 
@@ -2948,7 +2819,7 @@ mod tests {
             api_key: "env:INACTIVE_TUNNEL_KEY".to_string(),
             ..TunnelConfig::default()
         });
-        config.room.timezone = "UTC".to_string();
+        config.room.secret.sync_wait_timeout_ms = 1200;
         config.extra.insert("futureField".to_string(), json!(true));
 
         let value = sparse_config_value(&config, false).unwrap();
@@ -2960,7 +2831,7 @@ mod tests {
         assert_eq!(value["tunnel"]["apiKey"], json!("env:INACTIVE_TUNNEL_KEY"));
         assert!(value["tunnel"].get("client").is_none());
         assert!(value["tunnel"].get("hubReporting").is_none());
-        assert_eq!(value["room"]["timezone"], json!("UTC"));
+        assert_eq!(value["room"]["secret"]["syncWaitTimeoutMs"], json!(1200));
         assert_eq!(value["futureField"], json!(true));
 
         let root = temp_config_path();
@@ -2968,7 +2839,7 @@ mod tests {
         let loaded = Config::load(&root).unwrap();
         assert_eq!(loaded.hub.url, config.hub.url);
         assert_eq!(loaded.tunnel.unwrap().tunnel_id, "inactive-tunnel");
-        assert_eq!(loaded.room.timezone, "UTC");
+        assert_eq!(loaded.room.secret.sync_wait_timeout_ms, 1200);
         let _ = fs::remove_file(root);
     }
 
@@ -2979,7 +2850,7 @@ mod tests {
             "policy": SecurityPolicyConfig::default(),
             "mode": "local",
             "profile": "normal",
-            "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
+            "toolsets": serde_json::to_value(ToolsetConfig::default()).unwrap(),
             "confirmationProvider": {"provider": "none"}
         });
         fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
@@ -3012,7 +2883,7 @@ mod tests {
             "policy": SecurityPolicyConfig::default(),
             "mode": "hub",
             "profile": "normal",
-            "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
+            "toolsets": serde_json::to_value(ToolsetConfig::default()).unwrap(),
             "hubUrl": "https://legacy.example.com",
             "hubTransport": "sse",
             "agentSecret": "legacy-secret"
@@ -3053,8 +2924,7 @@ mod tests {
                 "defaultAction": "confirm", "allow": ["git status"], "confirm": [], "deny": []
             }},
             "room": {
-                "timezone": "UTC",
-                "diaryDayBoundaryHour": 3,
+                "secret": {"syncWaitTimeoutMs": 1200},
                 "skills": {"maxFiles": 7, "allowedHosts": ["example.test"]}
             },
             "futureField": {"preserve": true}
@@ -3082,7 +2952,7 @@ mod tests {
         assert_eq!(imported.config.limits.max_concurrent_tasks, 7);
         assert_eq!(imported.config.mcp_servers.len(), 1);
         assert_eq!(imported.config.policy.command.allow[0], "git status");
-        assert_eq!(imported.config.room.timezone, "UTC");
+        assert_eq!(imported.config.room.secret.sync_wait_timeout_ms, 1200);
         assert_eq!(
             imported.config.extra["futureField"],
             json!({"preserve": true})
@@ -3134,7 +3004,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_import_uses_normal_toolset_preset_when_toolsets_are_omitted() {
+    fn explicit_import_uses_default_toolsets_when_toolsets_are_omitted() {
         let root = temp_config_path();
         let value = json!({
             "policy": SecurityPolicyConfig::default(),
@@ -3144,7 +3014,7 @@ mod tests {
         fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
         let imported = Config::import(&root).unwrap();
-        assert_eq!(imported.config.toolsets, ToolsetConfig::normal());
+        assert_eq!(imported.config.toolsets, ToolsetConfig::default());
         let _ = fs::remove_file(root);
     }
 
@@ -3155,12 +3025,12 @@ mod tests {
             "policy": SecurityPolicyConfig::default(),
             "mode": "standalone",
             "profile": "room",
-            "toolsets": {"enabled": ["room.diary"]}
+            "toolsets": {"enabled": ["room.secret"]}
         });
         fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
         let imported = Config::import(&root).unwrap();
-        assert_eq!(imported.config.toolsets.enabled_names(), vec!["room.diary"]);
+        assert_eq!(imported.config.toolsets.enabled_names(), vec!["room.secret"]);
         let _ = fs::remove_file(root);
     }
 

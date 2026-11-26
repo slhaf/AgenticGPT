@@ -95,8 +95,6 @@ async fn email_disable_releases_owner_and_reenable_resumes_sync_promptly() {
         let mut config = state.config.write().await;
         config.toolsets.disable(ToolNamespace::RoomEmail);
         config.email.sync_interval_seconds = 86_400;
-        assert!(!config.toolsets.uses_room_repository());
-        assert!(!crate::room_repository::repository_root(&config).exists());
     }
 
     let listener_stopping = tokio_util::sync::CancellationToken::new();

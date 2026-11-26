@@ -128,14 +128,6 @@ pub(crate) fn validate(config: &Config) -> Result<()> {
         config.validate_hub_connection()?;
     }
     config.validate_http_mcp()?;
-    if config.room.diary_day_boundary_hour > 23 {
-        return Err(anyhow!("invalid_diary_day_boundary_hour"));
-    }
-    config
-        .room
-        .timezone
-        .parse::<chrono_tz::Tz>()
-        .map_err(|_| anyhow!("room_timezone_invalid"))?;
     // Initialization may deliberately have pending mode-specific credentials.
     // A supplied Tunnel still has to have statically valid references and distribution settings.
     if config.tunnel.is_some() {

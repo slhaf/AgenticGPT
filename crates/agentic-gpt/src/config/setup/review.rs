@@ -105,7 +105,7 @@ use crate::WorkerProfile;
 
 use super::model::{
     ConfirmationDraft, HubReportingDraft, IdentityDraft, LimitsDraft, McpServersDraft,
-    OptionalSectionDraft, RoomDraft, SandboxDraft, SectionStatus, SetupField, SetupSession,
+    OptionalSectionDraft, SandboxDraft, SectionStatus, SetupField, SetupSession,
     ToolsetsDraft, TunnelClientDraft, WorkspaceDraft,
 };
 use super::validation::ValidationErrors;
@@ -287,7 +287,6 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         OptionalSection::Skills,
         OptionalSection::SecurityPolicy,
         OptionalSection::ConfigManagement,
-        OptionalSection::Room,
         OptionalSection::RoomSecret,
         OptionalSection::Email,
         OptionalSection::TunnelClient,
@@ -789,44 +788,6 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 SetupField::EmailTrashPolicy,
                 "email_trashPolicy",
                 value.value(SetupField::EmailTrashPolicy),
-                ReviewEditorKind::Choice,
-            ),
-        ],
-        OptionalSectionDraft::Room(RoomDraft {
-            timezone,
-            diary_boundary_hour,
-            repository_root,
-            maintenance_mode,
-            maintenance_auto_push,
-        }) => vec![
-            ReviewItem::field(
-                SetupField::RoomTimezone,
-                "room_timezone",
-                timezone,
-                ReviewEditorKind::Text,
-            ),
-            ReviewItem::field(
-                SetupField::DiaryBoundaryHour,
-                "diary_boundary_hour",
-                diary_boundary_hour,
-                ReviewEditorKind::Text,
-            ),
-            ReviewItem::field(
-                SetupField::RepositoryRoot,
-                "repository_root",
-                repository_root,
-                ReviewEditorKind::Text,
-            ),
-            ReviewItem::field(
-                SetupField::RoomMaintenanceMode,
-                "room_maintenance_mode",
-                maintenance_mode,
-                ReviewEditorKind::Choice,
-            ),
-            ReviewItem::field(
-                SetupField::RoomMaintenanceAutoPush,
-                "room_maintenance_auto_push",
-                maintenance_auto_push.to_string(),
                 ReviewEditorKind::Choice,
             ),
         ],

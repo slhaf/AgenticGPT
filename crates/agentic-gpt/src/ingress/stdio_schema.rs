@@ -102,7 +102,6 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "file.edit" => &["patch"],
         "mcp.callTool" => &["serverId", "toolName"],
         "mcp.batch" => &["calls"],
-        "room.maintenance.submit" => &["items"],
         "skills.setActive" => &["id", "active"],
         "tmux.sessions" | "tmux.panes" => &["action"],
         "tmux.exec" => &["target", "program"],
@@ -125,10 +124,6 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "room.email.attachment" => &["id", "attachmentId"],
         "room.email.send" => &["to", "subject", "text"],
         "room.email.operate" => &["id", "action"],
-        "room.diary.read" => &["layer", "period"],
-        "room.notebook.search" => &["query"],
-        "room.notebook.read" => &["path"],
-        "room.state.read" => &["entity"],
         _ => &[],
     };
     (properties_for(name), required)
@@ -956,110 +951,6 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 json!({"type":"string","enum":["markRead","markUnread","flag","unflag","trash"]}),
             );
         }
-        "room.maintenance.status" => {}
-        "room.maintenance.submit" => {
-            add(
-                "items",
-                json!({
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 5,
-                    "description": "各提交槽唯一且仅写空槽；全组先校验，不覆盖已占用内容。",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["slot", "payload"],
-                        "properties": {
-                            "slot": {
-                                "type": "string",
-                                "enum": ["diary.daily", "diary.weekly", "diary.monthly", "notebook", "entity"],
-                                "description": "diary.* 写对应 current.md；notebook/entity 写 payload 指定文档。"
-                            },
-                            "payload": {
-                                "description": "diary.*: summary 可省略（空串、≤8 Ki），entries 可省略（空数组、≤128 项），每项必填 text（≤8 Ki）、可选 tags（≤8 个、每个≤64 字符）；notebook: 必填 path（Notebook/ 下 .md、≤240）和 body（≤64 Ki），可选 title（空串、≤512）；entity: 必填单文件名 entity（≤160）和 content（≤64 Ki）。每个 payload 序列化≤64 KiB；格式错误拒绝整批。",
-                            }
-                        }
-                    }
-                }),
-            );
-            add(
-                "mode",
-                json!({
-                    "type": "string",
-                    "enum": ["local", "workflow"],
-                    "description": "覆盖配置执行模式；local 生成文档并提交本地 commit，workflow 提交请求并由配置 workflow 处理。",
-                }),
-            );
-            add(
-                "waitSeconds",
-                json!({
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 30,
-                    "default": 0,
-                    "description": "workflow 模式等待消费/结果；local 不使用，不取消工作流。",
-                }),
-            );
-        }
-        "room.diary.active" | "room.state.list" => {}
-        "room.diary.read" => {
-            add(
-                "layer",
-                json!({
-                    "type": "string",
-                    "enum": ["daily", "weekly", "monthly"],
-                    "description": "选择日记目录层级。",
-                }),
-            );
-            add(
-                "period",
-                json!({
-                    "type": "string",
-                    "pattern": "^(current|\\d{4}-\\d{2}-\\d{2}(--\\d{4}-\\d{2}-\\d{2})?)$",
-                    "description": "current 读该层 current.md；daily 也接受日期，weekly/monthly 接受日期区间。日期须有效且起始≤结束，不校验周/月跨度。",
-                }),
-            );
-        }
-        "room.notebook.recent" => {
-            add(
-                "limit",
-                json!({
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                    "description": "最多返回的近期 Notebook Markdown 预览数；缺省 20。",
-                }),
-            );
-        }
-        "room.notebook.search" => {
-            add(
-                "query",
-                string("不区分大小写子串；搜 Notebook 相对路径、首个 H1 和正文，非空且≤256 字符。"),
-            );
-            add(
-                "limit",
-                json!({
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                    "description": "最多返回的 Notebook 预览数；缺省 20。",
-                }),
-            );
-        }
-        "room.notebook.read" => {
-            add(
-                "path",
-                string("精确的 Notebook 相对 Markdown 路径；仅接受 Notebook/ 下 .md 文件。"),
-            );
-        }
-        "room.state.read" => {
-            add(
-                "entity",
-                string(
-                    "State/entities/ 下单个文件名 stem（不含 .md）；不可含路径分隔符，先用 room.state.list 发现。",
-                ),
-            );
-        }
         _ => {}
     }
     properties
@@ -1134,8 +1025,6 @@ fn tool_description(name: &str) -> String {
         "skills.install.get" => "查询安装任务状态，可短暂等待；返回 status、可用 phase、attempt/progress/source 及终态 result/error。等待不取消安装；未知 installId 返回 error。".to_string(),
         "skills.install.cancel" => "请求协作取消安装并返回 outcome/status/phase；排队任务可立即取消，提交或激活阶段可能返回 tooLate，已完成写入不会被此请求撤销。".to_string(),
         "skills.run" => "运行已激活、可写本地 skill 的 scripts/ 下可执行文件，作为受管理进程返回统一紧凑观察；后续用 process.read 查看或 process.cancel 请求取消。脚本可产生真实副作用；inactive、路径或可执行性错误会拒绝。".to_string(),
-        "room.maintenance.status" => "检查 Room 仓库、schema/scaffold、本地执行器、配置模式、workflow/remote/sync heads 和五个槽位占用；返回各 readiness/status 字段。只读；仓库不可检查时返回 error。".to_string(),
-        "room.maintenance.submit" => "按槽位 payload 更新 Room 日记、Notebook 或实体；local 写入目标文档并提交本地 commit，workflow 提交请求并可能等待消费。返回 mode/state/localApplied/sync/revision；不会覆盖已占用槽，仓库未就绪、重复槽或 payload 错误会拒绝。".to_string(),
         "room.secret.list" => "发现共享密码库账号组；仅返回 site/account，按匹配质量和使用权重排序，无确认。查询前尝试同步，等待预算耗尽不取消同步；旧本地结果附 stale/lastSyncedAt，不分页不截断，超容量返回 secret_result_too_large，需收紧 filter。".to_string(),
         "room.secret.get" => "按 site/account 和 type=password|totp 获取密码或当前验证码，不返回 seed。遵守 room.secret.getPolicy 的 allow/严格 confirm；旧数据未命中返回 secret_presence_unknown，成功同步后才返回 secret_not_found。明文仅交付，不持久化或重放，响应丢失需重新调用授权。".to_string(),
         "room.secret.upsert" => "按 site/account 创建或更新账号组；password/totp 至少一个，省略保留，不接受空值清除。写前必须同步成功，遵守 upsertPolicy；重复身份报 ambiguous_secret。返回 created 或 updated；secret_write_outcome_unknown 表示写入成败未知，不自动重放，再次调用前需核对。".to_string(),
@@ -1146,13 +1035,6 @@ fn tool_description(name: &str) -> String {
         "room.email.attachment" => "读取或下载活动 Room 邮件附件，id 和 attachmentId 来自 read。download 默认 false，可内联图片或小型 UTF-8 文本；其他格式/超预算应下载后处理。提供 path 时无论 download 如何均采用下载模式；path 必须相对 workspace，禁止逃逸和覆盖；省略目标时保存到 downloads/email/<mail-id>/<附件名>。下载仅返回规范化相对 path，内联图片返回 image blocks。不接受 agentId。".to_string(),
         "room.email.send" => "使用活动 Room 配置账户发送纯文本邮件，to 至少一个地址；cc/bcc 可省略，replyToId 引用本地原邮件以生成回复头。遵守 email.sendPolicy：allow 直接发、confirm 必须明确批准、deny 拒绝；请求不能覆盖策略。返回稳定 id 和 sent/unknown；unknown 表示是否被 SMTP 接受尚不确定，不会自动重试，再次调用可能重复发送。可通过 search/read 查回记录。不接受 agentId。".to_string(),
         "room.email.operate" => "对活动 Room 邮件显式执行 markRead、markUnread、flag、unflag 或 trash。前四项直接执行；trash 仅移入服务器垃圾箱并遵守 email.trashPolicy，confirm 拒绝/超时/通道不可用不得移动，不支持永久删除。服务器成功后更新本地状态；本地发送记录不支持服务器操作。返回 id、action、status=applied 或明确 error。不接受 agentId。".to_string(),
-        "room.diary.active" => "读取 daily/weekly/monthly 三个 current.md；每层返回 period/path/available 与 content 或 missing、unreadable、invalid_utf8 issue。语义化只读，不接受任意路径。".to_string(),
-        "room.diary.read" => "按 layer/period 读取精确日记文档；返回 document 的路径、可用状态、内容或 issue。daily 接 current/日期，weekly/monthly 接日期范围；非法日期/范围报错，缺失文档以 issue 表示。".to_string(),
-        "room.notebook.recent" => "按有效时间列出最近 Notebook Markdown 预览；返回 documents（path/title/contentPreview/truncated/effectiveAt）和 warnings。缺少 Notebook 时为空结果；只读。".to_string(),
-        "room.notebook.search" => "以不区分大小写的子串搜索 Notebook 路径、首个 H1 和正文；返回有界预览及 warnings。query 空或过长报错；只读，不接受正则。".to_string(),
-        "room.notebook.read" => "读取 Notebook/ 下精确的 .md 相对路径；返回 path/content。未知或超大文档返回错误；只读，不是任意仓库文件读取器。".to_string(),
-        "room.state.list" => "列出 State/entities/ 下的 Markdown 实体；返回按路径排序的 entities（entity/path），跳过 symlink 和非 Markdown 文件。只读。".to_string(),
-        "room.state.read" => "按实体文件名 stem 读取 State/entities/{entity}.md；返回 path/content。缺失或超大文档报错；不接受路径输入，只读。".to_string(),
         "event.list" => "发现当前 Agent 的待处理事件或按状态/等级筛选历史时使用。返回 items（eventId/summary/severity/createdAt/status）与可选 nextCursor；完整正文和来源用 event.get 查看。events.new 是有展示限制的提醒面板，不是完整 pending 列表；隐藏不等于 handled，仍可通过列表查询。读取不标记 handled，不读取进程状态；附带面板记录实际曝光，历史仍按过期/保留策略维护。非法游标或目标 Agent 不匹配返回错误。".to_string(),
         "event.get" => "已知 eventId 且需要完整正文或来源时使用；ID 可来自 event.list 或事件面板。返回完整记录（message、severity/status、source.kind/ref、shownCount、expiresAt）及当前 Agent 的 events 面板。读取不标记 handled，不操作进程或安装；详情正文读取不额外计曝光，附带面板实际展示项仍计次。历史仍按过期/保留策略维护；未知 ID 或目标 Agent 不匹配返回错误。".to_string(),
         "event.mark" => "事件已处理或明确决定忽略后，按 eventIds 将选中的 pending 事件标记为 handled，停止后续提醒；不执行或取消来源进程/安装。返回 handledIds/notFoundIds 与当前 Agent 的 events 面板。重复 ID 去重，已 handled 的 ID 幂等；过期或不存在的 ID 进入 notFoundIds，空数组不标记任何事件。不会主动删除事件记录，历史仍按过期/保留策略维护；目标 Agent 不匹配返回错误。".to_string(),

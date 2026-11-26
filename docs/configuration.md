@@ -10,7 +10,7 @@ Agentic GPT 的 Standalone、Local Unix MCP 与连接 Hub 的 Agent 共用一份
 
 路径字段支持 `~` 和 `~/…` 的当前用户主目录展开，不支持 `~user` 或 shell 环境变量替换。
 初始化与加载配置时会展开 `workspaceRoot`；路径策略的 `readOnly`、`write`、`deny`，
-Shell 初始化文件、Room 根目录及 Tunnel client 路径在各自使用边界展开。
+Shell 初始化文件及 Tunnel client 路径在各自使用边界展开。
 `file:~/…` 密钥引用读取时同样展开；初始化生成密钥文件后，配置引用使用实际写入目标的绝对路径。
 
 磁盘文件是稀疏的 Config v2 投影，始终包含权威的顶层 `mode`（`standalone`、`hub` 或
@@ -38,16 +38,14 @@ agentic-gpt config show
 模式与配置档是两个独立选择：
 
 - `--mode standalone|hub|local` 选择运行时连接方式与配置形状。
-- `--profile normal|room` 选择默认工具集预设。Normal 不选择 Room 子工具集；Room 额外选择
-  `room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
-  `config`、`room.email`、`room.secret` 在两个预设中都默认关闭；Email 和 Secret 可先启用，再逐步补齐服务配置。
-  显式的 `toolsets.enabled` 是最终选择；profile 不会覆盖已有列表。
+- `--profile normal|room` 选择 Agent 角色。使用 Hub 时，`room` 角色可注册为活动 Room。
+  两种角色的默认工具集相同，实际启用项由 `toolsets.enabled` 决定。
 
-可用工具集为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`config`，以及
-上述六个 `room.*` 子工具集。Room 是 API 和配置目录的归属，没有父级授权开关。
-工具集关闭后，本地 MCP 隐藏相关工具，调用时也会拒绝；Email 同步和 Secret owner 随各自子工具集排空、释放和恢复。
-关闭不会删除账户设置或持久数据。仅 Diary、Notebook、State、Maintenance 会按需准备 Room 仓库；
-Email 和 Secret 不会因此初始化该仓库。仓库暂时无法初始化时，不会因此从已启用的工具集中隐藏 Diary、Notebook、State 或 Maintenance 工具。根目录存在且可读时，读取仍可能成功；只有操作所需资源不可用时才会报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时返回就绪状态，路径不合法时返回错误。现有仓库路径安全检查不变。`config` 关闭不影响本地 CLI/TUI 管理。
+默认启用 `agent`、`file`、`mcp`、`process`、`skills`、`tmux` 和 `browser`。
+`config`、`room.email` 和 `room.secret` 默认关闭，可按需单独启用。
+工具集关闭后，本地 MCP 隐藏并拒绝相关工具。邮件和密钥服务分别随各自工具集释放或恢复，账户设置和持久数据保留。
+本地 CLI/TUI 管理可独立使用。
+
 使用以下命令固定选择；将 `<namespace>` 替换为上列 namespace 名称：
 
 ```bash
@@ -105,10 +103,9 @@ agentic-gpt config init \
 
 ### Room 子工具集配置
 
-`toolsets.enabled` 保存具体子工具集；API 名称和活动 Room 路由保持不变。
-Email/Secret 是否启用只由 `toolsets.enabled` 决定，与服务配置是否完整无关。启用后工具会出现在 MCP 能力列表中；邮件操作要求完整账户，密钥操作要求完整后端配置，调用时检查配置完整性。关闭时保留配置和数据。
+`toolsets.enabled` 分别控制 `room.email` 和 `room.secret`。启用后，工具会出现在本地 MCP 列表中。调用时，邮件操作检查账户配置，密钥操作检查 Vaultwarden 配置。Hub 将两组请求派发给活动 Room。
 
-TUI 工具集中的 Room 分组提供批量选择和取消选择，实际只保存具体子项。配置目录独立提供 Room 通用、Email、Secret、
+TUI 工具集中的 Room 分组提供批量选择和取消选择，实际只保存具体子项。配置目录独立提供 Email、Secret、
 Browser、Skills、安全策略和配置管理，不再有“其他配置”兜底页；关闭能力仍可修改、Review 和保存其设置。
 这些页面和 Review 使用当前界面语言的语义标签，大小和时间限制在标签中标明单位；原始配置键仅在辅助说明中供对照。
 
@@ -120,9 +117,8 @@ Browser、Skills、安全策略和配置管理，不再有“其他配置”兜�
 - 交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。
 - Optional settings 可配置身份/显示名称、工作区/路径策略、确认方式/语言、限制、沙箱、
   Toolsets、Events 与下游 MCP server 集合。
-- Toolsets 从配置档 preset 开始；一旦显式编辑，其 namespace selection 具有权威性。
-  Room 通用、Email、Secret 配置在工具集关闭时仍可进入和预配置；启停状态来自相应子工具集，
-  Email、Secret 页面和 Review 的对应分组只编辑服务参数，启停统一在 Toolsets 分组操作。服务字段可分步补齐；启用状态不代表服务已经可用。
+- Toolsets 显示当前启用项，初始化时提供默认选择。
+  Email、Secret 页面和 Review 可分步填写服务参数，启停在 Toolsets 分组操作。
 - 可选配置列表和 Review 只显示“未修改”“已配置”或“已关闭”。关闭优先，其余根据当前设置与默认值是否一致判断；已填写字段的格式和范围错误会在保存校验时提示，缺少的服务字段留到对应操作调用时检查。
 - 只有 Standalone 模式会出现 tunnel-client 路径和 Hub reporting。Hub 与 Local 模式不会
   显示这些 tunnel 部分。
@@ -211,7 +207,7 @@ agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api
 agentic-gpt run
 ```
 
-将 `profile` 设为 `room` 会选择核心 Room 子工具集预设；如果存在 `toolsets.enabled`，则以显式列表为准。邮箱、密钥与配置 API 仍须单独启用。
+通过 `toolsets.enabled` 选择本地能力。需要经 Hub 访问邮件或密钥时，使用 `profile=room` 的命令连接，并启用对应工具集。
 
 私有持久状态不绑定 `agentId`。更改连接身份不会切换事件、进程历史或 Skill 激活/安装状态；需要独立持久状态的实例应使用独立 `HOME`。启动不会迁移旧目录，当前仓库也不提供通用迁移脚本；旧部署数据的备份与升级边界见[私有状态布局](operations.md#私有状态布局)。
 
@@ -220,8 +216,8 @@ agentic-gpt run
 | 字段 | 用途 |
 | --- | --- |
 | `mode` | 权威运行时分派：`standalone`、`hub` 或 `local`。 |
-| `profile` | 默认能力/toolset preset：`normal` 或 `room`。 |
-| `toolsets` | 已启用的 tool namespace；显式 `enabled` 列表会覆盖配置档 preset，`config` 默认不选中。 |
+| `profile` | Agent 角色，取值为 `normal` 或 `room`。 |
+| `toolsets` | `enabled` 列出当前启用的工具集。 |
 | `config` | 配置 API 的操作级权限；`updatePolicy` 为 `allow` 或 `confirm`，默认 `confirm`。 |
 | `agentId` | 本地连接身份，用于 Hub 路由、协议身份及 `~/.agentic_gpt/runtime/agent/<agentId>/` 下的 runtime/socket 路径；私有持久状态统一位于 `~/.agentic_gpt/state/`，不按此字段分目录。 |
 | `displayName` | summary/reporting 中的人类可读机器名称。 |
@@ -234,7 +230,7 @@ agentic-gpt run
 | `policy` | 统一的命令／MCP／路径策略：`enabled`、`command`、`mcp`、`path` 与 `bubblewrap`。 |
 | `limits` | Process 并发限制与最大活动 Process/Skill/MCP Job 容量。 |
 | `skills` | Skill package/install 限制与网络策略。 |
-| `room` | Room 仓库根目录、时区、日记日界线、维护策略及可选 Vaultwarden 密钥服务。 |
+| `room` | 可选的 Vaultwarden 密钥服务配置。 |
 | `email` | 单账户 IMAP/SMTP、同步间隔、本地内容保存限制和发送/垃圾箱策略；见[邮件使用指南](email.zh-CN.md)。 |
 | `tunnel` | Standalone tunnel-client 路径、secret 引用与可选 reporting。 |
 | `browser` | Agentic Browser 扩展连接的监听地址与配对密钥。Browser 工具集控制工具和监听，已连接浏览器可由 `browser.list` 查看。 |
@@ -821,28 +817,9 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 - TUI 会掩码 Bearer token，并在最终 JSON 预览中脱敏。
 - 在审查信任与确认策略之前，示例应保持 disabled。
 
-## Skills、Room 与 bubblewrap
+## Skills 与 bubblewrap
 
 `skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；旧 `room.skills` 不属于当前可写配置路径。
-
-`room.timezone` 保留为 Room metadata；当前读取使用仓库路径，而不是 legacy JSONL
-日期分区。`room.diaryDayBoundaryHour` 范围为 0–23，用于新 bootstrap 的 Daily scaffold
-逻辑日期。`room.repositoryRoot` 可选，默认是 `<workspaceRoot>/room`。嵌套的
-`room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；
-`room.maintenance.autoPush` 默认是 `false`。
-
-Room 子工具集的九个文档／维护语义操作是 Diary active/read、Notebook recent/search/read、
-State list/read，以及 maintenance status/submit。Notebook recent/search 的 `limit`
-默认 20、范围为 1–100；search query 必须非空且不超过 256 个 Unicode 字符；
-Markdown read 限制为 512 KiB。Maintenance submit 接受 1–5 个不重复的 semantic slot，可选
-mode 覆盖；`waitSeconds` 默认 0、上限 30。workflow 等待超时只结束等待，不会取消
-submission；没有隐式 confirmation 或单独的 maintenance wait 操作。
-
-Hub Full 通过 active Room lease 与 `POST /v1/room/<namespace>/<action>` 暴露同一
-九项操作，请求不接受 `agentId`。Hub 不拥有 Room repository，也不创建 content
-replica。旧 JSONL append/update/remove 与 passage/date-selection 调用不会静默映射
-为 maintenance；请迁移到显式 slot/payload request，或删除旧调用。历史 release/migration
-记录只保留历史，不是当前 compatibility contract。
 
 `policy.bubblewrap` 默认 `false`；设为 `true` 时，受管理 Process 的挂载直接由 `policy.path` 派生，不存在另一套可配置
 sandbox 列表。执行层提供的只读运行依赖挂载为 `/usr`、`/bin`、`/lib`、`/lib64`、`/etc/ssl`，并使用
@@ -947,11 +924,10 @@ Standalone、Local 和连接 Hub 的 Agent 共用串行配置应用协调。目�
 | `email.account` | 排空在途邮件请求与同步，释放旧账户 owner 后切换；保留 Store、同步记录与发送结果，不自动重发。 |
 | `room.secret` 后端／启停／凭据 | 排空请求、停止旧 CLI/sync、释放 session 和账户锁，再允许新 owner 激活；保留加密缓存及使用记录，不重放写入。 |
 | `room.secret.getPolicy/upsertPolicy/deletePolicy/syncWaitTimeoutMs`、其余邮件设置 | 后续请求／同步使用新值；已准入操作保留各自策略和等待预算。 |
-| `room.repositoryRoot` | 在仓库写入边界准备并切换根目录，不自动迁移已有内容。 |
 | `skills.maxConcurrentInstalls` | 保留安装 manager 与 worker，更新后续准入上限；降低时等待现有任务自然释放，不取消安装。 |
-| `policy`、`limits`、`shell`、`mcpServers`、`toolsets`、`events`、确认设置、其余 Skills/Room 设置、`config.updatePolicy` | 更新后续消费者；Process、Skill 和已创建下游调用保留各自准入快照，不因配置变化重新执行。 |
+| `policy`、`limits`、`shell`、`mcpServers`、`toolsets`、`events`、确认设置、其余 Skills 设置、`config.updatePolicy` | 更新后续消费者；Process、Skill 和已创建下游调用保留各自准入快照，不因配置变化重新执行。 |
 
-Room `timezone` 当前仅保留配置，现有运行逻辑未使用；`diaryDayBoundaryHour` 只影响新空仓库的初始化，不改写已有仓库。关闭工具集不等于撤销已准入副作用；Tmux 已有会话不因工具集关闭而删除。
+关闭工具集不等于撤销已准入副作用；Tmux 已有会话不因工具集关闭而删除。
 
 HTTP token 无法解析时拒绝认证，监听绑定失败由组件重试，不影响其他入口。更换 endpoint 会丢弃其本地 OAuth/session 状态；token 原地更新保留 session 并撤销 OAuth 记录。邮件、Secret 或 Browser 准备繁忙时可报告应用失败并保留原实例；需要重新应用的配置通过配置操作再次提交，连接恢复沿各组件现有机制处理，不重放用户副作用。
 

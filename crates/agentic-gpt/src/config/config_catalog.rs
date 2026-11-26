@@ -121,7 +121,6 @@ pub(crate) fn effect(path: &[String]) -> ConfigApplyEffect {
         ["room"]
         | ["skills"]
         | ["room", "secret", ..]
-        | ["room", "repositoryRoot"]
         | ["skills", "maxConcurrentInstalls"] => ConfigApplyEffect::ComponentReconfigure,
         _ => ConfigApplyEffect::LiveUpdate,
     }
@@ -228,8 +227,6 @@ fn description(path: &[String]) -> String {
         ["email", "account", "password"] => "仅接受 env:NAME 或 file:PATH 凭据引用；不接受明文密码。",
         ["email", "account", _] => "邮箱账户字段可分步填写；已填写的值在保存时校验，调用邮件工具前检查账户是否完整。",
         ["toolsets", "enabled"] => "启用的工具集集合；add/remove 幂等。config 在所有初始化预设中默认不选中；未选中时三个配置工具均不可调用，本地 CLI/TUI 管理不受影响。",
-        ["room", "timezone"] => "当前版本保存此字段，但现有 Room 运行逻辑尚未使用它；修改或重启不会改变已有仓库的日记时区。",
-        ["room", "diaryDayBoundaryHour"] => "0–23；仅用于新空 Room 仓库初始化的逻辑日期计算，不改写已有仓库。",
         _ => "通过真实配置路径读取或修改；对象 set 替换子树，unset 恢复缺省或删除 map 条目。",
     }.to_owned()
 }
@@ -327,12 +324,6 @@ pub(crate) fn entries() -> Result<Vec<ConfigEntry>> {
             let custom = matches!(
                 path.first().map(String::as_str),
                 Some("browser" | "mcpServers" | "config" | "toolsets")
-            ) || matches!(
-                path.iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-                ["room", "timezone" | "diaryDayBoundaryHour"]
             );
             let description = if custom {
                 description(path)
@@ -467,14 +458,14 @@ fn chapter(section: &str) -> &'static str {
     match section {
         "runtime" | "identity" | "workspace" => "mode、profile、agentId 和 workspaceRoot 固定于本次实例启动；保存后须手动重启才能应用。displayName 和 backupLimit 使用新快照。",
         "config" => "配置 API 只管理目标 Agent。整个 update 批次统一按当前有效 updatePolicy 授权；修改策略自身也须先通过旧策略。CLI/TUI 是本地管理入口。",
-        "toolsets" => "工具集在实际调用时再次检查；Room 七个子工具集独立控制发现、准入和资源，不接受聚合 room。关闭 Email/Secret 时排空并释放 owner，保留账户与数据；关闭 config 后可从本地 CLI/TUI 重新启用。",
+        "toolsets" => "工具集在实际调用时再次检查。room.email 和 room.secret 独立启停；关闭时等待在途请求完成并停止对应服务，保留账户与数据。关闭 config 后可从本地 CLI/TUI 重新启用。",
         "hub" => "Hub 连接由当前实例的连接 owner 重连。配置此连接的请求先向原 Hub 返回结果；旧结果不会转发给另一 Hub。连接失败不撤销配置保存。",
         "http-mcp" => "HTTP MCP 入口属于 standalone。监听和认证由 HTTP owner 更新；旧已接纳请求完成后关闭旧会话。新地址绑定失败尽可能保留旧监听；外部凭据引用仍须可解析。",
         "mcp" => "这是以稳定 server ID 为 key 的映射。ID 中的点是一个路径段；用同一批操作补齐 enabled、transport、url 及可选 auth。下游客户端按调用创建，进行中调用保留原快照。",
         "tunnel" => "Tunnel 身份、凭据和客户端启动参数保存后须手动重启；hubReporting.enabled 控制运行上报，detail 更新报告内容策略，二者都不控制或断开 Hub 辅助连接。连接关闭时保留上报设置并暂停发送。自动故障恢复沿用原启动契约。",
         "browser" => "Browser 工具集与配对密钥启用扩展监听。改地址或密钥后连接和租约需要重新建立；扩展可以重连。",
         "email" => "工具集可先启用，调用邮件工具前需填写完整 account；密码使用 env:/file: 引用。不完整账户不会开始后台同步。账户切换等待在途操作结束并释放旧 owner，保留邮件存储；其他设置按新请求快照使用，不重放发送。",
-        "room" => "仓库路径切换只切换并初始化新目标，不迁移已有内容。Secret 后端和凭据由自身 owner 重新建立；策略及 syncWaitTimeoutMs 直接更新，已接纳请求保留快照。",
+        "room" => "连接地址或凭据变更时会重新建立密码库连接。策略及 syncWaitTimeoutMs 直接更新，已接纳请求继续使用原配置。",
         "skills" => "新安装读取新的限制；并发上限降低不取消正在运行的安装，待其完成后逐步达到新上限。",
         "policy" | "shell" | "limits" | "events" | "confirmation" => "新准入请求使用更新后的配置；已准入 Process/Skill 操作继续使用原配置快照。凭据值在查询、预览及公共报告中脱敏。",
         _ => "值使用原生 JSON，批量修改最终整体校验。",

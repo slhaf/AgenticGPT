@@ -19,7 +19,7 @@ Agentic GPT connects ChatGPT to Linux machines for file operations, command exec
 - Install and run skills, and call downstream MCP services.
 - Use tmux workspaces and the Browser runtime.
 - Persist local events and inspect or handle reminders through the event inbox.
-- Manage Diary, Notebook, and maintenance tasks through Room.
+- Read and send mail, and access or manage credentials in a Vaultwarden vault.
 - Configure command and path policies, desktop or ntfy confirmation, and optional bubblewrap sandboxing.
 
 ## Install and requirements

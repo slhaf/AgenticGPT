@@ -417,7 +417,7 @@ fn room_service_preconfiguration_and_review_share_toolset_state() {
     assert!(!app
         .session()
         .effective_toolsets()
-        .is_enabled(crate::config::ToolNamespace::RoomDiary));
+        .is_enabled(crate::config::ToolNamespace::RoomEmail));
     let OptionalSectionDraft::RoomSecret(secret) =
         app.session().optional_draft(OptionalSection::RoomSecret)
     else {

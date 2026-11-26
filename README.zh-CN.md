@@ -19,7 +19,7 @@ Agentic GPT 将 ChatGPT 连接到 Linux 机器，提供文件操作、命令执�
 - 安装和运行 Skill，调用下游 MCP 服务。
 - 使用 tmux 工作区和 Browser 运行时。
 - 保存本地事件，通过事件收件箱查看和处理提醒。
-- 通过 Room 管理 Diary、Notebook 和维护任务。
+- 读取和发送邮件，查询和管理 Vaultwarden 密码库中的凭据。
 - 配置命令及路径策略，使用桌面或 ntfy 确认；可选启用 bubblewrap 沙箱。
 
 ## 安装与要求

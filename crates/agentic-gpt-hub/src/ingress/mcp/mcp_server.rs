@@ -7,23 +7,18 @@ use agentic_gpt_protocol::{
     McpBatchCall, McpBatchRequest, McpCallToolRequest, McpListToolsRequest,
     ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecElement, ProcessExecRequest,
     ProcessKind, ProcessListRequest, ProcessReadRequest, ProcessReadView, ProcessState,
-    RoomDiaryActiveRequest, RoomDiaryReadRequest, RoomMaintenanceStatusRequest,
-    RoomNotebookReadRequest, RoomNotebookRecentRequest, RoomNotebookSearchRequest,
-    RoomStateListRequest, RoomStateReadRequest, SkillActivationRequest, SkillInstallCancelRequest,
-    SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest, SkillRunRequest,
-    SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest,
-    TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
+    SkillActivationRequest, SkillInstallCancelRequest, SkillInstallGetRequest, SkillInstallRequest,
+    SkillReadRequest, SkillRunRequest, SkillSearchRequest, TmuxCapturePaneRequest,
+    TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest,
+    TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use args::{
     AgentIdArgs, EventGetArgs, EventListArgs, EventMarkArgs, HubRunGetArgs, HubRunListArgs,
     McpBatchArgs, McpCallToolArgs, McpListServersArgs, McpListToolsArgs, ProcessBatchArgs,
-    ProcessExecArgs, ProcessIdArgs, ProcessListArgs, ProcessReadArgs, RoomDiaryActiveArgs,
-    RoomDiaryReadArgs, RoomMaintenanceStatusArgs, RoomMaintenanceSubmitArgs, RoomNotebookReadArgs,
-    RoomNotebookRecentArgs, RoomNotebookSearchArgs, RoomStateListArgs, RoomStateReadArgs,
-    SkillActivationArgs, SkillInstallArgs, SkillInstallCancelArgs, SkillInstallGetArgs,
-    SkillReadArgs, SkillRunArgs, SkillSearchArgs, TmuxCapturePaneArgs, TmuxCloseSessionArgs,
-    TmuxCreateSessionArgs, TmuxExecArgs, TmuxListPanesArgs, TmuxListSessionsArgs,
-    TmuxPasteTextArgs, UserNotifySendArgs,
+    ProcessExecArgs, ProcessIdArgs, ProcessListArgs, ProcessReadArgs, SkillActivationArgs,
+    SkillInstallArgs, SkillInstallCancelArgs, SkillInstallGetArgs, SkillReadArgs, SkillRunArgs,
+    SkillSearchArgs, TmuxCapturePaneArgs, TmuxCloseSessionArgs, TmuxCreateSessionArgs,
+    TmuxExecArgs, TmuxListPanesArgs, TmuxListSessionsArgs, TmuxPasteTextArgs, UserNotifySendArgs,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -50,10 +45,9 @@ use crate::state::{
 };
 use crate::utils::random_id;
 use crate::REQUEST_TIMEOUT_SECS;
-const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub 完整配置提供完整 Apps MCP 工具集。先用 agent.list 选择已启用的本地 Agent：config.manual/get/update、进程、tmux 和指定 Agent 的下游 MCP 工具以 agentId 路由；配置先查 manual，再用 get 区分持久值与已应用值；update 的保存与组件应用分别报告，传输超时不能自动重试；Room 与 skills 工具不接收 agentId，每次调用由 Hub 捕获当时的活动 Room 连接。process.exec/process.batch 运行 command 进程，mcp.callTool/mcp.batch 运行 kind=mcp 进程；waitSeconds 只控制本次等待，不代表完成或取消。process.* 的完整执行面为 exec、batch、read、list、cancel；process.read 使用 auto 或 status 视图统一读取状态与可用产物，status 不含产物；auto 可用 cursor 续读 command/skill 输出，status 与 cursor 不可组合，kind=mcp 的下游结果不支持输出 cursor。maxBytes 是整个 ProcessResponse 的 JSON UTF-8 字节预算，省略时使用 Agent 当前 limits.processResponseBytes（出厂默认 8192），显式范围为 4096–1048576。等待超时不取消进程。mcp.callTool 的下游结果以 mcpResult 保留完整 CallToolResult；command/skill 输出用 process.read 获取。skills.run 返回实际执行 Agent 的 agentId 和 processId；之后的 process.* 必须复用这两个值，不会按当前活动 Room 自动路由。event.list/get/mark 必须指定 agentId，只操作该 Agent 的 inbox。hub.process.* 只读 Hub 进程元数据缓存，需检查 freshness/observedAt，不能等待当前状态或获取输出/结果/取消证据；process.list/read 向 Agent 请求实时观察，失败时可能返回明确标记的缓存元数据。hub.run.* 是 Hub 持久派发回执，不等于进程状态或停止证据。先用 mcp.listServers/listTools 发现下游 MCP 服务器、工具及参数 schema；mcp.batch 返回 batchId/status 和按输入顺序的紧凑子进程结果（index/id 与 ProcessResponse 字段）；included 的 mcpResult 保留完整 CallToolResult，deferred 时用对应 agentId/processId 调 process.read 续读。批次失败不回滚已开始的调用。tmux.exec 返回提交状态和短暂窗格快照，不是完成证据；需要时用 tmux.capturePane 核验输出。skills.install 是异步安装/替换，随后用 skills.install.get/cancel；内置 skill-installer 可读但只读、不可运行，调用 skills.run 前检查 origin/readOnly。发送前先查 user.notify.channels 并检查 user.notify.send 的 accepted；桌面通道可用 accepted=false/reason 表示投递失败且 isError 仍为 false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。工具原生 JSON 位于 MCP structuredContent 并以 text 返回，顶层含 error 时 isError 为 true；参数/路由等 MCP 协议错误与工具 JSON 错误不同。annotations 是行为提示而非授权。";
-const COORDINATOR_INSTRUCTIONS: &str = "协调者配置仅暴露 8 个 Hub 原生工具：hub.info、agent.list、hub.run.list/get、hub.process.status/list 和 user.notify.channels/send。可查看 Agent 注册/在线状态、Hub 派发回执与进程缓存快照；hub.process.* 只读可能过期的 Hub 元数据缓存（检查 freshness/observedAt），不请求 Agent 执行或读取、不等待状态，也不返回输出、结果或取消证据；hub.run.* 是回执而非实时进程状态或停止证据。在线且指定 Agent 时，hub.process.* 额外进行一次 best-effort EventPanel 元数据查询并附加 events；Agent 离线或查询失败时省略 events。这些缓存快照不代表 Agent 当前进程状态，也不同于 Full 配置中的 process.read。此配置不会向 Agent 派发执行、进程控制、tmux、下游 MCP、Room 或 skill 操作。发送前先查 user.notify.channels 并检查 accepted：桌面通道可能返回 accepted=false/reason 而 isError=false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。结果原生 JSON 位于 MCP structuredContent 并以 text 返回；其中顶层 error 会标记 isError，参数/路由错误可作为 MCP 协议错误返回。annotations 是提示，不是授权。";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub 完整配置提供完整 Apps MCP 工具集。先用 agent.list 选择已启用的本地 Agent：config.manual/get/update、进程、tmux 和指定 Agent 的下游 MCP 工具以 agentId 路由；配置先查 manual，再用 get 区分持久值与已应用值；update 的保存与组件应用分别报告，传输超时不能自动重试；Room 邮件、密码库与 skills 工具不接收 agentId，每次调用由 Hub 捕获当时的活动 Room 连接。process.exec/process.batch 运行 command 进程，mcp.callTool/mcp.batch 运行 kind=mcp 进程；waitSeconds 只控制本次等待，不代表完成或取消。process.* 的完整执行面为 exec、batch、read、list、cancel；process.read 使用 auto 或 status 视图统一读取状态与可用产物，status 不含产物；auto 可用 cursor 续读 command/skill 输出，status 与 cursor 不可组合，kind=mcp 的下游结果不支持输出 cursor。maxBytes 是整个 ProcessResponse 的 JSON UTF-8 字节预算，省略时使用 Agent 当前 limits.processResponseBytes（出厂默认 8192），显式范围为 4096–1048576。等待超时不取消进程。mcp.callTool 的下游结果以 mcpResult 保留完整 CallToolResult；command/skill 输出用 process.read 获取。skills.run 返回实际执行 Agent 的 agentId 和 processId；之后的 process.* 必须复用这两个值，不会按当前活动 Room 自动路由。event.list/get/mark 必须指定 agentId，只操作该 Agent 的 inbox。hub.process.* 只读 Hub 进程元数据缓存，需检查 freshness/observedAt，不能等待当前状态或获取输出/结果/取消证据；process.list/read 向 Agent 请求实时观察，失败时可能返回明确标记的缓存元数据。hub.run.* 是 Hub 持久派发回执，不等于进程状态或停止证据。先用 mcp.listServers/listTools 发现下游 MCP 服务器、工具及参数 schema；mcp.batch 返回 batchId/status 和按输入顺序的紧凑子进程结果（index/id 与 ProcessResponse 字段）；included 的 mcpResult 保留完整 CallToolResult，deferred 时用对应 agentId/processId 调 process.read 续读。批次失败不回滚已开始的调用。tmux.exec 返回提交状态和短暂窗格快照，不是完成证据；需要时用 tmux.capturePane 核验输出。skills.install 是异步安装/替换，随后用 skills.install.get/cancel；内置 skill-installer 可读但只读、不可运行，调用 skills.run 前检查 origin/readOnly。发送前先查 user.notify.channels 并检查 user.notify.send 的 accepted；桌面通道可用 accepted=false/reason 表示投递失败且 isError 仍为 false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。工具原生 JSON 位于 MCP structuredContent 并以 text 返回，顶层含 error 时 isError 为 true；参数/路由等 MCP 协议错误与工具 JSON 错误不同。annotations 是行为提示而非授权。";
+const COORDINATOR_INSTRUCTIONS: &str = "协调者配置仅暴露 8 个 Hub 原生工具：hub.info、agent.list、hub.run.list/get、hub.process.status/list 和 user.notify.channels/send。可查看 Agent 注册/在线状态、Hub 派发回执与进程缓存快照；hub.process.* 只读可能过期的 Hub 元数据缓存（检查 freshness/observedAt），不请求 Agent 执行或读取、不等待状态，也不返回输出、结果或取消证据；hub.run.* 是回执而非实时进程状态或停止证据。在线且指定 Agent 时，hub.process.* 额外进行一次 best-effort EventPanel 元数据查询并附加 events；Agent 离线或查询失败时省略 events。这些缓存快照不代表 Agent 当前进程状态，也不同于 Full 配置中的 process.read。此配置不会向 Agent 派发执行、进程控制、tmux、下游 MCP、Room 邮件、密码库或 skills 操作。发送前先查 user.notify.channels 并检查 accepted：桌面通道可能返回 accepted=false/reason 而 isError=false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。结果原生 JSON 位于 MCP structuredContent 并以 text 返回；其中顶层 error 会标记 isError，参数/路由错误可作为 MCP 协议错误返回。annotations 是提示，不是授权。";
 
 fn default_process_wait_seconds() -> u64 {
     ProcessReadRequest::DEFAULT_WAIT_SECONDS
@@ -73,14 +67,6 @@ fn process_read_payload(params: &ProcessReadArgs) -> ProcessReadRequest {
 
 fn default_standard_wait_seconds() -> u64 {
     5
-}
-
-fn default_room_wait_seconds() -> u8 {
-    0
-}
-
-fn default_room_notebook_limit() -> usize {
-    20
 }
 
 fn default_process_list_limit() -> usize {
@@ -176,7 +162,6 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
                 | "mcp.callTool"
                 | "room.secret.upsert"
                 | "room.secret.delete"
-                | "room.maintenance.submit"
                 | "room.email.operate"
                 | "skills.deactivate"
                 | "skills.install"
@@ -216,7 +201,6 @@ fn tool_is_read_only(name: &str) -> bool {
             | "user.notify.send"
             | "room.secret.upsert"
             | "room.secret.delete"
-            | "room.maintenance.submit"
             | "room.email.send"
             | "room.email.operate"
             | "room.email.attachment"
@@ -1199,9 +1183,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_secret_list_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
 
@@ -1222,9 +1204,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_secret_get_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
 
@@ -1245,9 +1225,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_secret_upsert_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
 
@@ -1268,9 +1246,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_secret_delete_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
 
@@ -1291,9 +1267,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_email_list_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
 
@@ -1314,9 +1288,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_email_read_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(AgenticResult::from_native_email_value(value).into_call_tool_result())
     }
 
@@ -1337,9 +1309,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_email_search_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
 
@@ -1360,9 +1330,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_email_attachment_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(AgenticResult::from_native_email_value(value).into_call_tool_result())
     }
 
@@ -1383,9 +1351,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_email_send_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
 
@@ -1406,238 +1372,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_email_operate_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.diary.active",
-        description = "读取本次调用所捕获的活动 Room Agent 当前 daily/weekly/monthly 日记概览，适合先了解近期记录；返回 daily、weekly、monthly 三层各自的路径、可用性、内容或 issue 提示。只读，不接受 agentId；无活动 Room、活动状态冲突或超时分别返回 room_not_active、room_state_conflict 或专用 timeout 错误。"
-    )]
-    async fn room_diary_active(
-        &self,
-        _params: Parameters<RoomDiaryActiveArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomDiaryActive {
-                request_id: random_id("req"),
-                payload: RoomDiaryActiveRequest {},
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_diary_active_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.diary.read",
-        description = "读取本次请求捕获的活动 Room 中一个精确日记周期；layer 选择 daily/weekly/monthly，period 使用 Room 本地逻辑周期。返回 document（路径、内容/可用性或 issue）；不修改日记，也不接受 agentId。无活动 Room、状态冲突或超时会以 structuredContent.error 返回。"
-    )]
-    async fn room_diary_read(
-        &self,
-        params: Parameters<RoomDiaryReadArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = RoomDiaryReadRequest {
-            layer: params.layer.into(),
-            period: params.period,
-        };
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomDiaryRead {
-                request_id: random_id("req"),
-                payload,
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_diary_read_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.notebook.recent",
-        description = "在活动 Room 的 Notebook 中发现最近文档，适合在搜索或精读前浏览；limit 限制返回数量。返回 documents 数组（每项含 path、title、contentPreview、truncated、effectiveAt）及可能的 warnings，不返回完整正文、不修改文件，也不接受 agentId。"
-    )]
-    async fn room_notebook_recent(
-        &self,
-        params: Parameters<RoomNotebookRecentArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let payload = RoomNotebookRecentRequest {
-            limit: params.0.limit,
-        };
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomNotebookRecent {
-                request_id: random_id("req"),
-                payload,
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_notebook_recent_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.notebook.search",
-        description = "在活动 Room 的 Notebook 路径、H1 标题和正文中做不区分大小写的子串搜索；适合先定位候选文档，再用 room.notebook.read 精读。返回 documents 数组（path、title、contentPreview、truncated、effectiveAt）及可能的 warnings，不修改文件、不接受 agentId；query 长度受 schema 限制。"
-    )]
-    async fn room_notebook_search(
-        &self,
-        params: Parameters<RoomNotebookSearchArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = RoomNotebookSearchRequest {
-            query: params.query,
-            limit: params.limit,
-        };
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomNotebookSearch {
-                request_id: random_id("req"),
-                payload,
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_notebook_search_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.notebook.read",
-        description = "按 Notebook 相对 Markdown path 读取一个精确文档；只能使用 Room 返回/发现的 Notebook/ 下路径，任意仓库路径会被拒绝。返回 path 和完整 content；只读、不接受 agentId，错误和无活动 Room 状态按结果中的 error 说明。"
-    )]
-    async fn room_notebook_read(
-        &self,
-        params: Parameters<RoomNotebookReadArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let payload = RoomNotebookReadRequest {
-            path: params.0.path,
-        };
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomNotebookRead {
-                request_id: random_id("req"),
-                payload,
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_notebook_read_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.state.list",
-        description = "列出活动 Room 的确定性 State 实体文档，适合发现可读取的当前实体；返回 entities 数组（entity 标识和 path），不修改状态，也不接受 agentId。无活动 Room、状态冲突或超时会返回对应 error。"
-    )]
-    async fn room_state_list(
-        &self,
-        _params: Parameters<RoomStateListArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomStateList {
-                request_id: random_id("req"),
-                payload: RoomStateListRequest {},
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_state_list_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.state.read",
-        description = "按 State/entities/ 下的精确实体文件名读取一个活动 Room 状态实体；只使用 room.state.list 返回的实体名，不可传任意仓库路径。返回文档路径与内容，只读、不接受 agentId；无活动 Room 或无效实体会以 error 返回。"
-    )]
-    async fn room_state_read(
-        &self,
-        params: Parameters<RoomStateReadArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let payload = RoomStateReadRequest {
-            entity: params.0.entity,
-        };
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomStateRead {
-                request_id: random_id("req"),
-                payload,
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_state_read_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.maintenance.status",
-        description = "在提交维护前检查活动 Room 的维护就绪状态：返回 repository、schema、scaffold、localExecutor、configuredMode、autoPush、workflow、remote、sync 和 slots（五个语义槽位的占用）。只读、不接受 agentId，适合先判断仓库与执行路径能否维护。"
-    )]
-    async fn room_maintenance_status(
-        &self,
-        _params: Parameters<RoomMaintenanceStatusArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomMaintenanceStatus {
-                request_id: random_id("req"),
-                payload: RoomMaintenanceStatusRequest {},
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_maintenance_status_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.maintenance.submit",
-        description = "向当前活动 Room 提交 1 至 5 个互不重复的 diary.daily/weekly/monthly、notebook 或 entity 槽位维护请求；Hub/Agent 会先按 Room 仓库验证整组输入。返回 mode、state、localApplied、sync、revision 等执行/同步状态。local 模式会改写经验证的 Room 文件，并可能按 autoPush 配置同步/推送；workflow 模式会提交配置的工作流；副作用不自动回滚，waitSeconds 只等待有限时间。"
-    )]
-    async fn room_maintenance_submit(
-        &self,
-        params: Parameters<RoomMaintenanceSubmitArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let payload = params.0.into_protocol();
-        let timeout_secs = REQUEST_TIMEOUT_SECS
-            .max(u64::from(payload.effective_wait_seconds()) + ROOM_TRANSPORT_MARGIN_SECS);
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomMaintenanceSubmit {
-                request_id: random_id("req"),
-                payload,
-            },
-            timeout_secs,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_maintenance_submit_timeout")
-        });
+        .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
 
@@ -1654,7 +1389,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(|error| room_route_error_value_with_timeout(error, "skills_list_timeout"));
+        .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(slim_skills_list_response(value)))
     }
 
@@ -1921,13 +1656,6 @@ fn result_from_value(value: Value) -> CallToolResult {
 }
 
 fn room_route_error_value(error: RoomRouteError) -> Value {
-    room_route_error_value_with_timeout(error, "room_notebook_timeout")
-}
-
-fn room_route_error_value_with_timeout(
-    error: RoomRouteError,
-    _timeout_code: &'static str,
-) -> Value {
     match error {
         RoomRouteError::NotActive => json!({
             "error": { "code": "room_not_active", "message": "no active room agent" }
@@ -2513,17 +2241,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("tool_unavailable_for_profile"));
-        for name in [
-            "room.diary.active",
-            "room.diary.read",
-            "room.notebook.recent",
-            "room.notebook.search",
-            "room.notebook.read",
-            "room.state.list",
-            "room.state.read",
-            "room.maintenance.status",
-            "room.maintenance.submit",
-        ] {
+        for name in ["room.email.list", "room.secret.list", "skills.list"] {
             let error = transport::call_app_tool(&server, json!({ "name": name, "arguments": {} }))
                 .await
                 .unwrap_err();

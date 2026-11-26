@@ -673,27 +673,6 @@ async fn deterministic_tool_contract_corpus_exercises_public_dispatch() -> anyho
 }
 
 #[tokio::test]
-async fn absent_room_tools_are_rejected_when_room_toolset_disabled() {
-    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-    for name in [
-        "room.diary.active",
-        "room.diary.read",
-        "room.maintenance.status",
-        "room.maintenance.submit",
-        "room.notebook.recent",
-        "room.notebook.search",
-        "room.notebook.read",
-        "room.state.list",
-        "room.state.read",
-    ] {
-        let error = server
-            .call(CallToolRequestParams::new(name))
-            .await
-            .expect_err("Room-only tool must not be callable by Normal worker");
-        assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
-    }
-}
-#[tokio::test]
 async fn room_toolsets_independently_control_discovery_and_calls() {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let initial_names = server
@@ -703,31 +682,6 @@ async fn room_toolsets_independently_control_discovery_and_calls() {
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
     assert!(!initial_names.iter().any(|name| name.starts_with("room.")));
-
-    let mut diary_config = server.state.config.read().await.clone();
-    diary_config.toolsets = ToolsetConfig::normal();
-    diary_config
-        .toolsets
-        .enable(crate::config::ToolNamespace::RoomDiary);
-    *server.state.config.write().await = diary_config;
-    let diary_names = server
-        .current_tools()
-        .await
-        .into_iter()
-        .map(|tool| tool.name.to_string())
-        .collect::<Vec<_>>();
-    assert!(diary_names.iter().any(|name| name == "room.diary.active"));
-    assert!(!diary_names
-        .iter()
-        .any(|name| name.starts_with("room.email.")));
-    assert!(!diary_names
-        .iter()
-        .any(|name| name.starts_with("room.secret.")));
-    let error = server
-        .call(CallToolRequestParams::new("room.secret.list"))
-        .await
-        .expect_err("Secret tools stay hidden when only Diary is enabled");
-    assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
 
     let mut email_config = server.state.config.read().await.clone();
     email_config
@@ -741,7 +695,6 @@ async fn room_toolsets_independently_control_discovery_and_calls() {
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
     assert!(email_names.iter().any(|name| name == "room.email.list"));
-    assert!(email_names.iter().any(|name| name == "room.diary.active"));
     assert!(!email_names
         .iter()
         .any(|name| name.starts_with("room.secret.")));
@@ -754,7 +707,7 @@ async fn room_toolsets_independently_control_discovery_and_calls() {
     assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
 
     let mut disabled_config = server.state.config.read().await.clone();
-    disabled_config.toolsets = ToolsetConfig::normal();
+    disabled_config.toolsets = ToolsetConfig::default();
     *server.state.config.write().await = disabled_config;
     let error = server
         .call(CallToolRequestParams::new("room.email.list"))
@@ -875,7 +828,6 @@ async fn in_process_room_stdio_initialize_list_and_call() -> anyhow::Result<()> 
     let (server_read, server_write) = split(server_io);
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
     let _cleanup = TestStateCleanup::for_server(&server).await;
-    std::fs::create_dir_all(server.state.config.read().await.workspace_root.join("room"))?;
     let server_task = tokio::spawn(async move {
         let transport = AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
         let running = server
@@ -887,12 +839,12 @@ async fn in_process_room_stdio_initialize_list_and_call() -> anyhow::Result<()> 
 
     let client = ().serve((client_read, client_write)).await?;
     let tools = client.list_all_tools().await?;
-    assert!(tools.iter().any(|tool| tool.name == "room.diary.active"));
+    assert!(tools.iter().any(|tool| tool.name == "skills.list"));
     let result = client
-        .call_tool(CallToolRequestParams::new("room.diary.active"))
+        .call_tool(CallToolRequestParams::new("skills.list"))
         .await?;
     assert_eq!(result.is_error, Some(false));
-    assert!(result.structured_content.as_ref().unwrap()["daily"].is_object());
+    assert!(result.structured_content.as_ref().unwrap()["skills"].is_array());
     let _ = client.cancel().await;
     server_task.await??;
     Ok(())
@@ -2571,22 +2523,6 @@ async fn wp2_hub_normal_direct_skills_require_capability() -> anyhow::Result<()>
 }
 
 #[tokio::test]
-async fn room_profile_dispatches_room_memory_tools() -> anyhow::Result<()> {
-    let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
-    let _cleanup = TestStateCleanup::for_server(&server).await;
-    std::fs::create_dir_all(server.state.config.read().await.workspace_root.join("room"))?;
-    let skills = server.dispatch("skills.list", json!({})).await?;
-    assert!(skills["skills"].is_array());
-    let notebook = server.dispatch("room.notebook.recent", json!({})).await?;
-    assert!(notebook["documents"].is_array());
-    let diary = server.dispatch("room.diary.active", json!({})).await?;
-    assert!(diary["daily"].is_object());
-    let state = server.dispatch("room.state.list", json!({})).await?;
-    assert!(state["entities"].is_array());
-    Ok(())
-}
-
-#[tokio::test]
 async fn file_read_dispatch_supports_content_and_metadata_modes() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let workspace = server.state.config.read().await.workspace_root.clone();
@@ -3604,11 +3540,6 @@ fn test_state(profile: CapabilityProfile) -> AppState {
             .map(|program| format!("{program} **")),
     );
     config.agent_id = "stdio-test-agent".to_string();
-    config.toolsets = if profile == CapabilityProfile::Room {
-        ToolsetConfig::room()
-    } else {
-        ToolsetConfig::normal()
-    };
     config.workspace_root = workspace_root.clone();
     config.policy.path = crate::config::PathPolicyConfig::default();
     config.policy.path.write = vec![workspace_root.clone()];
@@ -3639,7 +3570,6 @@ fn test_state(profile: CapabilityProfile) -> AppState {
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
-        room_repository_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(SkillLeaseManager::new()),
         skill_installs: Arc::new(InstallManager::new()),

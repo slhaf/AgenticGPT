@@ -96,9 +96,6 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     if old.email.account == next.email.account {
         errors.remove("email.account");
     }
-    if !next.toolsets.uses_room_repository() {
-        errors.remove("room.repositoryRoot");
-    }
     let mut old_connection = old.room.secret.clone();
     old_connection.apply_live_settings(&next.room.secret);
     if !differs(&old_connection, &next.room.secret) {
@@ -178,25 +175,6 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
     } else {
         None
     };
-
-    let room_changed = next.toolsets.uses_room_repository()
-        && (old.room.repository_root != next.room.repository_root
-            || !old.toolsets.uses_room_repository()
-            || errors.contains_key("room.repositoryRoot"));
-    let _room = if room_changed {
-        Some(state.room_repository_writes.lock().await)
-    } else {
-        None
-    };
-    if room_changed {
-        errors.remove("room.repositoryRoot");
-        if let Err(error) = crate::room_repository::ensure_repository(&next) {
-            errors.insert(
-                "room.repositoryRoot".into(),
-                crate::startup::error_code(&error.to_string()),
-            );
-        }
-    }
 
     let browser = crate::config::ToolNamespace::Browser;
     let old_browser_enabled = old.toolsets.is_enabled(browser);
@@ -391,14 +369,8 @@ pub(crate) async fn retry_browser_listener_if_due(state: &AppState, retry: &mut 
 }
 
 impl ConfigRuntime {
-    pub(crate) fn new(config: &Config, room_error: Option<String>) -> Self {
+    pub(crate) fn new(config: &Config) -> Self {
         let mut runtime = Self::default();
-        if let Some(error) = room_error {
-            runtime
-                .errors
-                .get_mut()
-                .insert("room.repositoryRoot".into(), error);
-        }
         if config.mode == crate::config::RuntimeMode::Hub || config.auxiliary_hub_enabled() {
             runtime.hub_connection.get_mut().status = ConfigApplyStatus::Applying;
         }

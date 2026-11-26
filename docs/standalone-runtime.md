@@ -56,7 +56,7 @@ Host，并在每个同级路由上禁止不在许可列表内的 authority。反
 若存在 `Origin`，它必须与 `publicUrl` 完全一致；未提供 `Origin` 时仍允许 server-to-server 请求。不会添加宽松的 CORS。
 
 开发时若不使用 tunnel 配置或 Hub reporting，可设置
-`mode=local` 并运行 `agentic-gpt run`。此模式会加载相同的、由 profile 选择的工具集预设、
+`mode=local` 并运行 `agentic-gpt run`。此模式会加载相同的工具集、
 策略、路径策略、确认、审计、实时配置和托管执行状态，但只提供 Unix MCP 入口；
 Local 模式下 `httpMcp` 不会添加 TCP listener。
 
@@ -71,11 +71,11 @@ Local 模式下 `httpMcp` 不会添加 TCP listener。
 | `agentic-gpt run` (`mode=hub`, `profile=normal`) | Hub | Normal | 可执行命令 |
 | `agentic-gpt run` (`mode=hub`, `profile=room`) | Hub | Room | 可执行命令 |
 
-传输方式不会改变本地策略。Tunnel、HTTP 和本地 Unix 入口对按 profile 选择的工具集使用相同的 Agent 工具表面和策略边界。
+传输方式不会改变本地策略。Tunnel、HTTP 和本地 Unix 入口使用相同的 Agent 工具表面和策略边界。
 
-Normal 预设不选择 Room 子工具集；Room 预设选择 diary、notebook、state、maintenance，Email/Secret 默认关闭。
-显式的 `toolsets.enabled` 是最终依据。进入同一个 worker 的调用共享其实时配置、确认状态、审计、容量和托管执行注册表。
-每项 Room API 只检查自己的子工具集；Normal-profile worker 可显式启用某个子项而无须重启，关闭时返回 `toolset_required`。
+Normal 和 Room 角色使用相同的默认工具集。显式的 `toolsets.enabled` 决定实际启用项。
+进入同一个 worker 的调用共享其实时配置、确认状态、审计、容量和托管执行注册表。
+本地可独立启用 `room.email` 和 `room.secret`。Hub 向以 Room 角色注册的活动命令连接派发邮件和密钥请求。
 
 ## 本地 Unix MCP 控制通道
 
@@ -157,11 +157,9 @@ printf '%s' '{"message":"需要查看部署状态","ref":"deploy-42","severity":
 
 ## Tunnel、HTTP 与本地工具表面
 
-Normal 与 Room profile 选择工具集预设，而不是固定最终接口面。普通工具集为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`；
-Room 核心预设额外选择 `room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
-`config`、`room.email`、`room.secret` 在两个预设中都默认关闭；显式 `toolsets.enabled` 是最终依据。
-六个 Room 子工具集分别控制 API 和相应资源。
-工具集开关决定工具是否出现在列表中，不代表依赖资源已经就绪。Browser 工具集启用后，`browser.manual` 支持离线读取内置 SDK，`browser.list` 报告扩展连接和占用状态。Room 仓库暂不可初始化时，已启用的 Diary、Notebook、State 和 Maintenance 工具仍可发现；根目录存在且可读时，读取仍可能成功，只有所需资源不可用时才报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时返回就绪状态，路径不合法时返回错误。
+默认工具集为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux` 和 `browser`。
+`config`、`room.email` 和 `room.secret` 默认关闭，可按需启用。
+工具集启用后，资源是否就绪由对应组件报告。Browser 工具集启用后，`browser.manual` 支持离线读取内置 SDK，`browser.list` 报告扩展连接和占用状态。
 
 这些过滤器只会从已公布的工具表面移除名称，不会暴露仅供 dispatch 使用的别名。
 
@@ -182,35 +180,7 @@ event.list, event.get, event.mark
 隐藏事件不会因此变为已处理。事件工具只管理收件箱状态，不是进程控制接口。规范说明见
 [`接口说明：持久事件收件箱`](interfaces.md#持久事件收件箱)。
 
-分别启用对应 `room.*` 子工具集后，公布相应工具名称：
-
-```text
-room.diary.active, room.diary.read
-room.notebook.recent, room.notebook.search, room.notebook.read
-room.state.list, room.state.read
-room.maintenance.status, room.maintenance.submit
-```
-
-另有六项 `room.email.*` 邮件工具；启用 `room.secret` 工具集后，密钥工具为 `room.secret.list`、`room.secret.get`、`room.secret.upsert` 和 `room.secret.delete`。密钥工具集默认关闭，修改通过 Secret 局部服务协调；已知工具名的直接调用也受准入约束。配置、已验证的 `bw` 版本、严格确认与无敏感回执边界见[Room 密钥使用指南](room-secret.zh-CN.md)。
-
-相同的九个文档／维护语义 Room 名称是本地 Unix MCP、Tunnel stdio 和 Hub Full MCP/HTTP 当前合同的一部分。Hub Full 会通过捕获的活动 Room lease 转发
-`room.diary.active/read`、`room.notebook.recent/search/read`、
-`room.state.list/read` 和 `room.maintenance.status/submit`；对应的 HTTP 路由是
-`POST /v1/room/<namespace>/<action>`，且不接受 `agentId`。
-
-Coordinator 不会公布或 dispatch 这些 Room 操作。
-
-Room 读取受限且由 Agent 持有：Notebook `limit` 默认值为 20，范围为 1–100；搜索查询不得为空，且最多 256 个 Unicode 字符；
-Diary period 是语义 layer/date 值；Notebook/State Markdown 读取会拒绝超过 512 KiB 的内容。`room.notebook.recent` 和
-`room.notebook.search` 虽保留原有公开名称，使用的却是当前 Markdown 预览/搜索结果，并非 passage/JSONL 操作。
-
-`room.maintenance.status` 是只读操作。`room.maintenance.submit` 接受 1–5 个互不重复的 slot，可选 `local`/`workflow` mode，
-并接受 0–30 的 `waitSeconds`（默认 0）。workflow 等待超时只会结束等待，不会取消维护操作。现有 Agent 路径、锁、clean-tree、
-expected-change、executor 和 Git 控制仍具有最终效力；不会添加独立等待 API 或新的确认门。
-
-Hub 只负责认证、活动 lease 路由和有界 run receipt。通用 receipt 可以保留有界操作结果，但不是 Room 内容的权威来源或副本。
-已退役的 JSONL 追加/更新/删除及 passage/date-selection 调用方不会被悄然映射为维护操作；应迁移为明确的语义 slot/payload 请求，
-或将其移除。历史 release/migration 记录仅供查阅，不是当前错误合同。
+启用 `room.email` 后可调用[邮件工具](email.zh-CN.md)，启用 `room.secret` 后可调用[密码库工具](room-secret.zh-CN.md)。Hub Full MCP 和 HTTP 将这些请求及 Skills 请求派发给活动 Room。
 
 托管下游 `mcp.callTool` 与命令和 skill 执行共用同一 process registry 及容量上限。其 `waitSeconds` 默认值为 5，最大为 30；
 `timeoutSeconds` 是获准并取得执行槽后的连接/请求截止时间，不含确认及排队等待，默认值为 300，最大为 900。arguments 必须是 JSON object，序列化大小上限为
@@ -362,7 +332,7 @@ agentic-gpt-hub serve --mcp-profile coordinator
 - `user.notify.channels`、`user.notify.send`
 
 Coordinator 调用绝不 dispatch Agent 命令。Session 查询只读取当前连接持有的当前/近期快照；保留的 run 记录才是持久历史。隐藏的执行、
-session-control、tmux、下游 MCP、skills、diary 和 notebook 工具不会出现在 `tools/list` 中，且会被 `tools/call` 拒绝。
+会话控制、tmux、下游 MCP、Skills、Room 邮件和密码库工具不会出现在 `tools/list` 中，且会被 `tools/call` 拒绝。
 
 Full profile 提供 Hub 执行工具和 Hub 原生的汇总／通知工具。OAuth discovery metadata 会标识所选 profile，但不会公布隐藏工具。
 
@@ -424,7 +394,7 @@ Full profile 提供 Hub 执行工具和 Hub 原生的汇总／通知工具。OAu
 
 Standalone、Local 和连接 Hub 的 Agent 共用配置更新与串行应用协调。配置 API 先查 `config.manual`，再用 `config.get` 区分持久值、已应用值与组件状态；`config.update` 支持原生 JSON 路径段与 set/unset/add/remove。显式启用 `config` 工具集后，Tunnel、Unix 和 HTTP MCP 均可调用；工具集默认关闭，`config.updatePolicy` 默认 confirm 并要求明确批准。API、CLI 和 TUI 的操作差异见[配置管理参考](configuration.md#配置-api)。
 
-有效变更用于后续请求；已准入 Process、Skill 及下游调用保留其快照。Browser、邮件账户、Secret、Hub/HTTP 等由具体组件排空／重连，失败可保留旧实例或明确报告不可用；保存成功不保证外部依赖可用，也不重放发送、密钥写入或网页动作。Skills 并发调整保留 manager 与运行任务。Room 根目录切换不自动迁移内容。
+有效变更用于后续请求；已准入 Process、Skill 及下游调用保留其快照。Browser、邮件账户、Secret、Hub/HTTP 等由具体组件排空／重连，失败可保留旧实例或明确报告不可用；保存成功不保证外部依赖可用，也不重放发送、密钥写入或网页动作。Skills 并发调整保留 manager 与运行任务。
 
 只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据、client 启动参数需要显式重启实例；`tunnel.hubReporting.detail` 和 `tunnel.hubReporting.enabled` 直接更新后续报告策略。单独切换报告开关不会断开 Hub 确认连接；`hub.enabled` 单独控制辅助连接。待重启值不会阻止无关热更新。共享状态与详细生效规则见[热加载与重启边界](configuration.md#热加载与重启边界)。
 

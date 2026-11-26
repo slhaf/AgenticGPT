@@ -10,7 +10,7 @@ use crate::config::{
     normalize_http_mcp_public_url, parse_http_mcp_allow_hosts, seed_command_policy,
     seed_path_policy, validate_hub_transport, validate_hub_url_shape, Config,
     ConfirmationProviderConfig, EventsConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig,
-    RoomConfig, ShellConfig, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
+    RoomSecretConfig, ShellConfig, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
 use crate::utils::agentic_home;
 
@@ -34,7 +34,6 @@ pub(crate) enum OptionalSection {
     Skills,
     SecurityPolicy,
     ConfigManagement,
-    Room,
     RoomSecret,
     Email,
     TunnelClient,
@@ -101,7 +100,7 @@ pub(crate) struct InitInput {
     pub(crate) limits: Option<LimitsConfig>,
     pub(crate) bubblewrap: Option<bool>,
     pub(crate) shell: Option<ShellConfig>,
-    pub(crate) room: Option<RoomConfig>,
+    pub(crate) room_secret: Option<RoomSecretConfig>,
     pub(crate) email: Option<crate::config::EmailConfig>,
     pub(crate) tunnel_client: Option<TunnelClientConfig>,
     pub(crate) hub_reporting: Option<HubReportingConfig>,
@@ -139,7 +138,7 @@ impl InitInput {
             limits: None,
             bubblewrap: None,
             shell: None,
-            room: None,
+            room_secret: None,
             email: None,
             tunnel_client: None,
             hub_reporting: None,
@@ -207,7 +206,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         limits,
         bubblewrap,
         shell,
-        room,
+        room_secret,
         email,
         tunnel_client,
         hub_reporting,
@@ -255,8 +254,6 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     }
     if let Some(toolsets) = toolsets {
         config.toolsets = toolsets;
-    } else if !has_imported_base {
-        config.toolsets = ToolsetConfig::for_profile(profile);
     }
     if let Some(confirmation_language) = confirmation_language {
         config.confirmation_language = confirmation_language;
@@ -294,15 +291,8 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     if let Some(shell) = shell {
         config.shell = shell;
     }
-    if let Some(room) = room {
-        let imported_skills = config.skills.clone();
-        config.room = room;
-        if has_imported_base {
-            config.skills = imported_skills.clone();
-            config.room.skills = imported_skills;
-        } else {
-            config.skills = config.room.skills.clone();
-        }
+    if let Some(room_secret) = room_secret {
+        config.room.secret = room_secret;
     }
     if let Some(mcp_servers) = mcp_servers {
         config.mcp_servers = mcp_servers;
@@ -397,7 +387,6 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
 pub(crate) fn optional_section_is_legal(
     section: OptionalSection,
     mode: RuntimeMode,
-    _toolsets: &ToolsetConfig,
 ) -> bool {
     match section {
         OptionalSection::Identity
@@ -415,7 +404,6 @@ pub(crate) fn optional_section_is_legal(
         | OptionalSection::Events
         | OptionalSection::Email
         | OptionalSection::RoomSecret => true,
-        OptionalSection::Room => true,
         OptionalSection::TunnelClient | OptionalSection::HubReporting => {
             mode == RuntimeMode::Standalone
         }
@@ -527,7 +515,7 @@ mod tests {
             api_key: "env:IMPORTED_TUNNEL_KEY".to_string(),
             ..TunnelConfig::default()
         });
-        base.room.timezone = "UTC".to_string();
+        base.room.secret.sync_wait_timeout_ms = 1200;
         base.limits.max_concurrent_tasks = 9;
         base.extra
             .insert("futureField".to_string(), serde_json::json!(true));
@@ -550,7 +538,7 @@ mod tests {
         assert_eq!(built.config.display_name, "imported-display");
         assert_eq!(built.config.hub.url, "https://inactive-hub.example.com");
         assert_eq!(built.config.tunnel.unwrap().tunnel_id, "inactive-tunnel");
-        assert_eq!(built.config.room.timezone, "UTC");
+        assert_eq!(built.config.room.secret.sync_wait_timeout_ms, 1200);
         assert_eq!(built.config.limits.max_concurrent_tasks, 9);
         assert_eq!(built.config.mcp_servers.len(), 1);
         assert_eq!(built.config.extra["futureField"], serde_json::json!(true));

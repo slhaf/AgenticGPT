@@ -116,30 +116,6 @@ pub(crate) async fn serve(
             "/v1/room/email/operate",
             post(room::http::room_email_operate),
         )
-        .route("/v1/room/diary/active", post(room::http::room_diary_active))
-        .route("/v1/room/diary/read", post(room::http::room_diary_read))
-        .route(
-            "/v1/room/notebook/recent",
-            post(room::http::room_notebook_recent),
-        )
-        .route(
-            "/v1/room/notebook/search",
-            post(room::http::room_notebook_search),
-        )
-        .route(
-            "/v1/room/notebook/read",
-            post(room::http::room_notebook_read),
-        )
-        .route("/v1/room/state/list", post(room::http::room_state_list))
-        .route("/v1/room/state/read", post(room::http::room_state_read))
-        .route(
-            "/v1/room/maintenance/status",
-            post(room::http::room_maintenance_status),
-        )
-        .route(
-            "/v1/room/maintenance/submit",
-            post(room::http::room_maintenance_submit),
-        )
         .route("/v1/room/skills/list", post(room::http::skills_list))
         .route("/v1/room/skills/read", post(room::http::skills_read))
         .route("/v1/room/skills/search", post(room::http::skills_search))

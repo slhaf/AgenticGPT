@@ -27,7 +27,7 @@ Agent 与 Hub 均以二进制 crate 根显式装配许多私有模块；目录�
 | Agent operations | [`operations/`](../../crates/agentic-gpt/src/operations/operation.rs)：真实入口准入/授权、共享本地服务、命令策略、确认与结果映射。它不是无差别接管所有工具入口的通用 dispatcher。 |
 | Agent process | [`process/`](../../crates/agentic-gpt/src/process/managed.rs)：受管理进程生命周期、执行预检、输出/取消；历史记录 adapter 在 [`storage/process_history.rs`](../../crates/agentic-gpt/src/storage/process_history.rs)。 |
 | Agent files / MCP | [`files/`](../../crates/agentic-gpt/src/files/file_ops.rs) 管文件操作；[`mcp/`](../../crates/agentic-gpt/src/mcp/mcp.rs) 管下游 MCP 客户端/调用与并发，不把任意工具请求等同本地工具。 |
-| Agent skills / Room / Browser | [`skills/`](../../crates/agentic-gpt/src/skills/skills.rs) 与 [`skill_installs.rs`](../../crates/agentic-gpt/src/skills/skill_installs.rs) 管 skill 发现、执行和安装；[`room/`](../../crates/agentic-gpt/src/room/room_repository.rs) 管 Agent 本地 Room 读取/维护；[`browser/`](../../crates/agentic-gpt/src/browser/browser_runtime.rs) 管 Agentic Browser 连接及本地租约路由。 |
+| Agent skills / Room / Browser | [`skills/`](../../crates/agentic-gpt/src/skills/skills.rs) 与 [`skill_installs.rs`](../../crates/agentic-gpt/src/skills/skill_installs.rs) 管 skill 发现、执行和安装；[`room/email/`](../../crates/agentic-gpt/src/room/email/mod.rs) 和 [`room/secret/`](../../crates/agentic-gpt/src/room/secret/mod.rs) 分别管理 Agent 本地邮件和密码库；[`browser/`](../../crates/agentic-gpt/src/browser/browser_runtime.rs) 管 Agentic Browser 连接及本地租约路由。 |
 | Agent storage / config / UI | [`storage/`](../../crates/agentic-gpt/src/storage/private_state.rs) 管私有状态、传输账本与审计；[`config/`](../../crates/agentic-gpt/src/config/config.rs) 管配置；[`ui/`](../../crates/agentic-gpt/src/ui/cli.rs) 含 CLI、TUI、配置 TUI。 |
 | Hub runtime / agents | [`runtime/`](../../crates/agentic-gpt-hub/src/runtime/state.rs) 管 Hub 运行态与服务器；[`agents/`](../../crates/agentic-gpt-hub/src/agents/dispatch.rs) 管 Agent registry、连接生命周期、派发与运行回执协调。Hub 派发命令，Agent 执行副作用。 |
 | Hub ingress / storage | [`ingress/http/`](../../crates/agentic-gpt-hub/src/ingress/http/routes.rs) 管 HTTP/OpenAPI 路由；[`ingress/mcp/`](../../crates/agentic-gpt-hub/src/ingress/mcp/mcp_server.rs) 管 Apps MCP；[`storage/`](../../crates/agentic-gpt-hub/src/storage/runs.rs) 与 [`db.rs`](../../crates/agentic-gpt-hub/src/storage/db.rs) 管 Hub 持久运行回执和数据库。两种 ingress 的身份与响应封套不同。 |
@@ -79,7 +79,7 @@ Agent-local operation 是本地入口调用 Agent 所有者的行为，可供本
 新增 Hub 命令时，按以下顺序核对：
 
 1. 在相应领域的 Protocol 文件中定义请求/响应（例如进程请求位于 [`process.rs`](../../crates/agentic-gpt-protocol/src/process.rs)），更新 [`HubCommand`](../../crates/agentic-gpt-protocol/src/envelopes.rs) 及 Hub 入口映射；不要把所有领域的 DTO 都放入进程文件。
-2. 检查 Agent [`operation.rs`](../../crates/agentic-gpt/src/operations/operation.rs) 中的 `hub_command_name`、`operation_namespace` 与操作分类，再核对 `authorize` 是否在真实入口、运行模式、profile 和工具集下正确准入。普通操作共用实时 Toolset 检查；Room 操作另核对 `is_current_room_operation` 的 Hub Profile 条件。名称或前缀相同不等于分类已经更新。
+2. 检查 Agent [`operation.rs`](../../crates/agentic-gpt/src/operations/operation.rs) 中的 `hub_command_name`、`operation_namespace` 与操作分类，再核对 `authorize` 是否在真实入口、运行模式、profile 和工具集下正确准入。普通操作共用实时 Toolset 检查。Hub 下发的邮件与密钥操作还需要 Room 角色。名称或前缀相同不等于分类已经更新。
 3. 更新 [`local_service.rs`](../../crates/agentic-gpt/src/operations/local_service.rs) 的消费与结果映射分支，接入实际资源所有者。若暴露 MCP 工具，另核对其描述符中的只读、破坏性和开放世界注解；这些注解不能替代运行时授权。
 4. 覆盖允许、禁止及能力未启用的真实入口路径。新增 Room 命令尤其要验证普通 Agent、工具集关闭和活动 Room 的差异，而不是只证明 DTO 能序列化。
 

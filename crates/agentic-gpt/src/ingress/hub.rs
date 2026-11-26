@@ -1613,7 +1613,6 @@ mod reporting_tests {
             )),
             temporary_mcp_allows: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
-            room_repository_writes: Arc::new(tokio::sync::Mutex::new(())),
             skills_writes: Arc::new(tokio::sync::Mutex::new(())),
             skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
             skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),

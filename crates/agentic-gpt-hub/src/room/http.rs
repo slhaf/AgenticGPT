@@ -1,9 +1,6 @@
 use agentic_gpt_protocol::{
-    HubCommand, RoomDiaryActiveRequest, RoomDiaryReadRequest, RoomMaintenanceStatusRequest,
-    RoomMaintenanceSubmitRequest, RoomNotebookReadRequest, RoomNotebookRecentRequest,
-    RoomNotebookSearchRequest, RoomStateListRequest, RoomStateReadRequest, SkillActivationRequest,
-    SkillInstallCancelRequest, SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest,
-    SkillRunRequest, SkillSearchRequest,
+    HubCommand, SkillActivationRequest, SkillInstallCancelRequest, SkillInstallGetRequest,
+    SkillInstallRequest, SkillReadRequest, SkillRunRequest, SkillSearchRequest,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -16,8 +13,6 @@ use crate::routes::{api_error, require_action_auth};
 use crate::state::HubState;
 use crate::utils::random_id;
 use crate::REQUEST_TIMEOUT_SECS;
-
-const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
 pub(crate) async fn room_secret_list(
     State(state): State<HubState>,
@@ -44,8 +39,6 @@ pub(crate) async fn room_secret_list(
             request_id: random_id("req"),
             payload,
         },
-        "room_secret_list_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -75,8 +68,6 @@ pub(crate) async fn room_secret_get(
             request_id: random_id("req"),
             payload,
         },
-        "room_secret_get_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -106,8 +97,6 @@ pub(crate) async fn room_secret_upsert(
             request_id: random_id("req"),
             payload,
         },
-        "room_secret_upsert_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -137,8 +126,6 @@ pub(crate) async fn room_secret_delete(
             request_id: random_id("req"),
             payload,
         },
-        "room_secret_delete_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -155,8 +142,6 @@ pub(crate) async fn room_email_list(
             request_id: random_id("req"),
             payload,
         },
-        "room_email_list_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -173,8 +158,6 @@ pub(crate) async fn room_email_read(
             request_id: random_id("req"),
             payload,
         },
-        "room_email_read_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -191,8 +174,6 @@ pub(crate) async fn room_email_search(
             request_id: random_id("req"),
             payload,
         },
-        "room_email_search_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -209,8 +190,6 @@ pub(crate) async fn room_email_attachment(
             request_id: random_id("req"),
             payload,
         },
-        "room_email_attachment_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -227,8 +206,6 @@ pub(crate) async fn room_email_send(
             request_id: random_id("req"),
             payload,
         },
-        "room_email_send_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -245,172 +222,6 @@ pub(crate) async fn room_email_operate(
             request_id: random_id("req"),
             payload,
         },
-        "room_email_operate_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_diary_active(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<RoomDiaryActiveRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomDiaryActive {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_diary_active_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_diary_read(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<RoomDiaryReadRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomDiaryRead {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_diary_read_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_notebook_recent(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<RoomNotebookRecentRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookRecent {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_recent_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_notebook_search(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<RoomNotebookSearchRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookSearch {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_search_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_notebook_read(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<RoomNotebookReadRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookRead {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_read_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_state_list(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<RoomStateListRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomStateList {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_state_list_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_state_read(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<RoomStateReadRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomStateRead {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_state_read_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_maintenance_status(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<RoomMaintenanceStatusRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomMaintenanceStatus {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_maintenance_status_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_maintenance_submit(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<RoomMaintenanceSubmitRequest>,
-) -> Response {
-    let timeout_secs = REQUEST_TIMEOUT_SECS
-        .max(u64::from(payload.effective_wait_seconds()) + ROOM_TRANSPORT_MARGIN_SECS);
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomMaintenanceSubmit {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_maintenance_submit_timeout",
-        timeout_secs,
     )
     .await
 }
@@ -422,8 +233,6 @@ pub(crate) async fn skills_list(State(state): State<HubState>, headers: HeaderMa
         HubCommand::SkillsList {
             request_id: random_id("req"),
         },
-        "skills_list_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -440,8 +249,6 @@ pub(crate) async fn skills_read(
             request_id: random_id("req"),
             payload,
         },
-        "skills_read_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -458,8 +265,6 @@ pub(crate) async fn skills_search(
             request_id: random_id("req"),
             payload,
         },
-        "skills_search_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -471,8 +276,6 @@ pub(crate) async fn skills_active(State(state): State<HubState>, headers: Header
         HubCommand::SkillsActive {
             request_id: random_id("req"),
         },
-        "skills_active_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -489,8 +292,6 @@ pub(crate) async fn skills_activate(
             request_id: random_id("req"),
             payload,
         },
-        "skills_activate_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -507,8 +308,6 @@ pub(crate) async fn skills_deactivate(
             request_id: random_id("req"),
             payload,
         },
-        "skills_deactivate_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -525,8 +324,6 @@ pub(crate) async fn skills_install(
             request_id: random_id("req"),
             payload,
         },
-        "skills_install_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -543,8 +340,6 @@ pub(crate) async fn skills_install_get(
             request_id: random_id("req"),
             payload,
         },
-        "skills_install_get_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -561,8 +356,6 @@ pub(crate) async fn skills_install_cancel(
             request_id: random_id("req"),
             payload,
         },
-        "skills_install_cancel_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -579,8 +372,6 @@ pub(crate) async fn skills_run(
             request_id: random_id("req"),
             payload,
         },
-        "skills_run_timeout",
-        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -589,13 +380,11 @@ async fn forward_room_command(
     state: HubState,
     headers: HeaderMap,
     command: HubCommand,
-    _timeout_code: &'static str,
-    timeout_secs: u64,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
     }
-    match request_active_room(&state, command, timeout_secs).await {
+    match request_active_room(&state, command, REQUEST_TIMEOUT_SECS).await {
         Ok(value) => room_value_response(value),
         Err(RoomRouteError::NotActive) => api_error(
             StatusCode::NOT_FOUND,
@@ -651,39 +440,17 @@ pub(super) fn room_value_response(value: Value) -> Response {
         | "email_renderer_worker_failed"
         | "email_renderer_io_failed"
         | "email_renderer_response_invalid" => StatusCode::INTERNAL_SERVER_ERROR,
-        "target_exists"
-        | "idempotency_conflict"
-        | "room_state_conflict"
-        | "room_maintenance_slot_occupied"
-        | "room_maintenance_repository_dirty" => StatusCode::CONFLICT,
-        "not_found"
-        | "room_notebook_not_found"
-        | "room_state_entity_not_found"
-        | "skill_not_found"
-        | "resource_not_found"
-        | "install_not_found"
+        "target_exists" | "idempotency_conflict" | "room_state_conflict" => StatusCode::CONFLICT,
+        "not_found" | "skill_not_found" | "resource_not_found" | "install_not_found"
         | "room_not_active" => StatusCode::NOT_FOUND,
-        "room_maintenance_failed"
-        | "room_notebook_read_failed"
-        | "room_notebook_write_failed"
-        | "room_state_read_failed"
-        | "room_state_write_failed"
-        | "skills_read_failed"
+        "skills_read_failed"
         | "skills_write_failed"
-        | "room_diary_active_failed"
-        | "room_diary_read_failed"
-        | "room_notebook_recent_failed"
-        | "room_notebook_search_failed"
-        | "room_state_list_failed"
         | "skills_list_failed"
         | "skills_search_failed"
         | "skills_active_failed"
         | "skills_activate_failed"
         | "skills_deactivate_failed"
         | "skills_install_failed" => StatusCode::INTERNAL_SERVER_ERROR,
-        code if code.starts_with("room_maintenance_") && code.ends_with("_failed") => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
         _ => StatusCode::BAD_REQUEST,
     };
     (status, Json(value)).into_response()

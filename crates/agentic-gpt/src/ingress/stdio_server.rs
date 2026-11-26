@@ -1115,59 +1115,6 @@ impl AgentMcpServer {
                 )
                 .await
             }
-            "room.diary.active" => {
-                let request: agentic_gpt_protocol::RoomDiaryActiveRequest = from_value(arguments)?;
-                let response = crate::room_reads::diary_active(&self.state, request).await?;
-                Ok(serde_json::to_value(response)?)
-            }
-            "room.diary.read" => {
-                let request: agentic_gpt_protocol::RoomDiaryReadRequest = from_value(arguments)?;
-                let response = crate::room_reads::diary_read(&self.state, request).await?;
-                Ok(serde_json::to_value(response)?)
-            }
-            "room.notebook.recent" => {
-                let request: agentic_gpt_protocol::RoomNotebookRecentRequest =
-                    from_value(arguments)?;
-                let response = crate::room_reads::notebook_recent(&self.state, request).await?;
-                Ok(serde_json::to_value(response)?)
-            }
-            "room.notebook.search" => {
-                let request: agentic_gpt_protocol::RoomNotebookSearchRequest =
-                    from_value(arguments)?;
-                let response = crate::room_reads::notebook_search(&self.state, request).await?;
-                Ok(serde_json::to_value(response)?)
-            }
-            "room.notebook.read" => {
-                let request: agentic_gpt_protocol::RoomNotebookReadRequest = from_value(arguments)?;
-                let response = crate::room_reads::notebook_read(&self.state, request).await?;
-                Ok(serde_json::to_value(response)?)
-            }
-            "room.state.list" => {
-                let request: agentic_gpt_protocol::RoomStateListRequest = from_value(arguments)?;
-                let response = crate::room_reads::state_list(&self.state, request).await?;
-                Ok(serde_json::to_value(response)?)
-            }
-            "room.maintenance.status" => {
-                let request: agentic_gpt_protocol::RoomMaintenanceStatusRequest =
-                    from_value(arguments)?;
-                match crate::room_maintenance::status(&self.state, request).await {
-                    Ok(response) => Ok(serde_json::to_value(response)?),
-                    Err(error) => Ok(local_service::room_maintenance_error("status", error)),
-                }
-            }
-            "room.maintenance.submit" => {
-                let request: agentic_gpt_protocol::RoomMaintenanceSubmitRequest =
-                    from_value(arguments)?;
-                match crate::room_maintenance::submit(&self.state, request).await {
-                    Ok(response) => Ok(serde_json::to_value(response)?),
-                    Err(error) => Ok(local_service::room_maintenance_error("submit", error)),
-                }
-            }
-            "room.state.read" => {
-                let request: agentic_gpt_protocol::RoomStateReadRequest = from_value(arguments)?;
-                let response = crate::room_reads::state_read(&self.state, request).await?;
-                Ok(serde_json::to_value(response)?)
-            }
             _ => Err(anyhow::anyhow!("unknown agent tool: {name}")),
         };
         result.map(|value| (value, None))

@@ -63,8 +63,7 @@ fn run_incomplete_room_toolsets_e2e(root: &Path) -> Result<(), String> {
     config["agentId"] = json!(agent_id);
     config["mode"] = json!("local");
     config["workspaceRoot"] = json!(workspace);
-    config["toolsets"]["enabled"] = json!(["agent", "file", "room.notebook"]);
-    config["room"]["repositoryRoot"] = json!(workspace);
+    config["toolsets"]["enabled"] = json!(["agent", "file"]);
     // In particular, this runtime must not start a tmux-owned child process.
     config["shell"]["initFile"] = Value::Null;
     fs::write(
@@ -174,56 +173,6 @@ fn run_incomplete_room_toolsets_e2e(root: &Path) -> Result<(), String> {
     {
         return Err("config hot reload hid an enabled incomplete Room tool".to_string());
     }
-
-    expect_local_tool_error(
-        &binary,
-        &config_path,
-        "room.notebook.recent",
-        "{}",
-        "room_repository_root_must_be_separate",
-        "room_repository_root_must_be_separate",
-    )?;
-    let disabled = output_with_timeout(
-        command(&binary, root)
-            .args(["config", "--config"])
-            .arg(&config_path)
-            .args(["toolset", "disable", "room.notebook"]),
-        CLI_TIMEOUT,
-    )?;
-    ensure_success(&disabled, "disable invalid Room repository toolset")?;
-    wait_for_tool_presence(&binary, &config_path, "room.notebook.recent", false)?;
-    let enabled = output_with_timeout(
-        command(&binary, root)
-            .args(["config", "--config"])
-            .arg(&config_path)
-            .args(["toolset", "enable", "room.notebook"]),
-        CLI_TIMEOUT,
-    )?;
-    ensure_success(&enabled, "re-enable invalid Room repository toolset")?;
-    wait_for_tool_presence(&binary, &config_path, "room.notebook.recent", true)?;
-    expect_local_tool_error(
-        &binary,
-        &config_path,
-        "room.notebook.recent",
-        "{}",
-        "room_repository_root_must_be_separate",
-        "room_repository_root_must_be_separate",
-    )?;
-
-    let separate_repository = root.join("separate-repository");
-    fs::create_dir(&separate_repository).map_err(|error| error.to_string())?;
-    let separate_repository = separate_repository
-        .to_str()
-        .ok_or("non-UTF8 fixture path")?;
-    let updated = output_with_timeout(
-        command(&binary, root)
-            .args(["config", "--config"])
-            .arg(&config_path)
-            .args(["set", "room.repositoryRoot", separate_repository]),
-        CLI_TIMEOUT,
-    )?;
-    ensure_success(&updated, "set separate Room repository root")?;
-    expect_local_tool_success(&binary, &config_path, "room.notebook.recent")?;
 
     let enabled = output_with_timeout(
         command(&binary, root)
@@ -357,50 +306,6 @@ fn wait_for_tool_presence(
         if Instant::now() >= deadline {
             return Err(format!(
                 "{tool} discovery did not become {expected} after config reload"
-            ));
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn expect_local_tool_success(binary: &Path, config: &Path, tool: &str) -> Result<(), String> {
-    let deadline = Instant::now() + RELOAD_TIMEOUT;
-    loop {
-        let tools = local_output_with_timeout(binary, config, ["list-tools"], CALL_TIMEOUT)?;
-        let tools: Value =
-            serde_json::from_slice(&tools.stdout).map_err(|error| error.to_string())?;
-        if !tools
-            .as_array()
-            .is_some_and(|tools| tools.iter().any(|entry| entry["name"] == tool))
-        {
-            return Err(format!("enabled tool {tool} was not discovered"));
-        }
-        let output = match local_output_with_timeout(
-            binary,
-            config,
-            ["call", tool, "--arguments", "{}"],
-            CALL_TIMEOUT,
-        ) {
-            Ok(output) => output,
-            Err(error) => {
-                if Instant::now() >= deadline {
-                    return Err(error);
-                }
-                thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-        };
-        let result: Value =
-            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
-        if result["structuredContent"].get("error").is_none()
-            && result["structuredContent"]["documents"].is_array()
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "{tool} did not become usable after config reload: {}",
-                result["structuredContent"]
             ));
         }
         thread::sleep(Duration::from_millis(100));
@@ -580,10 +485,8 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         || tools
             .iter()
             .any(|tool| tool["_meta"]["surface"] != "agent-local")
-        || tools.iter().any(|tool| tool["name"] == "room.diary.active")
-        || tools
-            .iter()
-            .any(|tool| tool["name"] == "room.maintenance.submit")
+        || tools.iter().any(|tool| tool["name"] == "room.email.list")
+        || tools.iter().any(|tool| tool["name"] == "room.secret.list")
     {
         return Err("unexpected local tool surface".to_string());
     }
@@ -687,10 +590,8 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         "process",
         "skills",
         "tmux",
-        "room.diary",
-        "room.notebook",
-        "room.state",
-        "room.maintenance"
+        "room.email",
+        "room.secret"
     ]);
     fs::write(
         &config_path,
@@ -709,10 +610,10 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         .ok_or("enabled Room tool list is not an array")?;
     if !enabled_tools
         .iter()
-        .any(|tool| tool["name"] == "room.diary.active")
+        .any(|tool| tool["name"] == "room.email.list")
         || !enabled_tools
             .iter()
-            .any(|tool| tool["name"] == "room.maintenance.submit")
+            .any(|tool| tool["name"] == "room.secret.list")
     {
         return Err("enabled Room tool surface mismatch".to_string());
     }
@@ -720,14 +621,11 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     let active = local_output(
         &binary,
         &config_path,
-        ["call", "room.diary.active", "--arguments", "{}"],
+        ["call", "room.email.list", "--arguments", "{}"],
     )?;
     let active: Value =
         serde_json::from_slice(&active.stdout).map_err(|error| error.to_string())?;
-    if active["structuredContent"].get("daily").is_none()
-        || active["structuredContent"].get("weekly").is_none()
-        || active["structuredContent"].get("monthly").is_none()
-    {
+    if active["structuredContent"]["error"]["code"] != "email_account_required" {
         return Err("enabled Room call did not reach live server".to_string());
     }
 
@@ -749,21 +647,21 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         .ok_or("disabled Room tool list is not an array")?;
     if disabled_tools
         .iter()
-        .any(|tool| tool["name"] == "room.diary.active")
+        .any(|tool| tool["name"] == "room.email.list")
         || disabled_tools
             .iter()
-            .any(|tool| tool["name"] == "room.maintenance.submit")
+            .any(|tool| tool["name"] == "room.secret.list")
     {
         return Err("disabled Room tool surface mismatch".to_string());
     }
     let rejected_room_call = local_output_raw(
         &binary,
         &config_path,
-        ["call", "room.diary.active", "--arguments", "{}"],
+        ["call", "room.email.list", "--arguments", "{}"],
     )?;
     let rejected_room_stderr = String::from_utf8_lossy(&rejected_room_call.stderr);
     if rejected_room_call.status.success()
-        || !rejected_room_stderr.contains("room.diary.active")
+        || !rejected_room_stderr.contains("room.email.list")
         || !rejected_room_stderr.contains("not available")
     {
         return Err("disabled Room call was not rejected".to_string());

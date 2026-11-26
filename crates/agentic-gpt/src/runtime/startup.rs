@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::{self, Config, RuntimeMode},
     http_server, hub, instance_lock, local_control, private_state, process, process_history,
-    room_repository, skill_installs, skills,
+    skill_installs, skills,
     state::{AppState, CapabilityProfile, RuntimeModel},
     stdio_server, supervisor, tmux,
     utils::{ensure_parent, log_info, log_warn},
@@ -241,17 +241,6 @@ pub(crate) fn build_app_state_with_private_state(
     supervised: bool,
     private_state: private_state::PrivateStatePaths,
 ) -> Result<AppState> {
-    let room_error = if config.toolsets.uses_room_repository() {
-        room_repository::ensure_repository(&config)
-            .err()
-            .map(|error| {
-                let code = error_code(&error.to_string());
-                log_warn(format!("room repository unavailable; errorCode={code}"));
-                code
-            })
-    } else {
-        None
-    };
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
     let event_store = crate::event_store::EventStore::open(&private_state)?;
     let email = crate::email::EmailService::open(&private_state)?;
@@ -261,9 +250,7 @@ pub(crate) fn build_app_state_with_private_state(
         log_warn(format!("process history recovery failed: {error}"));
     }
     let skill_installs_root = private_state.skill_installs.clone();
-    let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(
-        &config, room_error,
-    ));
+    let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(&config));
     Ok(AppState {
         config_path,
         transport_agent_id: config.agent_id.clone(),
@@ -286,7 +273,6 @@ pub(crate) fn build_app_state_with_private_state(
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         mcp_concurrency: Arc::new(process::McpConcurrency::new()),
-        room_repository_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(skills::SkillLeaseManager::new()),
         skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(

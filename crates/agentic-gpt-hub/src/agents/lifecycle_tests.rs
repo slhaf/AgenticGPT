@@ -3,7 +3,7 @@ use crate::agents::test_support::*;
 use agentic_gpt_protocol::{
     AgentConnectionMode, AgentMessage, AgentRole, AgentRunReport, ConfirmationPayload, EventOrigin,
     EventResponseDisposition, EventSource, EventSourceKind, HubCommand, HubCommandEnvelope,
-    HubMessage, ProcessExecRequest, ProcessState, RoomNotebookReadRequest, SafeConfigSummary,
+    HubMessage, ProcessExecRequest, ProcessState, RoomEmailListRequest, SafeConfigSummary,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -205,11 +205,9 @@ async fn room_dispatch_keeps_validated_generation_during_replacement() {
         .await
         .unwrap();
 
-    let command = HubCommand::RoomNotebookRead {
+    let command = HubCommand::RoomEmailList {
         request_id: "room-generation-request".to_string(),
-        payload: RoomNotebookReadRequest {
-            path: "Notebook/topic.md".to_string(),
-        },
+        payload: RoomEmailListRequest::default(),
     };
     let mut request = Box::pin(crate::room::control::request_active_room(
         &state, command, 1,
@@ -248,7 +246,11 @@ async fn room_dispatch_keeps_validated_generation_during_replacement() {
         panic!("expected Room command on validated generation");
     };
     let envelope = serde_json::from_str::<HubCommandEnvelope>(&text).unwrap();
-    let data = json!({ "current": null, "warnings": [] });
+    let data = json!({
+        "items": [],
+        "hasMore": false,
+        "sync": { "initialSyncComplete": true, "state": "ready" }
+    });
     let response = post_agent_message(
         State(state.clone()),
         Path("agent".to_string()),
@@ -338,11 +340,9 @@ async fn room_lease_invalidated_during_feedback_flush_returns_conflict_without_r
     .unwrap();
     crate::event_feedback::finalize_original(&state, "agent", &origin, None).unwrap();
 
-    let room_command = HubCommand::RoomNotebookRead {
+    let room_command = HubCommand::RoomEmailList {
         request_id: "room-after-feedback-flush".to_string(),
-        payload: RoomNotebookReadRequest {
-            path: "Notebook/topic.md".to_string(),
-        },
+        payload: RoomEmailListRequest::default(),
     };
     let request_state = state.clone();
     let request = tokio::spawn(async move {

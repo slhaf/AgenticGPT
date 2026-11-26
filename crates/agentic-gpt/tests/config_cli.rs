@@ -281,7 +281,7 @@ fn config_init_set_and_show_round_trip() {
     let set = Command::new(&binary)
         .args(["config", "--config"])
         .arg(&config)
-        .args(["set", "room.timezone", "Asia/Tokyo"])
+        .args(["set", "room.secret.syncWaitTimeoutMs", "1200"])
         .output()
         .unwrap();
     assert!(set.status.success(), "config set command failed");
@@ -349,7 +349,7 @@ fn config_init_set_and_show_round_trip() {
     assert_eq!(value["profile"], "room");
     assert_eq!(value["limits"]["maxConcurrentTasks"], 2);
     assert_eq!(value["limits"]["processResponseBytes"], 16384);
-    assert_eq!(value["room"]["timezone"], "Asia/Tokyo");
+    assert_eq!(value["room"]["secret"]["syncWaitTimeoutMs"], 1200);
 
     assert_eq!(value["policy"]["enabled"], false);
     assert_eq!(value["policy"]["command"]["defaultAction"], "deny");

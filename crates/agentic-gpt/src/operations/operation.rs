@@ -151,15 +151,6 @@ pub(crate) const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("room.email.attachment", ToolNamespace::RoomEmail),
     ("room.email.send", ToolNamespace::RoomEmail),
     ("room.email.operate", ToolNamespace::RoomEmail),
-    ("room.diary.active", ToolNamespace::RoomDiary),
-    ("room.diary.read", ToolNamespace::RoomDiary),
-    ("room.maintenance.status", ToolNamespace::RoomMaintenance),
-    ("room.maintenance.submit", ToolNamespace::RoomMaintenance),
-    ("room.notebook.read", ToolNamespace::RoomNotebook),
-    ("room.notebook.recent", ToolNamespace::RoomNotebook),
-    ("room.notebook.search", ToolNamespace::RoomNotebook),
-    ("room.state.list", ToolNamespace::RoomState),
-    ("room.state.read", ToolNamespace::RoomState),
     ("skills.install", ToolNamespace::Skills),
     ("skills.install.cancel", ToolNamespace::Skills),
     ("skills.install.get", ToolNamespace::Skills),
@@ -205,7 +196,6 @@ pub(crate) fn tool_is_read_only(name: &str) -> bool {
             | "skills.setActive"
             | "skills.install"
             | "skills.install.cancel"
-            | "room.maintenance.submit"
             | "room.email.send"
             | "room.email.operate"
             | "room.email.attachment"
@@ -237,7 +227,6 @@ pub(crate) fn tool_is_destructive(name: &str) -> bool {
             | "skills.deactivate"
             | "skills.install"
             | "skills.install.cancel"
-            | "room.maintenance.submit"
             | "room.email.operate"
             | "skills.setActive"
             | "skills.run"
@@ -299,15 +288,6 @@ fn is_current_room_operation(operation: &str) -> bool {
             | "room.email.attachment"
             | "room.email.send"
             | "room.email.operate"
-            | "room.diary.active"
-            | "room.diary.read"
-            | "room.notebook.recent"
-            | "room.notebook.search"
-            | "room.notebook.read"
-            | "room.state.list"
-            | "room.state.read"
-            | "room.maintenance.status"
-            | "room.maintenance.submit"
     )
 }
 
@@ -416,15 +396,6 @@ pub(crate) fn hub_command_name(command: &HubCommand) -> &'static str {
         HubCommand::RoomEmailAttachment { .. } => "room.email.attachment",
         HubCommand::RoomEmailSend { .. } => "room.email.send",
         HubCommand::RoomEmailOperate { .. } => "room.email.operate",
-        HubCommand::RoomDiaryActive { .. } => "room.diary.active",
-        HubCommand::RoomDiaryRead { .. } => "room.diary.read",
-        HubCommand::RoomNotebookRecent { .. } => "room.notebook.recent",
-        HubCommand::RoomNotebookSearch { .. } => "room.notebook.search",
-        HubCommand::RoomNotebookRead { .. } => "room.notebook.read",
-        HubCommand::RoomStateList { .. } => "room.state.list",
-        HubCommand::RoomStateRead { .. } => "room.state.read",
-        HubCommand::RoomMaintenanceStatus { .. } => "room.maintenance.status",
-        HubCommand::RoomMaintenanceSubmit { .. } => "room.maintenance.submit",
         HubCommand::SkillsList { .. } => "skills.list",
         HubCommand::SkillsRead { .. } => "skills.read",
         HubCommand::SkillsSearch { .. } => "skills.search",

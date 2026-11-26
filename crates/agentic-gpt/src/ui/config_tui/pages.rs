@@ -205,10 +205,6 @@ pub(super) fn localized_error(code: &str, language: UiLanguage) -> String {
             "Choose allow, confirm, or deny for the email action policy.",
             "邮件操作策略请选择 allow、confirm 或 deny。",
         ),
-        "config_init_room_maintenance_mode_invalid" => (
-            "Maintenance mode must be local or workflow.",
-            "维护模式必须是 local 或 workflow。",
-        ),
         "config_init_events_low_ttl_seconds_invalid" => (
             "Low event TTL must be a non-negative integer.",
             "低等级事件保留时间必须是非负整数。",
@@ -498,12 +494,12 @@ fn basic_inspector_copy(
             t(language, "Normal", "Normal"),
             match language {
                 UiLanguage::En => &[
-                    "Enable the general agent capability set; this is the default profile.",
-                    "Profiles are not stored in config, so launch the agent with Normal as well.",
+                    "Use the default agent profile and its command confirmation policy.",
+                    "The selected profile is saved in the configuration.",
                 ],
                 UiLanguage::ZhCn => &[
-                    "仅启用通用 Agent 能力；这是默认 profile。",
-                    "Profile 不写入配置，启动时仍需使用 Normal。",
+                    "使用默认 Agent 身份和对应的命令确认策略。",
+                    "选中的身份会写入配置。",
                 ],
             },
         ),
@@ -511,12 +507,12 @@ fn basic_inspector_copy(
             t(language, "Room", "Room"),
             match language {
                 UiLanguage::En => &[
-                    "Add Diary, Notebook, and other long-lived context capabilities to Normal.",
-                    "Profiles are not stored in config, so launch the agent with Room as well.",
+                    "Register as the active Room when connected to a Hub in Hub mode.",
+                    "Room uses its own command confirmation policy preset.",
                 ],
                 UiLanguage::ZhCn => &[
-                    "在 Normal 基础上增加 Diary、Notebook 等长期上下文能力。",
-                    "Profile 不写入配置，启动时仍需使用 Room。",
+                    "在 Hub 模式下连接时，注册为活动 Room。",
+                    "Room 使用独立的命令确认策略预设。",
                 ],
             },
         ),
@@ -1499,7 +1495,6 @@ fn render_optional_form(
                     push_long_form_field(
                         &mut lines,
                         &mut focused_line,
-                        session,
                         section,
                         draft,
                         state,
@@ -1515,7 +1510,6 @@ fn render_optional_form(
         OptionalSection::Identity => push_long_form_field(
             &mut lines,
             &mut focused_line,
-            session,
             section,
             draft,
             state,
@@ -1596,7 +1590,6 @@ fn render_optional_form(
                 push_long_form_field(
                     &mut lines,
                     &mut focused_line,
-                    session,
                     section,
                     draft,
                     state,
@@ -1676,7 +1669,6 @@ fn render_optional_form(
                     push_long_form_field(
                         &mut lines,
                         &mut focused_line,
-                        session,
                         section,
                         draft,
                         state,
@@ -1688,51 +1680,6 @@ fn render_optional_form(
                     );
                 }
             }
-        }
-        OptionalSection::Room => {
-            for field in [
-                SetupField::RoomTimezone,
-                SetupField::DiaryBoundaryHour,
-                SetupField::RepositoryRoot,
-            ] {
-                push_long_form_field(
-                    &mut lines,
-                    &mut focused_line,
-                    session,
-                    section,
-                    draft,
-                    state,
-                    field,
-                    language,
-                    theme,
-                    errors,
-                    left.width,
-                );
-            }
-            push_choice_group(
-                &mut lines,
-                &mut focused_line,
-                section,
-                draft,
-                state,
-                SetupField::RoomMaintenanceMode,
-                t(language, "Maintenance mode", "维护模式"),
-                &[("local", "local"), ("workflow", "workflow")],
-                theme,
-                errors,
-                language,
-            );
-            push_boolean_field(
-                &mut lines,
-                &mut focused_line,
-                section,
-                draft,
-                state,
-                SetupField::RoomMaintenanceAutoPush,
-                language,
-                theme,
-                errors,
-            );
         }
         OptionalSection::RoomSecret => {
             for field in [
@@ -1746,7 +1693,6 @@ fn render_optional_form(
                 push_long_form_field(
                     &mut lines,
                     &mut focused_line,
-                    session,
                     section,
                     draft,
                     state,
@@ -1782,7 +1728,6 @@ fn render_optional_form(
                 push_long_form_field(
                     &mut lines,
                     &mut focused_line,
-                    session,
                     section,
                     draft,
                     state,
@@ -1824,7 +1769,6 @@ fn render_optional_form(
             push_long_form_field(
                 &mut lines,
                 &mut focused_line,
-                session,
                 section,
                 draft,
                 state,
@@ -1863,7 +1807,6 @@ fn render_optional_form(
             push_long_form_field(
                 &mut lines,
                 &mut focused_line,
-                session,
                 section,
                 draft,
                 state,
@@ -1990,7 +1933,6 @@ fn render_optional_form(
 fn push_long_form_field(
     lines: &mut Vec<Line<'static>>,
     focused_line: &mut usize,
-    session: &SetupSession,
     section: OptionalSection,
     draft: &OptionalSectionDraft,
     state: &TuiState,
@@ -2015,21 +1957,6 @@ fn push_long_form_field(
     let is_default = confirmed == default_value;
     let cursor = editing_cursor(state, field);
     let current = current_input_value(state, field, &confirmed);
-    let display_value = if cursor.is_none() && is_default && confirmed.is_empty() {
-        match field {
-            SetupField::RepositoryRoot => {
-                let workspace = session.optional_draft(OptionalSection::Workspace);
-                let workspace_root = optional_field_value(&workspace, SetupField::WorkspaceRoot);
-                PathBuf::from(workspace_root)
-                    .join("room")
-                    .to_string_lossy()
-                    .into_owned()
-            }
-            _ => current.to_string(),
-        }
-    } else {
-        current.to_string()
-    };
     let catalog_entry = if let SetupField::Catalog(index) = field {
         crate::config_setup::catalog_entries()
             .into_iter()
@@ -2047,7 +1974,7 @@ fn push_long_form_field(
         ));
     } else {
         lines.push(long_form_input_value_line(
-            &display_value,
+            current,
             focused,
             cursor.is_some(),
             cursor,
@@ -3137,20 +3064,6 @@ pub(super) fn optional_focus_items(
             }
             items
         }
-        OptionalSection::Room => vec![
-            OptionalFocusItem::Field(SetupField::RoomTimezone),
-            OptionalFocusItem::Field(SetupField::DiaryBoundaryHour),
-            OptionalFocusItem::Field(SetupField::RepositoryRoot),
-            OptionalFocusItem::Choice {
-                field: SetupField::RoomMaintenanceMode,
-                value: "local",
-            },
-            OptionalFocusItem::Choice {
-                field: SetupField::RoomMaintenanceMode,
-                value: "workflow",
-            },
-            OptionalFocusItem::Field(SetupField::RoomMaintenanceAutoPush),
-        ],
         OptionalSection::RoomSecret => vec![
             OptionalFocusItem::Field(SetupField::RoomSecretServerUrl),
             OptionalFocusItem::Field(SetupField::RoomSecretAccount),
@@ -3565,8 +3478,8 @@ fn optional_center_inspector_body(
                     "Choose which built-in tool namespaces are available at runtime.",
                     "The selection applies to every tool with the corresponding namespace prefix.",
                     "",
-                    "The Room preset enables core Room namespaces; Email and Secret are opt-in.",
-                    "Press R to select or clear all Room services; individual services remain independently selectable.",
+                    "Email and Room Secret are disabled by default for both profiles.",
+                    "Press R to switch Email and Room Secret together. Each can also be switched individually.",
                 ],
                 OptionalSection::McpServers => &[
                     "Configure downstream MCP servers used by mcp.listTools, mcp.callTool, and mcp.batch.",
@@ -3581,10 +3494,6 @@ fn optional_center_inspector_body(
                     "Email calls require a complete account; settings can be filled in later.",
                     "Account connection changes apply after active requests drain; other changes apply immediately.",
                     "Password: env:NAME or file:/absolute/path. TLS: implicit or starttls. Policies: allow, confirm, deny.",
-                ],
-                OptionalSection::Room => &[
-                    "Set shared Room timezone, diary boundary, repository, and maintenance settings.",
-                    "The repository defaults to <workspace>/room; maintenance is local with auto-push off.",
                 ],
                 OptionalSection::RoomSecret => &[
                     "Configure the Room Secret API here; enable or disable room.secret in Toolsets.",
@@ -3673,8 +3582,8 @@ fn optional_center_inspector_body(
                     "选择运行时可用的内置工具命名空间。",
                     "选择会应用到具有对应命名空间前缀的所有工具。",
                     "",
-                    "Room 预设默认启用核心命名空间；Email 和 Secret 默认关闭，需要单独启用。",
-                    "按 R 可全选或取消全选 Room 服务；每项 Room 服务仍可单独开关。",
+                    "两种身份默认都关闭邮件和 Room 密钥 API。",
+                    "按 R 可批量开关邮件和 Room 密钥 API，也可逐项开关。",
                 ],
                 OptionalSection::Email => &[
                     "配置 IMAP/SMTP、同步、本地保存及发送和移入垃圾箱权限。",
@@ -3682,10 +3591,6 @@ fn optional_center_inspector_body(
                     "邮件调用需要完整账户信息；可以开启工具集后再填写。",
                     "账户连接修改排空在途请求后生效；其他修改立即生效。",
                     "密码使用 env:NAME 或 file:/绝对路径。加密方式：implicit 或 starttls；策略：allow、confirm、deny。",
-                ],
-                OptionalSection::Room => &[
-                    "设置 Room 共享时区、日记日界线、仓库和维护行为。",
-                    "仓库默认使用 <workspace>/room；维护默认为 local 且关闭自动推送。",
                 ],
                 OptionalSection::RoomSecret => &[
                     "本页只编辑密钥服务参数；启停在 Toolsets 中设置 room.secret。",
@@ -3795,7 +3700,7 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::Toolsets => &[
                     "Select the built-in tool namespaces enabled for this configuration.",
-                    "The list includes agent, file, mcp, process, skills, tmux, browser, and room.",
+                    "Email and Room Secret use separate room.email and room.secret entries.",
                     "Use Space to toggle a namespace and J/K to change selection priority.",
                 ],
                 SetupField::McpServerId => &[
@@ -3902,31 +3807,6 @@ fn optional_form_inspector_body(
                     "Query sync wait budget: 0 through 30000 milliseconds; default 3000.",
                     "Zero reads without waiting. Budget expiry does not cancel synchronization.",
                     "Hot reload applies to new requests; existing waits retain their budget.",
-                ],
-                SetupField::RoomTimezone => &[
-                    "Timezone used to assign Room diary and Notebook dates.",
-                    "Enter an IANA timezone identifier in Area/Location form, such as Asia/Shanghai or Europe/Berlin.",
-                    "Default: Asia/Shanghai.",
-                    "",
-                    "The wizard checks only that it is non-empty; an invalid timezone fails at runtime.",
-                ],
-                SetupField::DiaryBoundaryHour => &[
-                    "Hour at which the Room diary date rolls over.",
-                    "Default: 5; valid range: 0–23.",
-                    "",
-                    "Times before the boundary belong to the previous diary day.",
-                ],
-                SetupField::RepositoryRoot => &[
-                    "Directory used by the Room repository control plane.",
-                    "Leave blank to use <workspace>/room.",
-                ],
-                SetupField::RoomMaintenanceMode => &[
-                    "Select where Room maintenance requests execute.",
-                    "local applies changes in this checkout; workflow submits them to the repository workflow.",
-                ],
-                SetupField::RoomMaintenanceAutoPush => &[
-                    "Push successful local Room maintenance when a usable remote is available.",
-                    "Default: off. This does not change workflow mode behavior.",
                 ],
                 SetupField::TunnelCacheDir => &[
                     "Cache directory for managed Tunnel client artifacts.",
@@ -4036,7 +3916,7 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::Toolsets => &[
                     "选择此配置启用的内置工具命名空间。",
-                    "列表包含 agent、file、mcp、process、skills、tmux、browser 和 room。",
+                    "邮件和 Room 密钥分别使用 room.email 和 room.secret。",
                     "使用 Space 切换命名空间，使用 J/K 调整选中顺序。",
                 ],
                 SetupField::McpServerId => &[
@@ -4144,31 +4024,6 @@ fn optional_form_inspector_body(
                     "0 表示不等待；预算耗尽不会取消同步。",
                     "热更新后用于新请求；已有等待保留原预算。",
                 ],
-                SetupField::RoomTimezone => &[
-                    "Room 日记和 Notebook 日期归属使用的时区。",
-                    "填写 IANA 时区标识，格式通常为区域/地点，例如 Asia/Shanghai 或 Europe/Berlin。",
-                    "默认 Asia/Shanghai。",
-                    "",
-                    "向导只检查非空；无效时区会在运行时失败。",
-                ],
-                SetupField::DiaryBoundaryHour => &[
-                    "Room 日记切换日期的小时。",
-                    "默认 5；有效范围 0–23。",
-                    "",
-                    "边界时间之前的内容归到前一个日记日。",
-                ],
-                SetupField::RepositoryRoot => &[
-                    "Room 仓库控制平面使用的目录。",
-                    "留空时使用 <workspace>/room。",
-                ],
-                SetupField::RoomMaintenanceMode => &[
-                    "选择 Room 维护请求的执行位置。",
-                    "local 在当前 checkout 应用；workflow 提交给仓库工作流。",
-                ],
-                SetupField::RoomMaintenanceAutoPush => &[
-                    "本地 Room 维护成功且存在可用远端时，是否推送。",
-                    "默认关闭；此设置不改变 workflow 模式。",
-                ],
                 SetupField::TunnelCacheDir => &[
                     "托管 Tunnel client 文件的缓存目录。",
                     "默认 ~/.agentic_gpt/cache/tunnel-client。",
@@ -4234,7 +4089,6 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
         OptionalSection::Skills => t(language, "Skills", "技能"),
         OptionalSection::SecurityPolicy => t(language, "Security policy", "安全策略"),
         OptionalSection::ConfigManagement => t(language, "Config management", "配置管理"),
-        OptionalSection::Room => t(language, "Room", "Room"),
         OptionalSection::RoomSecret => t(language, "Room Secret API", "Room 密钥 API"),
         OptionalSection::Email => t(language, "Email", "邮件"),
         OptionalSection::TunnelClient => t(language, "Tunnel client", "隧道客户端"),
@@ -4304,17 +4158,12 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::Bubblewrap => t(language, "Bubblewrap", "Bubblewrap"),
         SetupField::ShellInitFileMode => t(language, "Init file mode", "初始化文件模式"),
         SetupField::ShellInitFilePath => t(language, "Init file path", "初始化文件路径"),
-        SetupField::RepositoryRoot => t(language, "Repository root", "仓库根目录"),
-        SetupField::RoomMaintenanceMode => t(language, "Maintenance mode", "维护模式"),
-        SetupField::RoomMaintenanceAutoPush => t(language, "Auto-push", "自动推送"),
         SetupField::McpServerId => t(language, "MCP server ID", "MCP 服务 ID"),
         SetupField::McpServerEnabled => t(language, "Enabled", "启用"),
         SetupField::McpServerTransport => t(language, "Transport", "传输方式"),
         SetupField::McpServerEndpoint => t(language, "URL / command", "URL / 命令"),
         SetupField::McpServerBearerAuth => t(language, "Bearer auth", "Bearer 认证"),
         SetupField::McpServerBearerToken => t(language, "Bearer token", "Bearer 令牌"),
-        SetupField::RoomTimezone => t(language, "Timezone", "时区"),
-        SetupField::DiaryBoundaryHour => t(language, "Diary boundary hour", "日记边界小时"),
         SetupField::TunnelCacheDir => t(language, "Cache directory", "缓存目录"),
         SetupField::TunnelExecutable => t(language, "Executable", "可执行文件"),
         SetupField::HubReportingEnabled => t(language, "Reporting enabled", "启用报告"),
@@ -4363,7 +4212,6 @@ pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
         field,
         SetupField::Bubblewrap
             | SetupField::HubReportingEnabled
-            | SetupField::RoomMaintenanceAutoPush
     )
 }
 
@@ -4412,14 +4260,6 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
         },
         OptionalSectionDraft::McpServers(_) => String::new(),
         OptionalSectionDraft::Email(value) => value.value(field),
-        OptionalSectionDraft::Room(value) => match field {
-            SetupField::RoomTimezone => value.timezone.clone(),
-            SetupField::DiaryBoundaryHour => value.diary_boundary_hour.clone(),
-            SetupField::RepositoryRoot => value.repository_root.clone(),
-            SetupField::RoomMaintenanceMode => value.maintenance_mode.clone(),
-            SetupField::RoomMaintenanceAutoPush => value.maintenance_auto_push.to_string(),
-            _ => String::new(),
-        },
         OptionalSectionDraft::RoomSecret(value) => value.value(field),
         OptionalSectionDraft::TunnelClient(value) => match field {
             SetupField::TunnelCacheDir => value.cache_dir.clone(),
@@ -4491,14 +4331,6 @@ pub(super) fn set_optional_field(
         OptionalSectionDraft::Email(draft) => {
             draft.values.insert(field, value);
         }
-        OptionalSectionDraft::Room(draft) => match field {
-            SetupField::RoomTimezone => draft.timezone = value,
-            SetupField::DiaryBoundaryHour => draft.diary_boundary_hour = value,
-            SetupField::RepositoryRoot => draft.repository_root = value,
-            SetupField::RoomMaintenanceMode => draft.maintenance_mode = value,
-            SetupField::RoomMaintenanceAutoPush => draft.maintenance_auto_push = value == "true",
-            _ => {}
-        },
         OptionalSectionDraft::RoomSecret(draft) => {
             draft.values.insert(field, value);
         }
@@ -4552,9 +4384,6 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
         }
         OptionalSectionDraft::HubReporting(draft) if field == SetupField::HubReportingEnabled => {
             draft.enabled = !draft.enabled
-        }
-        OptionalSectionDraft::Room(draft) if field == SetupField::RoomMaintenanceAutoPush => {
-            draft.maintenance_auto_push = !draft.maintenance_auto_push
         }
         _ => {}
     }
@@ -4699,7 +4528,7 @@ fn render_review(
                     editing.buffer.clone()
                 }
             } else {
-                review_display_value(session, group, item)
+                item.value.clone()
             };
             let inline_editing = editing.is_some()
                 && matches!(
@@ -5011,26 +4840,6 @@ fn render_review_json_preview(
     frame.render_widget(Paragraph::new(json_lines).scroll((scroll, 0)), body_area);
 }
 
-fn review_display_value(session: &SetupSession, group: &ReviewGroup, item: &ReviewItem) -> String {
-    if !item.value.is_empty() {
-        return item.value.clone();
-    }
-    match (group.target, item.field) {
-        (
-            ReviewTarget::OptionalSection(OptionalSection::Room),
-            Some(SetupField::RepositoryRoot),
-        ) => {
-            let workspace = session.optional_draft(OptionalSection::Workspace);
-            let workspace_root = optional_field_value(&workspace, SetupField::WorkspaceRoot);
-            PathBuf::from(workspace_root)
-                .join("room")
-                .to_string_lossy()
-                .into_owned()
-        }
-        _ => item.value.clone(),
-    }
-}
-
 fn review_complex_lines(
     item: &ReviewItem,
     state: &TuiState,
@@ -5315,13 +5124,12 @@ fn section_status_label(status: SectionStatus, language: UiLanguage) -> &'static
 pub(super) fn review_search_text(
     group: &ReviewGroup,
     item: &ReviewItem,
-    session: &SetupSession,
     language: UiLanguage,
 ) -> String {
     let value = if item.editor == ReviewEditorKind::Secret {
-        String::new()
+        ""
     } else {
-        review_display_value(session, group, item)
+        item.value.as_str()
     };
     format!(
         "{} {} {}",
@@ -5400,11 +5208,6 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "email_maxStorageBytes" => t(language, "Storage limit (bytes)", "容量上限（字节）"),
         "email_sendPolicy" => t(language, "Send policy", "发信策略"),
         "email_trashPolicy" => t(language, "Trash policy", "移入垃圾箱策略"),
-        "room_timezone" => t(language, "Timezone", "时区"),
-        "diary_boundary_hour" => t(language, "Diary boundary hour", "日记边界小时"),
-        "repository_root" => t(language, "Repository root", "仓库根目录"),
-        "room_maintenance_mode" => t(language, "Maintenance mode", "维护模式"),
-        "room_maintenance_auto_push" => t(language, "Auto-push", "自动推送"),
         "tunnel_cache_dir" => t(language, "Cache directory", "缓存目录"),
         "tunnel_executable" => t(language, "Executable", "可执行文件"),
         "hub_reporting_enabled" => t(language, "Reporting enabled", "启用报告"),
