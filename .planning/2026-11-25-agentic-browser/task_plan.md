@@ -32,5 +32,5 @@
 ## Browser 0.4.0 操作手册
 
 - [complete] 将原版操作指南接入离线手册，保留 AX 工作流与示例，按 Agentic 调整入口、连接、租约和截图交付。
-- [in_progress] 接入视口、窗口与标签管理、页面资源和 WebMCP 的原版能力说明，按扩展实现裁剪。
-- [pending] 从原始 API 声明整理 SDK 参考，在远端通过实际 `browser.manual` 读取和搜索，并执行手册示例。
+- [complete] 接入视口、窗口与标签管理、页面资源和 WebMCP 的原版能力说明，按扩展实现裁剪。
+- [in_progress] 从原始 API 声明整理 SDK 参考，在远端通过实际 `browser.manual` 读取和搜索，并执行手册示例。

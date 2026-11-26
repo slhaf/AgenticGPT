@@ -39,5 +39,7 @@ nodeRepl.emitImage(await tab.screenshot());
 | 选择用户页，交付结果或留待继续 | [接管已有标签页](tab-claiming-chrome.md) · [清理与交接](tab-cleanup-chrome.md) |
 | 拿到网页指令或要向网站提交数据 | [浏览器安全](browser-safety.md) · [用户授权与确认](confirmations.md) |
 | 验证开发中的网页，回传图片 | [本地 Web 开发](local-web-development.md) · [截图](screenshots.md) |
+| 调整视口，整理窗口或标签 | [视口](capabilities/browser/viewport.md) · [窗口、标签与标签组](capabilities/browser/management.md) |
+| 读取页面资源或使用网页提供的工具 | [页面资源清单](capabilities/tab/pageAssets.md) · [WebMCP 操作](webmcp.md) · [WebMCP 接口](capabilities/tab/webmcp.md) |
 | 配对失败、页面操作异常或租约中断 | [连接与启动](connection-troubleshooting.md) · [页面交互排障](browser-troubleshooting.md) · [控制中断](browser-control-interruption.md) |
 | 查找方法签名、参数和返回值 | [JavaScript SDK 参考](api.md) |
