@@ -882,7 +882,7 @@ agentic-gpt config update '[{"op":"set","path":["limits","processResponseBytes"]
 
 `set` 保留本地文本便利：字符串和枚举可直接传文本，布尔值、数字、对象和列表按类型解析；`config set events.internalOverrides.process.completed null` 映射为 `unset`。API 中请明确使用 `{"op":"unset",...}`，不可依赖该映射。`unset` 可移除目录支持的可选字段和 map 条目，必需字段仍受保护。
 
-`config edit` 打开现有配置的全屏表单，不重新初始化。原有 Connection、Workspace、Room、MCP 等页面保留；附加配置页提供 Browser、Skills、命令策略、`backupLimit` 和 `config.updatePolicy` 的字段编辑。提交仅将实际修改的字段操作作用于最新持久配置，不回写整份旧快照；集合增删保留 `add/remove`，有序列表或重排使用 `set`，MCP map 按稳定服务器 ID 定位。最终校验失败保留草稿，凭据文件创建仍沿用原事务流程。
+`config edit` 打开现有配置的全屏表单，不重新初始化。可分别编辑连接、工作区、邮件、密码库和 MCP 设置；附加配置页提供 Browser、Skills、命令策略、`backupLimit` 和 `config.updatePolicy` 的字段编辑。提交仅将实际修改的字段操作作用于最新持久配置，不回写整份旧快照；集合增删保留 `add/remove`，有序列表或重排使用 `set`，MCP map 按稳定服务器 ID 定位。最终校验失败保留草稿，凭据文件创建仍沿用原事务流程。
 
 专用的 `config allow/confirm/deny`、`config path`、`config mcp` 和 `config toolset` 管理命令继续保留；不必为同一设置先删除旧配置再写新配置。
 
@@ -929,7 +929,7 @@ Standalone、Local 和连接 Hub 的 Agent 共用串行配置应用协调。目�
 
 关闭工具集不等于撤销已准入副作用；Tmux 已有会话不因工具集关闭而删除。
 
-HTTP token 无法解析时拒绝认证，监听绑定失败由组件重试，不影响其他入口。更换 endpoint 会丢弃其本地 OAuth/session 状态；token 原地更新保留 session 并撤销 OAuth 记录。邮件、Secret 或 Browser 准备繁忙时可报告应用失败并保留原实例；需要重新应用的配置通过配置操作再次提交，连接恢复沿各组件现有机制处理，不重放用户副作用。
+HTTP token 无法解析时拒绝认证，监听绑定失败由组件重试，不影响其他入口。更换端点会丢弃原监听器的 OAuth 状态，原地更新 bearer 凭据也会撤销 OAuth 记录。邮件、Secret 或 Browser 准备繁忙时可报告应用失败并保留原实例；需要重新应用的配置通过配置操作再次提交，连接恢复沿各组件现有机制处理，不重放用户副作用。
 
 待重启的模式、身份或工作空间值不会阻止无关设置应用。同一 Standalone supervisor 的故障恢复从私有启动快照保留原启动契约，同时读取最新磁盘的可热配置字段；只有显式重启整个实例才采用新的启动值。快照位于本次 runtime 目录，权限为 0600，supervisor 退出时清理，不修改用户目标配置。
 

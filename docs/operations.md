@@ -184,7 +184,7 @@ Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按
 
 Hub、HTTP、Browser、邮件账户、Secret 后端和 Skills 并发由具体所有者协调，不重建整个 AppState。重配置不会清空 Process 注册表、持久事件、安装账本或发送结果；不会自动重发邮件、重写密钥或重放网页操作。降低安装并发不取消现有任务；关闭 Skills 保留恢复记录，重新启用时恢复排队安装，不重复启动已被 worker 占有的记录。Browser 切换会清理旧租约与 JS 会话，Tmux 已有会话不因工具集关闭而删除。
 
-HTTP 监听变更可能使 session/OAuth 状态失效；token 原地更新保留 session 并撤销 OAuth 记录。认证引用不可用时拒绝访问，端口绑定失败由组件重试，不影响其他入口。邮件/Secret 等排空繁忙时保留原 owner 并报告失败；静态校验不检验远程登录可用性。
+Standalone HTTP MCP 按请求认证。更换端点会丢弃原监听器的 OAuth 状态，原地更新 bearer 凭据也会撤销 OAuth 记录。认证引用不可用时拒绝访问，端口绑定失败由组件重试，不影响其他入口。邮件/Secret 等排空繁忙时保留原 owner 并报告失败；静态校验不检验远程登录可用性。
 
 `tunnel.hubReporting.detail` 和 `tunnel.hubReporting.enabled` 更新后续报告策略，不要求重建 Tunnel，也不会断开确认连接；辅助连接单独由 `hub.enabled` 控制。连接关闭时会保留报告设置并暂停发送。旧配置若报告开启但 `hub.enabled=false`，需要明确打开 `hub.enabled` 才会继续连接并上报。配置的待重启 mode/profile 不会阻止无关热更新。Standalone supervisor 在私有 runtime 目录用 0600 启动快照保存本次启动契约；自动重拉 worker 保留原身份并读取最新可热字段，显式重启整个实例才采用新的启动值。快照由 supervisor 清理，不覆盖 desired 文件。
 

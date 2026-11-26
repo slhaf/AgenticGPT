@@ -1,6 +1,6 @@
 # tunnel-client 升级说明
 
-**适用范围：本次升级开始。** 本页说明 Agentic 将托管 tunnel-client 固定版本升级到 OpenAI 官方
+**适用范围为升级到 Agentic GPT 0.12.0 的部署。** 本页说明 Agentic 将托管 tunnel-client 固定版本升级到 OpenAI 官方
 `v0.0.19` 后，Standalone 用户需要手动完成的配置和进程检查。
 
 ## 升级前检查

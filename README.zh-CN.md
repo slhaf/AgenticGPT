@@ -34,7 +34,7 @@ install -m 0755 agentic-gpt ~/.local/bin/
 
 请确保 `~/.local/bin` 在 `PATH` 中。发行包还包含用于部署 Hub 的 `agentic-gpt-hub`。如需控制 Chrome，请在目标 profile 安装 Agentic Browser 扩展。
 
-**从旧版本升级到 0.11.0 前，请先阅读[发布说明与升级步骤](docs/release-notes-v0.11.0.md)。**
+**从旧版本升级到 0.12.0 前，请先阅读[发布说明与升级步骤](docs/release-notes-v0.12.0.md)。**
 
 ## 快速开始：Standalone
 
@@ -113,7 +113,7 @@ agentic-gpt run
 | 工具与 HTTP API | [接口参考](docs/interfaces.md) · [工具矩阵](docs/tool-contract-matrix.md) |
 | Process 接口及旧客户端切换 | [Process 切换说明](docs/process-cutover.md) |
 | Browser 与自托管部署 | [Browser 部署指南](docs/browser-self-hosted.zh-CN.md) |
-| 升级与运维 | [0.11.0 发布说明](docs/release-notes-v0.11.0.md) · [运维指南](docs/operations.md) |
+| 升级与运维 | [0.12.0 发布说明](docs/release-notes-v0.12.0.md) · [运维指南](docs/operations.md) · [变更日志](CHANGELOG.md) |
 | 源码开发、构建与发布 | [开发指南](docs/development/README.zh-CN.md) · [发布指南](docs/development/releasing.md) |
 
 ## 许可证

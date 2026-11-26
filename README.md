@@ -34,7 +34,7 @@ install -m 0755 agentic-gpt ~/.local/bin/
 
 Ensure `~/.local/bin` is in `PATH`. Archives also contain `agentic-gpt-hub` for Hub deployments. Install the Agentic Browser extension in the Chrome profile you want to control.
 
-**Before upgrading an older deployment to 0.11.0, read the [release notes and upgrade steps](docs/release-notes-v0.11.0.md).**
+**Before upgrading an older deployment to 0.12.0, read the [release notes and upgrade steps](docs/release-notes-v0.12.0.md).**
 
 ## Quick start: Standalone
 
@@ -113,7 +113,7 @@ See the [Hub runtime guide](docs/standalone-runtime.md) and [operations guide](d
 | Tools and HTTP API | [Interface reference](docs/interfaces.md) · [Tool matrix](docs/tool-contract-matrix.md) |
 | Process API and older clients | [Process cutover](docs/process-cutover.md) |
 | Browser and self-hosted deployment | [Browser deployment](docs/browser-self-hosted.md) |
-| Upgrades and operations | [0.11.0 release notes](docs/release-notes-v0.11.0.md) · [Operations](docs/operations.md) |
+| Upgrades and operations | [0.12.0 release notes](docs/release-notes-v0.12.0.md) · [Operations](docs/operations.md) · [Changelog](CHANGELOG.md) |
 | Source development, builds, and releases | [Development](docs/development/README.md) · [Releasing](docs/development/releasing.md) |
 
 ## License
