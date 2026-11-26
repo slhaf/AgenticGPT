@@ -118,10 +118,9 @@ pub(crate) fn effect(path: &[String]) -> ConfigApplyEffect {
         ["room", "secret", "getPolicy" | "upsertPolicy" | "deletePolicy" | "syncWaitTimeoutMs"] => {
             ConfigApplyEffect::LiveUpdate
         }
-        ["room"]
-        | ["skills"]
-        | ["room", "secret", ..]
-        | ["skills", "maxConcurrentInstalls"] => ConfigApplyEffect::ComponentReconfigure,
+        ["room"] | ["skills"] | ["room", "secret", ..] | ["skills", "maxConcurrentInstalls"] => {
+            ConfigApplyEffect::ComponentReconfigure
+        }
         _ => ConfigApplyEffect::LiveUpdate,
     }
 }

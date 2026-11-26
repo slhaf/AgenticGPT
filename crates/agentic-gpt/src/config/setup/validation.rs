@@ -180,9 +180,9 @@ use std::path::PathBuf;
 
 use crate::config::mcp_servers::{self, McpServerAuthConfig, McpServerConfig};
 use crate::config::{
-    self, ConfirmationProviderConfig, EventNotificationLevel, EventsConfig,
-    HttpMcpConfig, HubReportingConfig, LimitsConfig, MaxActiveProcesses, PathPolicyConfig,
-    ReportingDetail, ShellConfig, ShellInitFile, ToolNamespace, TunnelClientConfig,
+    self, ConfirmationProviderConfig, EventNotificationLevel, EventsConfig, HttpMcpConfig,
+    HubReportingConfig, LimitsConfig, MaxActiveProcesses, PathPolicyConfig, ReportingDetail,
+    ShellConfig, ShellInitFile, ToolNamespace, TunnelClientConfig,
 };
 use crate::config_templates::{
     build_config, optional_section_is_legal, InitInput, OptionalSection, RuntimeMode, SecretValue,

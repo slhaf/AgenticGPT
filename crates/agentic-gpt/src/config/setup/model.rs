@@ -1383,9 +1383,9 @@ pub(crate) fn default_optional_draft(
             init_file_mode: "default".to_string(),
             init_file_path: DEFAULT_SHELL_INIT_FILE.to_string(),
         }),
-        OptionalSection::Toolsets => OptionalSectionDraft::Toolsets(ToolsetsDraft::from_config(
-            &ToolsetConfig::default(),
-        )),
+        OptionalSection::Toolsets => {
+            OptionalSectionDraft::Toolsets(ToolsetsDraft::from_config(&ToolsetConfig::default()))
+        }
         OptionalSection::McpServers => OptionalSectionDraft::McpServers(McpServersDraft::default()),
         OptionalSection::Email => OptionalSectionDraft::Email(EmailDraft::from_config(
             &crate::config::EmailConfig::default(),

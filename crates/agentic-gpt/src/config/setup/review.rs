@@ -105,8 +105,8 @@ use crate::WorkerProfile;
 
 use super::model::{
     ConfirmationDraft, HubReportingDraft, IdentityDraft, LimitsDraft, McpServersDraft,
-    OptionalSectionDraft, SandboxDraft, SectionStatus, SetupField, SetupSession,
-    ToolsetsDraft, TunnelClientDraft, WorkspaceDraft,
+    OptionalSectionDraft, SandboxDraft, SectionStatus, SetupField, SetupSession, ToolsetsDraft,
+    TunnelClientDraft, WorkspaceDraft,
 };
 use super::validation::ValidationErrors;
 

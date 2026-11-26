@@ -4210,8 +4210,7 @@ pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
     }
     matches!(
         field,
-        SetupField::Bubblewrap
-            | SetupField::HubReportingEnabled
+        SetupField::Bubblewrap | SetupField::HubReportingEnabled
     )
 }
 

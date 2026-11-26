@@ -3030,7 +3030,10 @@ mod tests {
         fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
         let imported = Config::import(&root).unwrap();
-        assert_eq!(imported.config.toolsets.enabled_names(), vec!["room.secret"]);
+        assert_eq!(
+            imported.config.toolsets.enabled_names(),
+            vec!["room.secret"]
+        );
         let _ = fs::remove_file(root);
     }
 

@@ -384,10 +384,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     })
 }
 
-pub(crate) fn optional_section_is_legal(
-    section: OptionalSection,
-    mode: RuntimeMode,
-) -> bool {
+pub(crate) fn optional_section_is_legal(section: OptionalSection, mode: RuntimeMode) -> bool {
     match section {
         OptionalSection::Identity
         | OptionalSection::Workspace
