@@ -2,7 +2,7 @@
 
 `browser.repl` 提供 `browser` 和 `nodeRepl`，支持在代码中使用 `await`。要跨调用保留值，请赋给 `globalThis`。同一租约一次运行一段脚本。上一段还在执行时，新 `repl` 会返回 `browser_busy`。
 
-先通过 `browser.list` 查看 `extensionVersion`。扩展 0.2.0 起提供本页的导航等待、frame、语义定位、页面求值和截图选项。选择 0.1.0 浏览器时可使用基础标签页操作、DOM 快照、CSS/引用定位、点击填写按键和视口截图。
+先通过 `browser.list` 查看 `extensionVersion`。扩展 0.3.0 起支持 JavaScript 对话框和控制台日志，0.2.0 起支持导航等待、frame、语义定位、页面求值和截图选项。选择 0.1.0 浏览器时可使用基础标签页操作、DOM 快照、CSS/引用定位、点击填写按键和视口截图。
 
 ## 标签页和导航
 
@@ -38,6 +38,38 @@ Tab 和 Frame 都提供 `domSnapshot()`、`ref(refId)`、`locator(css)`、`getBy
 | `setChecked(checked)`、`selectOption(value)` | 设置可见且启用的原生复选框、单选框或下拉框。`selectOption` 接受选项值或值数组，返回选中的值。 |
 
 `await tab.evaluate(fn, arg?)` 和 `await frame.evaluate(fn, arg?)` 在指定 HTTP(S) 文档的页面上下文执行函数。通过 `arg` 传入可序列化值，函数可以返回 JSON 值或其 Promise。`undefined` 返回为 `null`。通过独立进程运行的跨站 iframe 求值使用 Chrome 125 起提供的调试子会话。
+
+## JavaScript 对话框
+
+`await tab.getJsDialog()` 返回 SDK 已捕获的当前对话框。没有对话框时返回 `undefined`。`await tab.waitForJsDialog({timeoutMs}?)` 等待当前或下一个对话框，默认等待 10 秒。两者都可以提前开始监听，例如等待人工操作或页面定时触发。Chrome 只会为开始监听后打开的对话框发出通知。
+
+对话框提供 `type`（`alert`、`confirm`、`prompt` 或 `beforeunload`）和 `message`。`prompt` 还提供 `defaultValue`。调用 `accept()` 确定，也可用 `accept(text)` 为 `prompt` 输入文字。省略文字时使用默认值。调用 `dismiss()` 取消。`alert` 的两种操作都关闭提示。`beforeunload` 的消息由浏览器显示，句柄的 `message` 为空。确定会继续离开页面，取消会留在原页。
+
+点击、导航等操作被对话框打断时，页面调用抛出 `browser_js_dialog_open`。同一租约内可在本次或后续的 `browser.repl` 读取和处理弹框，然后检查页面是否达到预期状态。
+
+```js
+try {
+  await tab.getByRole('button', { name: '删除' }).click();
+} catch (error) {
+  if (error.code !== 'browser_js_dialog_open') throw error;
+}
+const dialog = await tab.getJsDialog();
+if (dialog?.type === 'confirm') await dialog.dismiss();
+```
+
+## 控制台日志
+
+`await tab.dev.logs({filter, levels, limit}?)` 返回近期控制台消息和未捕获的 JavaScript 异常。每条记录有 `level`、`message`、ISO 8601 捕获时间 `timestamp`，有来源时还包含 `url`。
+
+- `filter` 按消息文字做区分大小写的子串匹配。
+- `levels` 接受 `debug`、`info`、`log`、`warn` 和 `error`。`warning` 等同于 `warn`。
+- 每个标签页保留最近 500 条。过滤后取最后 `limit` 条，默认 100 条，按捕获时间从早到晚返回。
+
+```js
+nodeRepl.write({ logs: await tab.dev.logs({ levels: ['warn', 'error'], limit: 20 }) });
+```
+
+日志在标签页的调试连接期间保留，跨页面导航仍可查询。关闭标签页、关闭调试连接或释放租约会清空 SDK 的缓存。建立新调试连接时，Chrome 可能补发当前页面尚保留的日志。监听对话框和采集日志时，Chrome 可能显示扩展正在调试该标签页，释放租约时会断开调试。
 
 ## 截图和坐标操作
 

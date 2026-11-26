@@ -34,3 +34,9 @@ Agentic 的 browser.acquire 要求 browserId、name 和 idleTimeoutSeconds。bro
 Room 于 06:00:13 记录 Browser 绑定失败，Tailscale 在 09:07:09 才就绪。此后地址可绑定，Laptop 到现有监听地址仍收到 ECONNREFUSED。当前 watcher 在配置 mtime 未变化时跳过，启动绑定错误没有重试。Neko 重启后持久扩展目录仍在，运行中的 Chromium 没有加载扩展。相同配对地址会创建多个 socket，同 browserId 在服务端互相替换。
 
 构建机的隔离 Chrome 和 Agentic 已确认 PNG 截图及两条原生 MCP 图片结果，正常 Chrome 重启会清空旧租约。本轮需在实际 Room 连接器复验图片。
+
+## 浏览器对话框与控制台
+
+Chromium 对话框事件只发给已启用 Page 域的调试会话。触发前启用监听，并让已派发但被弹框阻塞的操作及时结束等待。打开状态须在同一个租约的后续 REPL 仍可查询。
+
+旧版 `tab.dev.logs()` 消费 Runtime 的控制台和未捕获异常事件，每个标签页保留最近 500 条，默认输出最后 100 条匹配项，按捕获顺序排列。复用标签页调试会话，以保留导航前的记录和捕获时间。
