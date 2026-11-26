@@ -7,7 +7,7 @@ use crate::config::{PathPolicyConfig, TunnelConfig};
 use crate::startup::reload_live_config_once;
 use crate::state::{AppState, CapabilityProfile, RuntimeModel};
 use agentic_gpt_protocol::{
-    AgentMessage, BootstrapReadRequest, HubCommand, RoomDiaryActiveRequest,
+    AgentMessage, HubCommand, RoomDiaryActiveRequest, RoomEmailListRequest,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -123,59 +123,13 @@ async fn recv_response(rx: &mut mpsc::UnboundedReceiver<AgentMessage>) -> serde_
 }
 
 #[tokio::test]
-async fn normal_runtime_follows_live_room_toolset_for_bootstrap_dispatch() {
-    let workspace = unique_temp_dir("normal-live-room-bootstrap").join("workspace");
-    let guides = workspace.join("bootstrap").join("guides");
-    fs::create_dir_all(&guides).unwrap();
-    fs::write(
-            workspace.join("bootstrap").join("bootstrap.md"),
-            "---\nid: room\nkind: entrypoint\nname: Room\ndescription: Route guides\nschemaVersion: 1\n---\nstart\n",
-        )
-        .unwrap();
-    fs::write(
-        guides.join("guide.md"),
-        "---\nid: guide\nkind: guide\ntitle: Guide\nsummary: Use guide\n---\nbody\n",
-    )
-    .unwrap();
-    let (state, _rx) = command_test_state(CapabilityProfile::Normal, workspace);
-
-    let disabled = local_service::dispatch(
-        state.clone(),
-        HubCommand::RoomBootstrap {
-            request_id: "req-disabled".to_string(),
-        },
-        operation::RequestContext::new(operation::RequestIngress::Hub, "room.bootstrap"),
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(disabled["error"]["code"], "toolset_required");
-
-    let mut config = state.config.read().await.clone();
-    config.toolsets.enable(config::ToolNamespace::RoomBootstrap);
-    *state.config.write().await = config;
-
-    let enabled = local_service::dispatch(
-        state,
-        HubCommand::RoomBootstrap {
-            request_id: "req-enabled".to_string(),
-        },
-        operation::RequestContext::new(operation::RequestIngress::Hub, "room.bootstrap"),
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(enabled["entrypoint"]["id"], "room");
-    assert_eq!(enabled["guides"][0]["id"], "guide");
-}
-
-#[tokio::test]
 async fn hub_adapter_and_local_dispatcher_share_toolset_errors() {
     let workspace = unique_temp_dir("dispatcher-parity").join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
-    let command = HubCommand::RoomBootstrap {
+    let command = HubCommand::RoomEmailList {
         request_id: "req-parity".to_string(),
+        payload: RoomEmailListRequest::default(),
     };
 
     let direct = local_service::dispatch(
@@ -421,57 +375,6 @@ async fn hub_panel_failure_emits_live_event_source_without_terminal_response() {
         rx.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
     ));
-}
-
-#[tokio::test]
-async fn room_mode_dispatches_bootstrap_manifest_and_read() {
-    let workspace = unique_temp_dir("room-bootstrap-dispatch").join("workspace");
-    let guides = workspace.join("bootstrap").join("guides");
-    fs::create_dir_all(&guides).unwrap();
-    fs::write(
-            workspace.join("bootstrap").join("bootstrap.md"),
-            "---\nid: room\nkind: entrypoint\nname: Room\ndescription: Route guides\nschemaVersion: 1\n---\nstart\n",
-        )
-        .unwrap();
-    fs::write(
-        guides.join("guide.md"),
-        "---\nid: guide\nkind: guide\ntitle: Guide\nsummary: Use guide\n---\nbody\n",
-    )
-    .unwrap();
-    let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
-
-    hub::handle_hub_command(
-        state.clone(),
-        HubCommand::RoomBootstrap {
-            request_id: "req-bootstrap".to_string(),
-        },
-        None,
-    )
-    .await
-    .unwrap();
-    let response = recv_response(&mut rx).await;
-    assert_eq!(response["schemaVersion"], 1);
-    assert_eq!(response["entrypoint"]["id"], "room");
-    assert_eq!(response["guides"][0]["id"], "guide");
-
-    hub::handle_hub_command(
-        state,
-        HubCommand::RoomBootstrapRead {
-            request_id: "req-bootstrap-read".to_string(),
-            payload: BootstrapReadRequest {
-                id: "guide".to_string(),
-            },
-        },
-        None,
-    )
-    .await
-    .unwrap();
-    let response = recv_response(&mut rx).await;
-    assert_eq!(response["guide"]["id"], "guide");
-    assert_eq!(
-        response["resource"]["content"],
-        "---\nid: guide\nkind: guide\ntitle: Guide\nsummary: Use guide\n---\nbody\n"
-    );
 }
 
 #[tokio::test]

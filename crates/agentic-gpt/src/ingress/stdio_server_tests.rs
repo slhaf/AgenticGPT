@@ -676,8 +676,6 @@ async fn deterministic_tool_contract_corpus_exercises_public_dispatch() -> anyho
 async fn absent_room_tools_are_rejected_when_room_toolset_disabled() {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     for name in [
-        "bootstrap",
-        "bootstrap.read",
         "room.diary.active",
         "room.diary.read",
         "room.maintenance.status",
@@ -704,7 +702,6 @@ async fn room_toolsets_independently_control_discovery_and_calls() {
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
-    assert!(!initial_names.iter().any(|name| name == "bootstrap"));
     assert!(!initial_names.iter().any(|name| name.starts_with("room.")));
 
     let mut diary_config = server.state.config.read().await.clone();
@@ -720,7 +717,6 @@ async fn room_toolsets_independently_control_discovery_and_calls() {
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
     assert!(diary_names.iter().any(|name| name == "room.diary.active"));
-    assert!(!diary_names.iter().any(|name| name == "bootstrap"));
     assert!(!diary_names
         .iter()
         .any(|name| name.starts_with("room.email.")));
@@ -757,34 +753,13 @@ async fn room_toolsets_independently_control_discovery_and_calls() {
         .expect_err("Email enablement must not expose Secret tools");
     assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
 
-    let mut bootstrap_config = server.state.config.read().await.clone();
-    bootstrap_config
-        .toolsets
-        .enable(crate::config::ToolNamespace::RoomBootstrap);
-    *server.state.config.write().await = bootstrap_config;
-    let bootstrap_names = server
-        .current_tools()
-        .await
-        .into_iter()
-        .map(|tool| tool.name.to_string())
-        .collect::<Vec<_>>();
-    assert!(bootstrap_names.iter().any(|name| name == "bootstrap"));
-    assert!(!bootstrap_names
-        .iter()
-        .any(|name| name.starts_with("room.secret.")));
-    let bootstrap = server
-        .call(CallToolRequestParams::new("bootstrap"))
-        .await
-        .expect("enabled Room tool should reach the read path");
-    assert!(bootstrap.get("entrypoint").is_some());
-
     let mut disabled_config = server.state.config.read().await.clone();
     disabled_config.toolsets = ToolsetConfig::normal();
     *server.state.config.write().await = disabled_config;
     let error = server
-        .call(CallToolRequestParams::new("bootstrap"))
+        .call(CallToolRequestParams::new("room.email.list"))
         .await
-        .expect_err("Bootstrap must disappear after disabling its toolset");
+        .expect_err("Email must disappear after disabling its toolset");
     assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
 }
 
@@ -888,10 +863,6 @@ async fn in_process_stdio_initialize_list_and_call() -> anyhow::Result<()> {
         .call_tool(CallToolRequestParams::new("skills.list"))
         .await?;
     assert_eq!(skills.is_error, Some(false));
-    let bootstrap = client
-        .call_tool(CallToolRequestParams::new("bootstrap"))
-        .await;
-    assert!(bootstrap.is_err());
     let _ = client.cancel().await;
     server_task.await??;
     Ok(())
@@ -2604,8 +2575,6 @@ async fn room_profile_dispatches_room_memory_tools() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
     let _cleanup = TestStateCleanup::for_server(&server).await;
     std::fs::create_dir_all(server.state.config.read().await.workspace_root.join("room"))?;
-    let bootstrap = server.dispatch("bootstrap", json!({})).await?;
-    assert!(bootstrap.get("entrypoint").is_some());
     let skills = server.dispatch("skills.list", json!({})).await?;
     assert!(skills["skills"].is_array());
     let notebook = server.dispatch("room.notebook.recent", json!({})).await?;
@@ -3644,13 +3613,6 @@ fn test_state(profile: CapabilityProfile) -> AppState {
     config.policy.path = crate::config::PathPolicyConfig::default();
     config.policy.path.write = vec![workspace_root.clone()];
     config.ensure_workspace().expect("workspace");
-    let bootstrap_root = workspace_root.join("bootstrap");
-    std::fs::create_dir_all(&bootstrap_root).expect("bootstrap directory");
-    std::fs::write(
-            bootstrap_root.join("bootstrap.md"),
-            "---\nid: room\nkind: entrypoint\nname: Room Bootstrap\ndescription: Test bootstrap\nschemaVersion: 1\n---\n",
-        )
-        .expect("bootstrap entrypoint");
     let private_state =
         crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
     let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);

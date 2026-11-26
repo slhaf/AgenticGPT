@@ -130,8 +130,6 @@ pub(crate) const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("browser.release", ToolNamespace::Browser),
     ("browser.repl", ToolNamespace::Browser),
     ("browser.reset", ToolNamespace::Browser),
-    ("bootstrap", ToolNamespace::RoomBootstrap),
-    ("bootstrap.read", ToolNamespace::RoomBootstrap),
     ("file.edit", ToolNamespace::File),
     ("file.read", ToolNamespace::File),
     ("file.search", ToolNamespace::File),
@@ -278,9 +276,6 @@ fn operation_namespace(operation: &str) -> Option<ToolNamespace> {
         return Some(namespace);
     }
     match operation {
-        "bootstrap" | "bootstrap.read" | "room.bootstrap" | "room.bootstrap.read" => {
-            Some(ToolNamespace::RoomBootstrap)
-        }
         "tmux.listSessions" | "tmux.listPanes" | "tmux.capturePane" | "tmux.createSession"
         | "tmux.closeSession" => Some(ToolNamespace::Tmux),
         "mcp.listServers" | "mcp.listTools" => Some(ToolNamespace::Mcp),
@@ -430,10 +425,6 @@ pub(crate) fn hub_command_name(command: &HubCommand) -> &'static str {
         HubCommand::RoomStateRead { .. } => "room.state.read",
         HubCommand::RoomMaintenanceStatus { .. } => "room.maintenance.status",
         HubCommand::RoomMaintenanceSubmit { .. } => "room.maintenance.submit",
-        HubCommand::RoomBootstrap { .. } => "room.bootstrap",
-        HubCommand::RoomBootstrapRead { .. } => "room.bootstrap.read",
-        HubCommand::Bootstrap { .. } => "bootstrap",
-        HubCommand::BootstrapRead { .. } => "bootstrap.read",
         HubCommand::SkillsList { .. } => "skills.list",
         HubCommand::SkillsRead { .. } => "skills.read",
         HubCommand::SkillsSearch { .. } => "skills.search",

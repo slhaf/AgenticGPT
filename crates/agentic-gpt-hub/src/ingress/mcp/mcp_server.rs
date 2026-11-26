@@ -2,9 +2,9 @@ mod args;
 pub(crate) mod transport;
 
 use agentic_gpt_protocol::{
-    normalize_process_group, BootstrapReadRequest, ConfigAgentRequest, ConfigGetRequest,
-    ConfigManualRequest, ConfigUpdateRequest, EventGetRequest, EventListRequest, EventMarkRequest,
-    HubCommand, McpBatchCall, McpBatchRequest, McpCallToolRequest, McpListToolsRequest,
+    normalize_process_group, ConfigAgentRequest, ConfigGetRequest, ConfigManualRequest,
+    ConfigUpdateRequest, EventGetRequest, EventListRequest, EventMarkRequest, HubCommand,
+    McpBatchCall, McpBatchRequest, McpCallToolRequest, McpListToolsRequest,
     ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecElement, ProcessExecRequest,
     ProcessKind, ProcessListRequest, ProcessReadRequest, ProcessReadView, ProcessState,
     RoomDiaryActiveRequest, RoomDiaryReadRequest, RoomMaintenanceStatusRequest,
@@ -15,15 +15,15 @@ use agentic_gpt_protocol::{
     TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use args::{
-    AgentIdArgs, BootstrapReadArgs, EventGetArgs, EventListArgs, EventMarkArgs, HubRunGetArgs,
-    HubRunListArgs, McpBatchArgs, McpCallToolArgs, McpListServersArgs, McpListToolsArgs,
-    ProcessBatchArgs, ProcessExecArgs, ProcessIdArgs, ProcessListArgs, ProcessReadArgs,
-    RoomDiaryActiveArgs, RoomDiaryReadArgs, RoomMaintenanceStatusArgs, RoomMaintenanceSubmitArgs,
-    RoomNotebookReadArgs, RoomNotebookRecentArgs, RoomNotebookSearchArgs, RoomStateListArgs,
-    RoomStateReadArgs, SkillActivationArgs, SkillInstallArgs, SkillInstallCancelArgs,
-    SkillInstallGetArgs, SkillReadArgs, SkillRunArgs, SkillSearchArgs, TmuxCapturePaneArgs,
-    TmuxCloseSessionArgs, TmuxCreateSessionArgs, TmuxExecArgs, TmuxListPanesArgs,
-    TmuxListSessionsArgs, TmuxPasteTextArgs, UserNotifySendArgs,
+    AgentIdArgs, EventGetArgs, EventListArgs, EventMarkArgs, HubRunGetArgs, HubRunListArgs,
+    McpBatchArgs, McpCallToolArgs, McpListServersArgs, McpListToolsArgs, ProcessBatchArgs,
+    ProcessExecArgs, ProcessIdArgs, ProcessListArgs, ProcessReadArgs, RoomDiaryActiveArgs,
+    RoomDiaryReadArgs, RoomMaintenanceStatusArgs, RoomMaintenanceSubmitArgs, RoomNotebookReadArgs,
+    RoomNotebookRecentArgs, RoomNotebookSearchArgs, RoomStateListArgs, RoomStateReadArgs,
+    SkillActivationArgs, SkillInstallArgs, SkillInstallCancelArgs, SkillInstallGetArgs,
+    SkillReadArgs, SkillRunArgs, SkillSearchArgs, TmuxCapturePaneArgs, TmuxCloseSessionArgs,
+    TmuxCreateSessionArgs, TmuxExecArgs, TmuxListPanesArgs, TmuxListSessionsArgs,
+    TmuxPasteTextArgs, UserNotifySendArgs,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -52,8 +52,8 @@ use crate::utils::random_id;
 use crate::REQUEST_TIMEOUT_SECS;
 const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub 完整配置提供完整 Apps MCP 工具集。先用 agent.list 选择已启用的本地 Agent：config.manual/get/update、进程、tmux 和指定 Agent 的下游 MCP 工具以 agentId 路由；配置先查 manual，再用 get 区分持久值与已应用值；update 的保存与组件应用分别报告，传输超时不能自动重试；Room、bootstrap 与 skills 工具不接收 agentId，每次调用由 Hub 捕获当时的活动 Room 连接。process.exec/process.batch 运行 command 进程，mcp.callTool/mcp.batch 运行 kind=mcp 进程；waitSeconds 只控制本次等待，不代表完成或取消。process.* 的完整执行面为 exec、batch、read、list、cancel；process.read 使用 auto 或 status 视图统一读取状态与可用产物，status 不含产物；auto 可用 cursor 续读 command/skill 输出，status 与 cursor 不可组合，kind=mcp 的下游结果不支持输出 cursor。maxBytes 是整个 ProcessResponse 的 JSON UTF-8 字节预算，省略时使用 Agent 当前 limits.processResponseBytes（出厂默认 8192），显式范围为 4096–1048576。等待超时不取消进程。mcp.callTool 的下游结果以 mcpResult 保留完整 CallToolResult；command/skill 输出用 process.read 获取。skills.run 返回实际执行 Agent 的 agentId 和 processId；之后的 process.* 必须复用这两个值，不会按当前活动 Room 自动路由。event.list/get/mark 必须指定 agentId，只操作该 Agent 的 inbox。hub.process.* 只读 Hub 进程元数据缓存，需检查 freshness/observedAt，不能等待当前状态或获取输出/结果/取消证据；process.list/read 向 Agent 请求实时观察，失败时可能返回明确标记的缓存元数据。hub.run.* 是 Hub 持久派发回执，不等于进程状态或停止证据。先用 mcp.listServers/listTools 发现下游 MCP 服务器、工具及参数 schema；mcp.batch 返回 batchId/status 和按输入顺序的紧凑子进程结果（index/id 与 ProcessResponse 字段）；included 的 mcpResult 保留完整 CallToolResult，deferred 时用对应 agentId/processId 调 process.read 续读。批次失败不回滚已开始的调用。tmux.exec 返回提交状态和短暂窗格快照，不是完成证据；需要时用 tmux.capturePane 核验输出。skills.install 是异步安装/替换，随后用 skills.install.get/cancel；内置 skill-installer 可读但只读、不可运行，调用 skills.run 前检查 origin/readOnly。发送前先查 user.notify.channels 并检查 user.notify.send 的 accepted；桌面通道可用 accepted=false/reason 表示投递失败且 isError 仍为 false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。工具原生 JSON 位于 MCP structuredContent 并以 text 返回，顶层含 error 时 isError 为 true；参数/路由等 MCP 协议错误与工具 JSON 错误不同。annotations 是行为提示而非授权。";
-const COORDINATOR_INSTRUCTIONS: &str = "协调者配置仅暴露 8 个 Hub 原生工具：hub.info、agent.list、hub.run.list/get、hub.process.status/list 和 user.notify.channels/send。可查看 Agent 注册/在线状态、Hub 派发回执与进程缓存快照；hub.process.* 只读可能过期的 Hub 元数据缓存（检查 freshness/observedAt），不请求 Agent 执行或读取、不等待状态，也不返回输出、结果或取消证据；hub.run.* 是回执而非实时进程状态或停止证据。在线且指定 Agent 时，hub.process.* 额外进行一次 best-effort EventPanel 元数据查询并附加 events；Agent 离线或查询失败时省略 events。这些缓存快照不代表 Agent 当前进程状态，也不同于 Full 配置中的 process.read。此配置不会向 Agent 派发执行、进程控制、tmux、下游 MCP、Room、bootstrap 或 skill 操作。发送前先查 user.notify.channels 并检查 accepted：桌面通道可能返回 accepted=false/reason 而 isError=false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。结果原生 JSON 位于 MCP structuredContent 并以 text 返回；其中顶层 error 会标记 isError，参数/路由错误可作为 MCP 协议错误返回。annotations 是提示，不是授权。";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub 完整配置提供完整 Apps MCP 工具集。先用 agent.list 选择已启用的本地 Agent：config.manual/get/update、进程、tmux 和指定 Agent 的下游 MCP 工具以 agentId 路由；配置先查 manual，再用 get 区分持久值与已应用值；update 的保存与组件应用分别报告，传输超时不能自动重试；Room 与 skills 工具不接收 agentId，每次调用由 Hub 捕获当时的活动 Room 连接。process.exec/process.batch 运行 command 进程，mcp.callTool/mcp.batch 运行 kind=mcp 进程；waitSeconds 只控制本次等待，不代表完成或取消。process.* 的完整执行面为 exec、batch、read、list、cancel；process.read 使用 auto 或 status 视图统一读取状态与可用产物，status 不含产物；auto 可用 cursor 续读 command/skill 输出，status 与 cursor 不可组合，kind=mcp 的下游结果不支持输出 cursor。maxBytes 是整个 ProcessResponse 的 JSON UTF-8 字节预算，省略时使用 Agent 当前 limits.processResponseBytes（出厂默认 8192），显式范围为 4096–1048576。等待超时不取消进程。mcp.callTool 的下游结果以 mcpResult 保留完整 CallToolResult；command/skill 输出用 process.read 获取。skills.run 返回实际执行 Agent 的 agentId 和 processId；之后的 process.* 必须复用这两个值，不会按当前活动 Room 自动路由。event.list/get/mark 必须指定 agentId，只操作该 Agent 的 inbox。hub.process.* 只读 Hub 进程元数据缓存，需检查 freshness/observedAt，不能等待当前状态或获取输出/结果/取消证据；process.list/read 向 Agent 请求实时观察，失败时可能返回明确标记的缓存元数据。hub.run.* 是 Hub 持久派发回执，不等于进程状态或停止证据。先用 mcp.listServers/listTools 发现下游 MCP 服务器、工具及参数 schema；mcp.batch 返回 batchId/status 和按输入顺序的紧凑子进程结果（index/id 与 ProcessResponse 字段）；included 的 mcpResult 保留完整 CallToolResult，deferred 时用对应 agentId/processId 调 process.read 续读。批次失败不回滚已开始的调用。tmux.exec 返回提交状态和短暂窗格快照，不是完成证据；需要时用 tmux.capturePane 核验输出。skills.install 是异步安装/替换，随后用 skills.install.get/cancel；内置 skill-installer 可读但只读、不可运行，调用 skills.run 前检查 origin/readOnly。发送前先查 user.notify.channels 并检查 user.notify.send 的 accepted；桌面通道可用 accepted=false/reason 表示投递失败且 isError 仍为 false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。工具原生 JSON 位于 MCP structuredContent 并以 text 返回，顶层含 error 时 isError 为 true；参数/路由等 MCP 协议错误与工具 JSON 错误不同。annotations 是行为提示而非授权。";
+const COORDINATOR_INSTRUCTIONS: &str = "协调者配置仅暴露 8 个 Hub 原生工具：hub.info、agent.list、hub.run.list/get、hub.process.status/list 和 user.notify.channels/send。可查看 Agent 注册/在线状态、Hub 派发回执与进程缓存快照；hub.process.* 只读可能过期的 Hub 元数据缓存（检查 freshness/observedAt），不请求 Agent 执行或读取、不等待状态，也不返回输出、结果或取消证据；hub.run.* 是回执而非实时进程状态或停止证据。在线且指定 Agent 时，hub.process.* 额外进行一次 best-effort EventPanel 元数据查询并附加 events；Agent 离线或查询失败时省略 events。这些缓存快照不代表 Agent 当前进程状态，也不同于 Full 配置中的 process.read。此配置不会向 Agent 派发执行、进程控制、tmux、下游 MCP、Room 或 skill 操作。发送前先查 user.notify.channels 并检查 accepted：桌面通道可能返回 accepted=false/reason 而 isError=false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。结果原生 JSON 位于 MCP structuredContent 并以 text 返回；其中顶层 error 会标记 isError，参数/路由错误可作为 MCP 协议错误返回。annotations 是提示，不是授权。";
 
 fn default_process_wait_seconds() -> u64 {
     ProcessReadRequest::DEFAULT_WAIT_SECONDS
@@ -1642,67 +1642,6 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "room.bootstrap",
-        description = "加载本次请求捕获的活动 Room bootstrap 指引，适合开始 Room 工作前了解可用流程；返回 guides、entrypoint、revision、schemaVersion、totalGuides/returnedGuides 和 warnings，不修改文件、不接受 agentId。需要一篇完整指引时用 room.bootstrap.read；无活动 Room或路由失败会返回 error。"
-    )]
-    async fn room_bootstrap(&self) -> Result<CallToolResult, ErrorData> {
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomBootstrap {
-                request_id: random_id("req"),
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_bootstrap_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "room.bootstrap.read",
-        description = "按 room.bootstrap 返回的 id 读取活动 Room 的一篇已验证 bootstrap 指引；返回 guide、frontmatter、resource 和 warnings，不修改文件、不接受 agentId。不存在的 id、无活动 Room 或路由超时会返回对应 error。"
-    )]
-    async fn room_bootstrap_read(
-        &self,
-        params: Parameters<BootstrapReadArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomBootstrapRead {
-                request_id: random_id("req"),
-                payload: BootstrapReadRequest { id: params.0.id },
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            room_route_error_value_with_timeout(error, "room_bootstrap_read_timeout")
-        });
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "bootstrap",
-        description = "room.bootstrap 的简短名称别名：读取当前活动 Room 的 bootstrap 指引清单/摘要；只读、不接受 agentId。需要单篇内容时用 bootstrap.read；它与 room.bootstrap 使用相同的路由和错误语义。"
-    )]
-    async fn bootstrap(&self) -> Result<CallToolResult, ErrorData> {
-        self.room_bootstrap().await
-    }
-
-    #[tool(
-        name = "bootstrap.read",
-        description = "room.bootstrap.read 的简短名称别名：用 bootstrap 返回的 id 读取一篇活动 Room 指引及内容；只读、不接受 agentId，错误语义与 room.bootstrap.read 相同。"
-    )]
-    async fn bootstrap_read(
-        &self,
-        params: Parameters<BootstrapReadArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        self.room_bootstrap_read(params).await
-    }
-
-    #[tool(
         name = "skills.list",
         description = "列出活动 Room 的工作区技能及内置 skill-installer，适合发现可读内容和候选脚本；返回 skills 元数据与 warnings，条目含 origin/readOnly。内置项 origin=builtin、readOnly=true，虽可读取但不能由 skills.run 执行；只读、不接受 agentId。"
     )]
@@ -2675,10 +2614,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apps_bootstrap_tools_are_callable_through_tools_call() {
+    async fn apps_room_tools_report_an_inactive_room() {
         for (name, arguments) in [
-            ("room.bootstrap", json!({})),
-            ("room.bootstrap.read", json!({ "id": "missing" })),
+            ("room.email.list", json!({})),
+            ("skills.read", json!({ "id": "missing" })),
         ] {
             let response = transport::mcp_post(
                 State(test_state()),

@@ -112,7 +112,6 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "tmux.createSession" => &["agentId", "name", "cwd"],
         "tmux.closeSession" => &["agentId", "name"],
         "mcp.listTools" => &["agentId", "serverId"],
-        "bootstrap.read" => &["id"],
         "skills.read" => &["id"],
         "skills.search" => &["query"],
         "skills.activate" | "skills.deactivate" => &["id"],
@@ -777,10 +776,6 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 }),
             );
         }
-        "bootstrap.read" => add(
-            "id",
-            string("bootstrap 返回的 guide ID；不是任意文件路径。"),
-        ),
         "skills.list" => {
             add("query", string("不区分大小写；空值等同未提供。"));
             add(
@@ -1128,8 +1123,6 @@ fn tool_description(name: &str) -> String {
         "mcp.listTools" => "用 agentId 与 serverId 查询下游 MCP server 暴露的工具定义；返回其原始 tools/schema，便于选择 toolName 和构造 arguments。连接、配置或远端错误返回 error；只读。".to_string(),
         "mcp.list" => "本地合并发现入口：省略 serverId 列出已配置服务器，提供时连接该 server 并列出 tools；返回 servers 或原始工具定义。配置/连接错误返回 error；只读。".to_string(),
         "mcp.batch" => "把 1..=16 个下游 MCP 调用作为受管理子进程批量启动；返回批次状态、错误和各项统一进程观察。failFast 只跳过未启动项，已启动副作用不回滚；waitSeconds 仅内联等待，用 process.read 查看子进程观察，取消另用 process.cancel；timeoutSeconds 是获准并取得执行槽后的连接/请求期限（不含确认/排队）。".to_string(),
-        "bootstrap" => "加载 Room bootstrap 索引与引导摘要；返回 schemaVersion、revision、entrypoint、guide 列表/数量和 warnings。只读，不是通用文件读取器。".to_string(),
-        "bootstrap.read" => "用 bootstrap 返回的 guide ID 读取一份引导文档；返回 guide 摘要、frontmatter、resource 路径/编码/内容和 warnings。未知 ID 或读取错误返回 error；只读。".to_string(),
         "skills.list" => "发现本地 skills（含只读内置 skill-installer，可查看不可运行），返回摘要与 warnings；非空 query 不区分大小写检索，activeOnly 只保留 active 项。空 query 等同未查询；不修改技能或运行状态。".to_string(),
         "skills.setActive" => "本地激活状态合并入口：active=true 验证并激活，false 停用；返回 active/changed。仅改激活记录，不授权或启动/取消进程；错误返回 error。".to_string(),
         "skills.read" => "读取本地 skill 详情（含只读内置 skill-installer，可查看不可运行），可附 package-relative path 读取一个资源；返回 skill 元数据及可选 resource 的路径/编码/内容。不是通用文件读取；ID、资源或大小错误返回 error。".to_string(),

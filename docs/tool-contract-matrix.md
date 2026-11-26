@@ -18,9 +18,9 @@ Normal 不代表 Room：Normal 运行时需显式启用相应 `room.*` 子工具
 
 ## Standalone 公布接口面与命名空间预设
 
-Standalone 提供 Normal 和 Room 工具集预设。Normal 不选择任何 `room.*` 子项，Room 额外选择 `room.bootstrap`、`room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
-`config`、`room.email`、`room.secret` 默认不选中。七个 Room 子工具集独立控制发现、准入和资源启停，没有聚合 `room` 授权开关。
-Bootstrap 工具集对应 `bootstrap` 与 `bootstrap.read`，其他子工具集对应同名前缀的 API。显式 `toolsets.enabled` 是最终依据，不暴露 dispatch-only 别名。
+Standalone 提供 Normal 和 Room 工具集预设。Normal 不选择任何 `room.*` 子项，Room 额外选择 `room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
+`config`、`room.email`、`room.secret` 默认不选中。六个 Room 子工具集独立控制发现、准入和资源启停，没有聚合 `room` 授权开关。
+各子工具集对应同名前缀的 API。显式 `toolsets.enabled` 是最终依据，不暴露 dispatch-only 别名。
 
 Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路径策略、审计和 Process 注册表。Standalone 调用不接受仅 Hub 支持的 `agentId` 字段；所有受影响请求均拒绝旧 `needConfirm`／`confirmMethod` 字段。
 
@@ -66,8 +66,6 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `tmux.panes` | 列出/捕获窗格；不提交输入。 | `action`；capture 必须指定目标；list 可按会话筛选。 | 捕获历史默认 160 行，且有界。 | 与 action 不兼容的字段会被拒绝，不会忽略。 | Normal + Room；Hub Full 使用拆分后的 tmux 名称。 |
 | `tmux.exec` | 向 shell 窗格提交结构化命令；不声称命令已经执行完成。 | `target`、`program`；可选 args/wait/capture/confirmation。 | 提交后的等待/历史均有界。 | shell/策略/确认错误；检查窗格或 Process 结果以确认完成状态。 | Normal + Room；Hub Full 的 `tmux.exec` 对应相同契约。 |
 | `tmux.pasteText` | 将文本粘贴到非 shell 窗格/TUI；不执行 shell 命令。 | `target`、`text`；可选 `submit`、`acquireConfirmation`。 | 文本/历史均有界。 | 拒绝 shell 窗格；基础决策为 Confirm，未获准不写入窗格。 | Normal + Room；Hub Full 对应相同契约。 |
-| `bootstrap` | 读取 Room 引导入口/指南清单；不通用读取文件或创建文件。 | 无字段。 | 指南摘要和包 revision 有界。 | 包缺失/无效时返回类型化错误/警告；只读、可安全重试。 | 仅 Standalone Room；Hub Full 提供 `bootstrap` 和 `room.bootstrap` 路由。 |
-| `bootstrap.read` | 读取一份经过验证的引导指南；不读取任意路径。 | `id`。 | 有界 Markdown/frontmatter。 | 未知/无效/重复指南返回 `guide_not_found`；只读。 | 仅 Standalone Room；Hub Full 提供 `bootstrap.read` 和 `room.bootstrap.read`。 |
 | `room.diary.active` | 读取活动的 Daily、Weekly 和 Monthly Room 日记文档；不修改内容。 | 空 JSON 对象。 | 返回三层有界 Markdown 结果；每层报告经过验证的路径、可用性和可选类型化问题。 | 按层报告文档缺失、不可读或 UTF-8 无效；只读、可安全重试。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
 | `room.diary.read` | 按语义层级和周期读取一份指定 Room 日记文档；不读取任意路径。 | `layer`、`period`；period 为 `current`、每日日期或按序排列的周/月日期范围。 | 一份有界 Markdown 文档。 | 拒绝无效周期；缺失或不可读文档作为类型化层问题返回。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
 | `room.notebook.recent` | 读取当前 Room Notebook 中近期、有界的 Markdown 预览；不修改内容。 | 可选 `limit`。 | `limit` 默认为 20，范围为 1–100；预览有上限。 | 缺失或格式错误的文档会转为有界警告；只读发现。此公开名称现在使用当前 Markdown DTO，而非已退役的 passage/JSONL 格式。 | Standalone Room + Hub Full 活动 Room 路由；Coordinator 隐藏/拒绝。 |
@@ -122,13 +120,11 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `tmux.createSession`、`tmux.closeSession` | 创建/关闭持久 workspace；不属于通用进程生命周期。 | `agentId`、name/cwd；close 可能需要确认。 | cwd 受策略检查；优先复用。 | close 具有破坏性；不隐式恢复数据。 | 仅 Full；与本地语义相同。 |
 | `mcp.listServers`、`mcp.listTools` | 在受管理调用前发现下游 MCP 路由/schema。 | 汇总已连接 Agent 时，`mcp.listServers` 可省略 `agentId`；`listTools` 必须提供 `agentId`、`serverId`。 | 元数据有界。 | 只读；传输/Agent 错误明确。 | 仅 Full；对应 HTTP `/v1/mcp/servers|tools`。 |
 | `mcp.callTool` | 将一次下游 MCP 调用作为受管理 Process 启动；不是 Agent 原生文件工具。 | `agentId`、`serverId`、`toolName`；可选 `group`、JSON 对象 `arguments`、有界等待/截止时间。 | 返回 Process 响应；使用 `process.read` 或 `process.cancel` 查看生命周期。 | Hub 没有原生 `file.read` 或 `file.edit`。通用 Process 桥接不是类型化的 MCP 图像内容接口；不得依赖它保留 `file.read` 图像 Content blocks。 | 仅 Full；对应 HTTP `/v1/mcp/callTool`。 |
-| `room.bootstrap`、`room.bootstrap.read` | 访问活动 Room 引导清单/指南；不读取任意文件。 | read 必须提供指南 `id`；无 `agentId`。 | 与 Standalone Room 引导包采用相同范围/revision。 | Room 未激活/无效/未找到等错误明确，且只读。 | 仅 Full；Standalone 名称不带 `room.` 前缀。 |
 | `room.diary.active`、`room.diary.read` | 通过捕获的活动 Room 租约读取当前或指定语义 Diary Markdown；不修改内容或访问任意路径。 | `diary.active` 使用 `{}`；`diary.read` 必须提供 `layer` 和 `period`；无 `agentId`。 | 返回有界层级结果；daily/weekly/monthly 周期规则由 Agent 强制执行。 | 活动 Room 缺失返回 `room_not_active`（404），租约冲突返回 `room_state_conflict`（409），传输等待超时为 504，Agent 语义错误仍返回 JSON 错误。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/diary/active|read`。 |
 | `room.notebook.recent`、`room.notebook.search`、`room.notebook.read` | 通过活动 Room 租约读取当前 Notebook Markdown 预览、搜索当前 Markdown，或读取一份指定且经过验证的文档。 | `recent` 可选 `limit`；`search` 必须提供 `query`，可选 `limit`；`read` 必须提供 `path`；无 `agentId`。 | `limit` 默认 20，范围 1–100；搜索 `query` 不能为空且最多 256 个 Unicode 字符；Markdown 内容上限为 512 KiB。`recent`/`search` 返回当前 Markdown DTO，不是已退役的 passage/JSONL 结果。 | 按契约将缺失/格式错误文件转为有界警告；不安全路径和验证错误为类型化错误。活动租约/传输状态遵循当前 Room 投影。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/notebook/recent|search|read`。 |
 | `room.state.list`、`room.state.read` | 列出或读取 Agent 所有的 `State/entities` 根目录下有界、非 symlink 的 Markdown entity。 | `list` 使用 `{}`；`read` 必须提供安全的 entity stem `entity`；无 `agentId`。 | 按序列出 entity；读取内容上限为 512 KiB。 | 不安全/缺失 entity 和格式错误根目录为类型化错误；活动租约/传输状态遵循当前 Room 投影。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/state/list|read`。 |
 | `room.maintenance.status` | 检查 Agent 所有的仓库、schema/scaffold、执行器、workflow/remote、sync 和五 slot 就绪状态；不修改内容。 | `{}`；无 `agentId`。 | 有界状态以及可选 heads/缺失路径。 | 只读；各就绪维度保持独立，错误明确。活动租约/传输状态遵循当前 Room 投影。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/maintenance/status`。 |
 | `room.maintenance.submit` | 通过现有 Agent 仓库所有者提交明确的语义维护请求；不是 passage append/update/remove 别名。 | `items`（1–5 个唯一 `slot`/`payload`）；可选 `mode`（`local`/`workflow`）和 `waitSeconds`（0–30）；无 `agentId`。 | wait 默认 0；local/workflow 结果和同步结果保持区分。等待超时不会取消维护；没有单独等待 API，也不隐含新增确认门。 | 现有锁、clean-tree、路径、预期变更、执行器、Git 和 workflow 控制仍具权威性。活动租约/传输状态遵循当前 Room 投影。 | 仅 Full；Coordinator 隐藏并拒绝 Room 工具。对应 HTTP `/v1/room/maintenance/submit`。 |
-| `bootstrap`、`bootstrap.read` | Room 引导的 Full 配置档跨传输别名。 | read 必须提供 `id`；无 `agentId`。 | 相同的包范围/revision。 | 相同引导错误；只读。 | 仅 Full；这是有意提供的别名，不是对已删除工具的兼容别名。 |
 | `skills.list`、`skills.read`、`skills.search`、`skills.active` | 发现/读取/搜索活动 Room Skill。 | 按 read/search 具体操作提供相应字段；无 `agentId`。 | 摘要/内容有界。 | 无效/缺失/过期 Skill 状态明确。 | 仅 Full；对应 HTTP Room Skills 端点。 |
 | `skills.activate`、`skills.deactivate` | 仅更改 Skill 激活状态；不执行 Skill，也不授予权限。 | `id`；无 `agentId`。 | 幂等状态操作。 | 允许停用过期/缺失 Skill，并报告结果。 | 仅 Full；Standalone 的 `skills.setActive` 合并两种意图。 |
 | `skills.install`、`skills.install.get`、`skills.install.cancel` | 活动 Room Skill 的异步安装生命周期。 | install 必须提供 `id`、`source`；get/cancel 必须提供 `installId`；无 `agentId`。 | 等待默认 5 秒、最多 30 秒；等待超时不会取消；取消必须显式请求。 | 提供协作式取消/原子提交证据。 | 仅 Full；对应 HTTP Room 安装端点。 |

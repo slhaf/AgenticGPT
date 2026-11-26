@@ -39,16 +39,15 @@ agentic-gpt config show
 
 - `--mode standalone|hub|local` 选择运行时连接方式与配置形状。
 - `--profile normal|room` 选择默认工具集预设。Normal 不选择 Room 子工具集；Room 额外选择
-  `room.bootstrap`、`room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
+  `room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
   `config`、`room.email`、`room.secret` 在两个预设中都默认关闭；Email 和 Secret 可先启用，再逐步补齐服务配置。
   显式的 `toolsets.enabled` 是最终选择；profile 不会覆盖已有列表。
 
 可用工具集为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`config`，以及
-上述七个 `room.*` 子工具集。Room 是 API 和配置目录的归属，没有父级授权开关。
-`room.bootstrap` 管理公开的 `bootstrap`、`bootstrap.read`；其余子工具集对应同名前缀的 API。
+上述六个 `room.*` 子工具集。Room 是 API 和配置目录的归属，没有父级授权开关。
 工具集关闭后，本地 MCP 隐藏相关工具，调用时也会拒绝；Email 同步和 Secret owner 随各自子工具集排空、释放和恢复。
 关闭不会删除账户设置或持久数据。仅 Diary、Notebook、State、Maintenance 会按需准备 Room 仓库；
-Bootstrap、Email、Secret 不会因此初始化该仓库。仓库暂时无法初始化时，不会因此从已启用的工具集中隐藏 Diary、Notebook、State 或 Maintenance 工具。根目录存在且可读时，读取仍可能成功；只有操作所需资源不可用时才会报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时返回就绪状态，路径不合法时返回错误。现有仓库路径安全检查不变。`config` 关闭不影响本地 CLI/TUI 管理。
+Email 和 Secret 不会因此初始化该仓库。仓库暂时无法初始化时，不会因此从已启用的工具集中隐藏 Diary、Notebook、State 或 Maintenance 工具。根目录存在且可读时，读取仍可能成功；只有操作所需资源不可用时才会报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时返回就绪状态，路径不合法时返回错误。现有仓库路径安全检查不变。`config` 关闭不影响本地 CLI/TUI 管理。
 使用以下命令固定选择；将 `<namespace>` 替换为上列 namespace 名称：
 
 ```bash

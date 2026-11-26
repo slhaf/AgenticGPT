@@ -190,7 +190,6 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         },
         "capabilities": {
             "skills": capabilities.skills,
-            "bootstrap": capabilities.bootstrap,
             "diary": capabilities.diary,
             "notebook": capabilities.notebook,
             "notifications": capabilities.notifications,

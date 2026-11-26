@@ -331,7 +331,7 @@ def init_agent(binary: Path, root: Path, mode: str, profile: str, agent_id: str,
     config["policy"]["bubblewrap"] = False
     config["confirmationProvider"] = {"channels": []}
     config["toolsets"] = {
-        "enabled": ["agent", "file", "mcp", "process", "skills", "tmux", "room.bootstrap", "room.diary", "room.notebook", "room.state", "room.maintenance"]
+        "enabled": ["agent", "file", "mcp", "process", "skills", "tmux", "room.diary", "room.notebook", "room.state", "room.maintenance"]
     }
     if mode == "hub":
         config["hub"] = {

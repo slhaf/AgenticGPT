@@ -9,7 +9,7 @@ mod notification_tmux;
 mod process;
 mod room;
 mod secret;
-mod skill_bootstrap;
+mod skills;
 
 pub use acquire_confirmation::*;
 pub use config_api::*;
@@ -22,7 +22,7 @@ pub use notification_tmux::*;
 pub use process::*;
 pub use room::*;
 pub use secret::*;
-pub use skill_bootstrap::*;
+pub use skills::*;
 
 #[cfg(test)]
 mod room_v2_contract_tests {

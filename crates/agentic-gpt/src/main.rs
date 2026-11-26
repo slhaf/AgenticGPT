@@ -2,8 +2,6 @@
 mod agent_info;
 #[path = "storage/audit.rs"]
 mod audit;
-#[path = "room/bootstrap.rs"]
-mod bootstrap;
 #[path = "browser/browser_manual.rs"]
 mod browser_manual;
 #[path = "browser/browser_runtime.rs"]

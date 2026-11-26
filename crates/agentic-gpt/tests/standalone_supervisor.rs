@@ -252,7 +252,6 @@ fn run_smoke(
             "mcp",
             "process",
             "skills",
-            "room.bootstrap",
             "room.diary",
             "room.notebook",
             "room.state",

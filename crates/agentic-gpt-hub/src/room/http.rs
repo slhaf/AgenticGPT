@@ -1,10 +1,9 @@
 use agentic_gpt_protocol::{
-    BootstrapReadRequest, HubCommand, RoomDiaryActiveRequest, RoomDiaryReadRequest,
-    RoomMaintenanceStatusRequest, RoomMaintenanceSubmitRequest, RoomNotebookReadRequest,
-    RoomNotebookRecentRequest, RoomNotebookSearchRequest, RoomStateListRequest,
-    RoomStateReadRequest, SkillActivationRequest, SkillInstallCancelRequest,
-    SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest, SkillRunRequest,
-    SkillSearchRequest,
+    HubCommand, RoomDiaryActiveRequest, RoomDiaryReadRequest, RoomMaintenanceStatusRequest,
+    RoomMaintenanceSubmitRequest, RoomNotebookReadRequest, RoomNotebookRecentRequest,
+    RoomNotebookSearchRequest, RoomStateListRequest, RoomStateReadRequest, SkillActivationRequest,
+    SkillInstallCancelRequest, SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest,
+    SkillRunRequest, SkillSearchRequest,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -429,37 +428,6 @@ pub(crate) async fn skills_list(State(state): State<HubState>, headers: HeaderMa
     .await
 }
 
-pub(crate) async fn room_bootstrap(State(state): State<HubState>, headers: HeaderMap) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomBootstrap {
-            request_id: random_id("req"),
-        },
-        "room_bootstrap_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
-pub(crate) async fn room_bootstrap_read(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<BootstrapReadRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomBootstrapRead {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_bootstrap_read_timeout",
-        REQUEST_TIMEOUT_SECS,
-    )
-    .await
-}
-
 pub(crate) async fn skills_read(
     State(state): State<HubState>,
     headers: HeaderMap,
@@ -694,11 +662,8 @@ pub(super) fn room_value_response(value: Value) -> Response {
         | "skill_not_found"
         | "resource_not_found"
         | "install_not_found"
-        | "bootstrap_not_found"
-        | "guide_not_found"
         | "room_not_active" => StatusCode::NOT_FOUND,
-        "bootstrap_read_failed"
-        | "room_maintenance_failed"
+        "room_maintenance_failed"
         | "room_notebook_read_failed"
         | "room_notebook_write_failed"
         | "room_state_read_failed"

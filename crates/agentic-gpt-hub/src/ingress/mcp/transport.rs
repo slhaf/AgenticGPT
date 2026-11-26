@@ -296,18 +296,6 @@ pub(super) async fn call_app_tool(
                 .room_maintenance_submit(Parameters(decode_args(arguments)?))
                 .await
         }
-        "room.bootstrap" => server.room_bootstrap().await,
-        "room.bootstrap.read" => {
-            server
-                .room_bootstrap_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "bootstrap" => server.bootstrap().await,
-        "bootstrap.read" => {
-            server
-                .bootstrap_read(Parameters(decode_args(arguments)?))
-                .await
-        }
         "skills.list" => server.skills_list().await,
         "skills.read" => {
             server

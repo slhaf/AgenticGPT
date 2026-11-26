@@ -79,7 +79,7 @@ Follow the real call chain when updating a surface and its tests. Wire changes r
 For a new Hub command, check the following in order:
 
 1. Define requests/responses in the appropriate Protocol domain file (for example, process requests belong in [`process.rs`](../../crates/agentic-gpt-protocol/src/process.rs)). Update [`HubCommand`](../../crates/agentic-gpt-protocol/src/envelopes.rs) and Hub ingress mappings. Do not place every domain's DTOs in the process file.
-2. 检查 Agent [`operation.rs`](../../crates/agentic-gpt/src/operations/operation.rs) 中的 `hub_command_name`、`operation_namespace` 与操作分类，再核对 `authorize` 是否在真实入口、运行模式、profile 和工具集下正确准入。普通操作共用实时 Toolset 检查；Room 操作另核对 `is_current_room_operation` 的 Hub Profile 条件，Bootstrap 不追加该条件。名称或前缀相同不等于分类已经更新。
+2. 检查 Agent [`operation.rs`](../../crates/agentic-gpt/src/operations/operation.rs) 中的 `hub_command_name`、`operation_namespace` 与操作分类，再核对 `authorize` 是否在真实入口、运行模式、profile 和工具集下正确准入。普通操作共用实时 Toolset 检查；Room 操作另核对 `is_current_room_operation` 的 Hub Profile 条件。名称或前缀相同不等于分类已经更新。
 3. Update consumption and result-mapping branches in [`local_service.rs`](../../crates/agentic-gpt/src/operations/local_service.rs), connecting them to the actual resource owner. When exposing an MCP tool, also review its read-only, destructive, and open-world annotations; they do not replace runtime authorization.
 4. Cover allowed, denied, and disabled-capability paths through real ingress. New Room commands particularly need verification across normal Agents, disabled toolsets, and an active Room—not merely proof that a DTO serializes.
 

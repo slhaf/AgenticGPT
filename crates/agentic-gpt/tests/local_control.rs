@@ -687,7 +687,6 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         "process",
         "skills",
         "tmux",
-        "room.bootstrap",
         "room.diary",
         "room.notebook",
         "room.state",

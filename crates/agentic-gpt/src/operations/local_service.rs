@@ -8,7 +8,6 @@ use agentic_gpt_protocol::{
 use anyhow::Result;
 
 use crate::{
-    bootstrap,
     config::Config,
     mcp, notify,
     operation::{self, AdmissionError, RequestContext},
@@ -478,14 +477,6 @@ async fn dispatch_inner(
         HubCommand::RoomMaintenanceSubmit { payload, .. } => {
             map_room_maintenance_result(room_maintenance::submit(&state, payload).await, "submit")
         }
-        HubCommand::RoomBootstrap { .. } | HubCommand::Bootstrap { .. } => {
-            map_bootstrap_result(bootstrap::load(&state).await, "bootstrap_read_failed")
-        }
-        HubCommand::RoomBootstrapRead { payload, .. }
-        | HubCommand::BootstrapRead { payload, .. } => map_bootstrap_result(
-            bootstrap::read(&state, payload).await,
-            "bootstrap_read_failed",
-        ),
         HubCommand::SkillsList { .. } => {
             map_skills_result(skills::list(&state).await, "skills_list_failed")
         }
@@ -621,16 +612,6 @@ pub(crate) fn room_maintenance_error(
     })
 }
 
-fn map_bootstrap_result<T: serde::Serialize>(
-    result: std::result::Result<T, anyhow::Error>,
-    default_code: &str,
-) -> Result<serde_json::Value> {
-    Ok(match result {
-        Ok(result) => serde_json::to_value(result)?,
-        Err(error) => bootstrap_command_error(default_code, error),
-    })
-}
-
 fn map_skills_result<T: serde::Serialize>(
     result: std::result::Result<T, anyhow::Error>,
     default_code: &str,
@@ -671,18 +652,6 @@ fn skills_command_error(default_code: &str, error: anyhow::Error) -> serde_json:
             "message": if code == "not_found" { "skill not found" } else { &message }
         }
     })
-}
-
-fn bootstrap_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
-    let message = error.to_string();
-    let code = match message.as_str() {
-        "bootstrap_not_found"
-        | "guide_not_found"
-        | "bootstrap_invalid"
-        | "bootstrap_read_failed" => message.as_str(),
-        _ => default_code,
-    };
-    serde_json::json!({ "error": { "code": code, "message": message } })
 }
 
 fn install_command_error(error: anyhow::Error) -> serde_json::Value {

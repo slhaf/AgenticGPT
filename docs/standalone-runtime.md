@@ -73,7 +73,7 @@ Local 模式下 `httpMcp` 不会添加 TCP listener。
 
 传输方式不会改变本地策略。Tunnel、HTTP 和本地 Unix 入口对按 profile 选择的工具集使用相同的 Agent 工具表面和策略边界。
 
-Normal 预设不选择 Room 子工具集；Room 预设选择 bootstrap、diary、notebook、state、maintenance，Email/Secret 默认关闭。
+Normal 预设不选择 Room 子工具集；Room 预设选择 diary、notebook、state、maintenance，Email/Secret 默认关闭。
 显式的 `toolsets.enabled` 是最终依据。进入同一个 worker 的调用共享其实时配置、确认状态、审计、容量和托管执行注册表。
 每项 Room API 只检查自己的子工具集；Normal-profile worker 可显式启用某个子项而无须重启，关闭时返回 `toolset_required`。
 
@@ -158,9 +158,9 @@ printf '%s' '{"message":"需要查看部署状态","ref":"deploy-42","severity":
 ## Tunnel、HTTP 与本地工具表面
 
 Normal 与 Room profile 选择工具集预设，而不是固定最终接口面。普通工具集为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`；
-Room 核心预设额外选择 `room.bootstrap`、`room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
+Room 核心预设额外选择 `room.diary`、`room.notebook`、`room.state`、`room.maintenance`。
 `config`、`room.email`、`room.secret` 在两个预设中都默认关闭；显式 `toolsets.enabled` 是最终依据。
-七个 Room 子工具集分别控制 API 和相应资源，聚合 `room` 不再是合法值。Bootstrap 对应公开的 `bootstrap`、`bootstrap.read` 名称。
+六个 Room 子工具集分别控制 API 和相应资源。
 工具集开关决定工具是否出现在列表中，不代表依赖资源已经就绪。Browser 工具集启用后，`browser.manual` 支持离线读取内置 SDK，`browser.list` 报告扩展连接和占用状态。Room 仓库暂不可初始化时，已启用的 Diary、Notebook、State 和 Maintenance 工具仍可发现；根目录存在且可读时，读取仍可能成功，只有所需资源不可用时才报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时返回就绪状态，路径不合法时返回错误。
 
 这些过滤器只会从已公布的工具表面移除名称，不会暴露仅供 dispatch 使用的别名。
@@ -185,7 +185,6 @@ event.list, event.get, event.mark
 分别启用对应 `room.*` 子工具集后，公布相应工具名称：
 
 ```text
-bootstrap, bootstrap.read
 room.diary.active, room.diary.read
 room.notebook.recent, room.notebook.search, room.notebook.read
 room.state.list, room.state.read
@@ -245,7 +244,7 @@ arguments 或原始结果。
 
 Standalone worker 不接受 Tunnel 命令封套中的 `agentId` 字段；旧 `needConfirm`／`confirmMethod` 已移除，意外的旧版字段仍会被拒绝；事件工具另有明确的可选 `agentId` 输入，且只接受匹配当前 worker 身份的值，不会据此选择其他 Agent。
 
-worker 使用已配置的本地 Agent 身份处理调用。`bootstrap` 仅限 Room。
+worker 使用已配置的本地 Agent 身份处理调用。
 
 托管 process 准入工具（`process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 和
 `mcp.batch`）接受可选且经过校验的可读 `group`；batch 子项继承父项的 group。
@@ -363,10 +362,9 @@ agentic-gpt-hub serve --mcp-profile coordinator
 - `user.notify.channels`、`user.notify.send`
 
 Coordinator 调用绝不 dispatch Agent 命令。Session 查询只读取当前连接持有的当前/近期快照；保留的 run 记录才是持久历史。隐藏的执行、
-session-control、tmux、下游 MCP、skills、bootstrap、diary 和 notebook 工具不会出现在 `tools/list` 中，且会被 `tools/call` 拒绝。
+session-control、tmux、下游 MCP、skills、diary 和 notebook 工具不会出现在 `tools/list` 中，且会被 `tools/call` 拒绝。
 
-Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `bootstrap` 和 `bootstrap.read` 名称，保留兼容别名
-`room.bootstrap` 和 `room.bootstrap.read`，并包含 Hub 原生的汇总/通知工具。OAuth discovery metadata 会标识所选 profile，但不会公布隐藏工具。
+Full profile 提供 Hub 执行工具和 Hub 原生的汇总／通知工具。OAuth discovery metadata 会标识所选 profile，但不会公布隐藏工具。
 
 ## 配置
 

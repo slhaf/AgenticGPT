@@ -878,15 +878,6 @@ impl RoomMaintenanceSubmitArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BootstrapReadArgs {
-    #[schemars(
-        description = "room.bootstrap 返回的引导指南 ID；不存在的 ID 会由 Room 路由报告错误。"
-    )]
-    pub(super) id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct SkillReadArgs {
     #[schemars(
         description = "Room 技能 ID；可为工作区 skills/ 目录名或内置 skill-installer。内置项只读且不可运行；ID 不能为空、不能为 . 或 ..，且只允许 ASCII 字母、数字、下划线、点和连字符。"

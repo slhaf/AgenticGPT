@@ -524,8 +524,6 @@ fn toolset_description(namespace: ToolNamespace, language: UiLanguage) -> &'stat
             "Browser runtime manual and persistent JavaScript sessions."
         }
         (ToolNamespace::Browser, UiLanguage::ZhCn) => "浏览器运行时手册与持久化 JavaScript 会话。",
-        (ToolNamespace::RoomBootstrap, UiLanguage::En) => "Room bootstrap tools.",
-        (ToolNamespace::RoomBootstrap, UiLanguage::ZhCn) => "Room 引导工具。",
         (ToolNamespace::RoomDiary, UiLanguage::En) => "Room diary tools.",
         (ToolNamespace::RoomDiary, UiLanguage::ZhCn) => "Room 日记工具。",
         (ToolNamespace::RoomNotebook, UiLanguage::En) => "Room notebook tools.",

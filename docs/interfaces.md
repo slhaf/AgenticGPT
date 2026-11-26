@@ -20,7 +20,7 @@ Agent 通过一个范围狭窄的内部准入边界处理请求，不引入新�
 - 通知投递继续检查通知能力。
 
 其余普通操作先检查工具集，再检查既有能力条件。Skills 仍要求运行时 Skills 能力，Hub 的
-Room 语义读取、维护、邮件与密钥操作仍要求 Room Profile，Bootstrap 不追加该 Profile 条件。如果开关与能力
+Room 语义读取、维护、邮件与密钥操作仍要求 Room Profile。如果开关与能力
 同时不满足，普通操作先返回工具集拒绝。共享操作层普通工具集的错误码为
 `toolset_required`（包括 Room 子工具集）；本地 MCP 的调用时可用性过滤仍保留
 自己的协议错误封套。
@@ -128,8 +128,6 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 - `POST /v1/room/skills/install/get`：通过有界长轮询查询安装状态。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消安装。
 - `POST /v1/room/skills/install/cancel`：在原子提交之前请求幂等的协作式取消。
 - `POST /v1/room/skills/run`：运行活动 workspace Skill 在 `scripts/` 下的可执行脚本。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消执行。使用响应中的实际 `agentId` 和 `processId` 调用 `process.read` 或 `process.cancel`；此运行端点的输入不接收 `agentId`。
-- `POST /v1/room/bootstrap`：读取活动 Room Agent 的重复会话入口及确定性指南清单。无请求体，也不接收 `agentId`。
-- `POST /v1/room/bootstrap/read`：按 frontmatter 中的 `id` 读取一份有效引导指南。不接收 `agentId`。
 - `POST /v1/room/diary/active` 和 `POST /v1/room/diary/read`：通过捕获的活动 Room 租约读取当前或一个经过验证的 Diary 层。请求分别使用 `RoomDiaryActiveRequest` 或 `RoomDiaryReadRequest`；响应分别为 `RoomDiaryActiveResponse` 或 `RoomDiaryReadResponse`。
 - `POST /v1/room/notebook/recent`、`POST /v1/room/notebook/search` 和 `POST /v1/room/notebook/read`：读取有界的当前 Markdown 预览、搜索当前 Markdown，或读取一份经过验证的 Notebook 文档。`recent` 和 `search` 使用 `RoomNotebookResultsResponse`；`read` 使用 `RoomNotebookReadResponse`。
 - `POST /v1/room/state/list` 和 `POST /v1/room/state/read`：列出或读取有界的 `State/entities` Markdown 文档，分别使用 `RoomStateListResponse` 或 `RoomStateReadResponse`。
@@ -381,8 +379,7 @@ OAuth 发现路由：
 - `/oauth/token`
 
 Hub MCP 配置档在 Hub 启动时通过 `--mcp-profile full|coordinator` 或
-`AGENTIC_GPT_HUB_MCP_PROFILE` 选择。`full` 是默认值，保留执行接口面和跨传输的
-`bootstrap` 别名。`coordinator` 只公布 Hub 原生工具，包括 `hub.process.status` 和
+`AGENTIC_GPT_HUB_MCP_PROFILE` 选择。`full` 是默认值，保留执行接口面。`coordinator` 只公布 Hub 原生工具，包括 `hub.process.status` 和
 `hub.process.list`；这些工具只读取缓存的进程元数据，不派发执行。完整配置档和
 Standalone Tunnel 文档见 [`standalone-runtime.md`](standalone-runtime.md)。
 
@@ -399,138 +396,6 @@ Skill 安装状态遵循以下规则：
 - 显式替换前，现有 Skill 会归档到 `skills/.archive/<id>/`。
 - 远程文件 URL 必须使用公开 HTTPS，并在 DNS 解析和重定向后重新验证；部署方可通过
   `skills.allowedHosts` 收窄允许的主机。
-
-## Room 会话引导包
-
-Room Agent 每次调用时都会直接读取配置的 `workspaceRoot` 中重复使用的会话引导包。读取不会创建文件、安装默认值、缓存索引或要求重新加载。固定布局如下：
-
-```text
-<workspaceRoot>/bootstrap/
-├── bootstrap.md
-└── guides/
-    ├── diary.md
-    ├── notebook.md
-    └── ...
-```
-
-`bootstrap.md` 必需；`guides/` 可选。只有该目录下直接包含的、常规、非隐藏且扩展名为小写 `.md` 的文件会被视为指南；嵌套目录、隐藏条目和其他扩展名都会忽略。引导根目录和入口文件不得为 symlink。缺少引导包是正常的 404（`bootstrap_not_found`）；服务不会自动创建或个性化引导包。
-
-入口文件以一个封闭的 YAML 对象开头。必需字段如下：
-
-```markdown
----
-id: room
-kind: entrypoint
-name: Room 会话引导
-description: 会话初始化与指南路由。
-schemaVersion: 1
----
-
-Room 会话开始时，请阅读下列相关指南。
-```
-
-`id` 使用保守的 ASCII 语法 `[A-Za-z0-9_.-]+`；`.` 和 `..` 不是有效 ID。`kind` 必须是 `entrypoint`，`name` 和 `description` 必须是非空字符串，`schemaVersion` 必须是整数 `1`。入口响应会保留原始 frontmatter。入口元数据无效时，整个包以 `bootstrap_invalid` 失败。
-
-每份指南都使用相同的封闭 frontmatter 约定：
-
-```markdown
----
-id: diary
-kind: guide
-title: Diary 约定
-summary: 保持上下文连续，同时不取代 Diary 工具 schema。
-loadPolicy: contextual
-priority: 80
-loadWhen:
-  - 会话需要延续此前的个人或项目上下文。
-toolBindings:
-  - room.diary.active
-  - room.diary.read
-  - room.maintenance.submit
-tags:
-  - 连续性
----
-
-读取当前或指定文档时使用语义化 Diary 工具；所有变更都通过维护提交契约执行。
-```
-
-指南必需字段为 `id`、`kind: guide`、`title` 和 `summary`。`loadPolicy` 默认为 `on_demand`，可选 `startup`、`contextual` 或 `on_demand`。`priority` 默认为 `0`，且为有符号 32 位整数。`loadWhen`、`toolBindings` 和 `tags` 默认为空数组，其中的非空字符串按编写顺序保留。对类型化 V1 行为而言，未知字段会被忽略，但仍保留在 `room.bootstrap.read` 返回的原始 `frontmatter` 中。
-
-指南元数据是通用的。例如，workspace 可编写如下指南，而不改变运行时：
-
-```markdown
-<!-- guides/notebook.md -->
----
-id: notebook
-kind: guide
-title: Notebook 连续性
-summary: 先搜索并阅读持久化的项目内容，再作出假设。
-loadPolicy: contextual
-toolBindings: [room.notebook.search, room.notebook.read, room.maintenance.submit]
-tags: [项目上下文]
----
-MCP 参数 schema 应保留在工具定义中；修改 Notebook 时使用维护提交。
-```
-
-```markdown
-<!-- guides/execution.md -->
----
-id: execution
-kind: guide
-title: 执行方式选择
-summary: 有意识地选择受管理进程或持久窗格。
-loadPolicy: startup
-priority: 90
-toolBindings: [process.exec, process.batch, process.read, process.cancel, tmux.exec]
-tags: [运维, 安全]
----
-参数以工具 schema 为准；工作流、确认和恢复说明见本指南。
-```
-
-```markdown
-<!-- guides/skills.md -->
----
-id: skills
-kind: guide
-title: Skill 选择
-summary: 使用已安装的工作流前，先发现并阅读相关 Skill。
-loadPolicy: on_demand
-toolBindings: [skills.list, skills.read, skills.run]
-tags: [工作流]
----
-`toolBindings` 只是路由提示，不代表权限已授予，也不保证相应工具可用。
-```
-
-MCP schema 仍是工具可用性和参数的事实来源。指南说明选择、顺序、约定、安全、示例和恢复行为；不会复制完整 MCP schema、授予授权，也不会断言其中列出的每个绑定当前都已暴露。
-
-`room.bootstrap` 会内联返回入口文件，并返回扁平清单、包 `revision`、计数和警告。有效指南按 `priority` 降序、再按 `id` 升序排列；最多返回 64 条摘要。`totalGuides` 统计所有有效且无重复的指南，因此超过 64 条上限的有效指南仍可通过 `room.bootstrap.read` 读取，也仍会影响 `revision`。重复 ID 会排除所有发生冲突的指南。无效的可选指南会以警告排除，不会导致整个包失败。
-
-`room.bootstrap.read` 接受 `{ "id": "diary" }`，会再次验证入口文件和指南包，并返回选中的摘要、原始指南 frontmatter、有界 Markdown 资源以及相关警告。它不是通用路径读取器。未知、无效、因 ID 重复而排除或以其他方式不可用的 ID 会返回 `guide_not_found`。
-
-完整的 YAML frontmatter 起始块（包括两个 `---` 分隔符）必须在前 1,048,576 字节（1 MiB）内结束；结束分隔符恰好位于该边界时也接受。此元数据上限独立于返回内容截断。超限的入口文件返回 `bootstrap_invalid`；超限的可选指南以 `guide_frontmatter_invalid` 排除。整个文件仍会被流式读取，以完成 UTF-8 验证、行计数、SHA-256 计算和包 revision 计算。
-
-每个文本资源都是 UTF-8 Markdown，`mediaType` 为 `text/markdown`：
-
-- `sizeBytes` 和 `sha256` 描述完整原文件；`returnedSizeBytes` 描述实际返回的内容。
-- 入口文件上限为 65,536 字节，指南上限为 262,144 字节。
-- 有效但过大的文档会返回前缀，设置 `truncated: true`，并附带 `entrypoint_truncated`
-  或 `guide_truncated` 警告。
-- 截断时优先使用上限内最后一个完整换行；否则截到有效 UTF-8 边界。
-- `totalLines` 和 `returnedThroughLine` 是从 1 开始的逻辑行数，`omittedFromLine` 标识首个
-  省略行，`lastLineComplete` 用来区分完整行前缀与部分行前缀。
-
-错误和警告分为三组：
-
-- 稳定的警告前缀包括 `entrypoint_truncated`、`guide_truncated`、`guides_truncated`、
-  `guides_dir_symlink_ignored`、`guide_dir_entry_unreadable`、`guide_symlink_ignored`、
-  `guide_unreadable`、`guide_non_utf8`、`guide_frontmatter_invalid`、`guide_metadata_invalid`
-  和 `guide_duplicate_id`。
-- 包级失败使用 `bootstrap_not_found`、`bootstrap_invalid` 或 `bootstrap_read_failed`。
-- Room 路由还会返回 `room_not_active`、`room_state_conflict`，以及上述 Hub 派发错误。
-
-这些操作为只读、可安全重试、非破坏性，且不会触发具有后果的副作用。
-
-MCP 工具为 `room.bootstrap` 和 `room.bootstrap.read`。对应的 GPT Actions 路由是 `POST /v1/room/bootstrap` 和 `POST /v1/room/bootstrap/read`，operation ID 为 `roomBootstrap` 和 `roomBootstrapRead`。两个接口都限定于 Room，不接收 `agentId`。
 
 ## 本地 Agent 传输
 

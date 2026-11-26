@@ -29,10 +29,9 @@ use super::room::{
 use super::secret::{
     RoomSecretDeleteRequest, RoomSecretGetRequest, RoomSecretListRequest, RoomSecretUpsertRequest,
 };
-use super::skill_bootstrap::{
-    BootstrapReadRequest, SkillActivationRequest, SkillInstallCancelRequest,
-    SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest, SkillRunRequest,
-    SkillSearchRequest,
+use super::skills::{
+    SkillActivationRequest, SkillInstallCancelRequest, SkillInstallGetRequest, SkillInstallRequest,
+    SkillReadRequest, SkillRunRequest, SkillSearchRequest,
 };
 
 fn is_false(value: &bool) -> bool {
@@ -261,20 +260,6 @@ pub enum HubCommand {
         request_id: String,
         payload: RoomMaintenanceSubmitRequest,
     },
-    #[serde(rename = "room.bootstrap")]
-    RoomBootstrap { request_id: String },
-    #[serde(rename = "room.bootstrap.read")]
-    RoomBootstrapRead {
-        request_id: String,
-        payload: BootstrapReadRequest,
-    },
-    #[serde(rename = "bootstrap")]
-    Bootstrap { request_id: String },
-    #[serde(rename = "bootstrap.read")]
-    BootstrapRead {
-        request_id: String,
-        payload: BootstrapReadRequest,
-    },
     #[serde(rename = "skills.list")]
     SkillsList { request_id: String },
     #[serde(rename = "skills.read")]
@@ -378,10 +363,6 @@ impl HubCommand {
             | Self::RoomStateRead { request_id, .. }
             | Self::RoomMaintenanceStatus { request_id, .. }
             | Self::RoomMaintenanceSubmit { request_id, .. }
-            | Self::RoomBootstrap { request_id }
-            | Self::RoomBootstrapRead { request_id, .. }
-            | Self::Bootstrap { request_id }
-            | Self::BootstrapRead { request_id, .. }
             | Self::SkillsList { request_id }
             | Self::SkillsRead { request_id, .. }
             | Self::SkillsSearch { request_id, .. }

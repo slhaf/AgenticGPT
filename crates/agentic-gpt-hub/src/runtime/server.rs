@@ -140,11 +140,6 @@ pub(crate) async fn serve(
             "/v1/room/maintenance/submit",
             post(room::http::room_maintenance_submit),
         )
-        .route("/v1/room/bootstrap", post(room::http::room_bootstrap))
-        .route(
-            "/v1/room/bootstrap/read",
-            post(room::http::room_bootstrap_read),
-        )
         .route("/v1/room/skills/list", post(room::http::skills_list))
         .route("/v1/room/skills/read", post(room::http::skills_read))
         .route("/v1/room/skills/search", post(room::http::skills_search))

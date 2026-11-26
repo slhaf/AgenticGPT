@@ -57,9 +57,6 @@ pub(crate) enum ToolNamespace {
     Skills,
     Tmux,
     Browser,
-    #[serde(rename = "room.bootstrap")]
-    #[value(name = "room.bootstrap")]
-    RoomBootstrap,
     #[serde(rename = "room.diary")]
     #[value(name = "room.diary")]
     RoomDiary,
@@ -91,7 +88,6 @@ impl ToolNamespace {
             Self::Skills,
             Self::Tmux,
             Self::Browser,
-            Self::RoomBootstrap,
             Self::RoomDiary,
             Self::RoomNotebook,
             Self::RoomState,
@@ -111,7 +107,6 @@ impl ToolNamespace {
             Self::Skills => "skills",
             Self::Tmux => "tmux",
             Self::Browser => "browser",
-            Self::RoomBootstrap => "room.bootstrap",
             Self::RoomDiary => "room.diary",
             Self::RoomNotebook => "room.notebook",
             Self::RoomState => "room.state",
@@ -124,8 +119,7 @@ impl ToolNamespace {
     pub(crate) fn is_room(self) -> bool {
         matches!(
             self,
-            Self::RoomBootstrap
-                | Self::RoomDiary
+            Self::RoomDiary
                 | Self::RoomNotebook
                 | Self::RoomState
                 | Self::RoomMaintenance

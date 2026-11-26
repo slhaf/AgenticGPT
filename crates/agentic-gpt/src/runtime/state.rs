@@ -117,7 +117,6 @@ impl RuntimeModel {
         match (self.transport, self.profile) {
             (Transport::Hub, CapabilityProfile::Normal) => Capabilities {
                 skills: false,
-                bootstrap: false,
                 diary: false,
                 notebook: false,
                 notifications: true,
@@ -126,7 +125,6 @@ impl RuntimeModel {
             | (Transport::TunnelStdio, CapabilityProfile::Room)
             | (Transport::LocalUnix, CapabilityProfile::Room) => Capabilities {
                 skills: true,
-                bootstrap: true,
                 diary: true,
                 notebook: true,
                 notifications: true,
@@ -134,7 +132,6 @@ impl RuntimeModel {
             (Transport::TunnelStdio, CapabilityProfile::Normal)
             | (Transport::LocalUnix, CapabilityProfile::Normal) => Capabilities {
                 skills: true,
-                bootstrap: true,
                 diary: false,
                 notebook: false,
                 notifications: false,
@@ -146,7 +143,6 @@ impl RuntimeModel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Capabilities {
     pub(crate) skills: bool,
-    pub(crate) bootstrap: bool,
     pub(crate) diary: bool,
     pub(crate) notebook: bool,
     pub(crate) notifications: bool,
