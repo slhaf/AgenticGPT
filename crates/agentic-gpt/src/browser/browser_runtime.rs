@@ -73,6 +73,7 @@ struct LeaseInfo {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserList {
+    listener_ready: bool,
     runtime_available: bool,
     browsers: Vec<BrowserInfo>,
     leases: Vec<LeaseInfo>,
@@ -279,7 +280,13 @@ impl BrowserRuntime {
         }
     }
 
-    pub(crate) fn list(&self) -> BrowserList {
+    pub(crate) async fn list(&self) -> BrowserList {
+        let listener_ready = self
+            .listener
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|listener| !listener.task.is_finished());
         let registry = self.registry.lock();
         let mut browsers: Vec<_> = registry
             .connections
@@ -290,6 +297,7 @@ impl BrowserRuntime {
             .collect();
         browsers.sort_unstable_by(|first, second| first.browser_id.cmp(&second.browser_id));
         BrowserList {
+            listener_ready,
             runtime_available: !registry.connections.is_empty(),
             browsers,
             leases: registry

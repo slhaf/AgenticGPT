@@ -1105,7 +1105,7 @@ fn tool_description(name: &str) -> String {
         "browser.repl" => "在指定浏览器租约的持续会话中执行 JavaScript。先用 browser.manual 查阅 SDK。脚本可以读取和操作网页。执行超时后，已经发生的网页动作仍然有效。".to_string(),
         "browser.reset" => "清空指定租约的 JavaScript 会话和页面引用。重置后可继续使用同名租约。".to_string(),
         "browser.release" => "结束指定租约并释放浏览器控制权。".to_string(),
-        "browser.list" => "列出本 Agent 已发现的浏览器及当前租约。connected 表示在线，busy 表示浏览器已有占用。使用在线浏览器的 browserId 申请租约。".to_string(),
+        "browser.list" => "列出本 Agent 的扩展监听状态、已发现浏览器及当前租约。listenerReady 表示 WebSocket 监听已启动，runtimeAvailable 表示至少有一个扩展连接；两者含义不同。connected 表示浏览器在线，busy 表示浏览器已有占用。使用在线浏览器的 browserId 申请租约。".to_string(),
         "file.read" => "按文件路径策略读取 UTF-8 文件或目录元数据；单次 path 与 requests 批次二选一。文本返回 content/可选 metadata/nextStartLine；PNG/JPEG/WebP 及 GIF 以 image content blocks 返回，GIF 为采样 PNG 帧并带帧元数据。批次按序逐项给状态/错误，单项失败不阻断其他项；目录须请求 metadata，图片不支持行范围。只读。".to_string(),
         "file.search" => "在允许的工作区路径搜索文本，支持字面/正则、glob 和有序批次；返回匹配位置/上下文及跳过、裁剪状态，批次逐项标明结果或错误。空查询、无效正则/glob 或路径会失败；上下文可能按配置裁剪。只读。".to_string(),
         "file.edit" => "用 Codex apply_patch 更新、新增、删除或移动工作区文件；成功返回 status/changed/changes（path/action/可选 destination），部分失败保留已完成项和错误，不公开 diff/revision。无效补丁、路径策略、确认拒绝或并发冲突会报错；有效操作会写盘，acquireConfirmation 可请求一次确认。".to_string(),

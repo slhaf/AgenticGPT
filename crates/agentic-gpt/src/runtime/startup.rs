@@ -384,6 +384,7 @@ async fn watch_live_config(
     supervised: bool,
     _http_updates: Option<watch::Sender<config::HttpMcpConfig>>,
 ) {
+    let mut browser_retry = crate::config_runtime::BrowserRetryState::default();
     let mut last_modified = fs::metadata(&state.config_path)
         .and_then(|meta| meta.modified())
         .ok();
@@ -393,11 +394,14 @@ async fn watch_live_config(
             .and_then(|meta| meta.modified())
             .ok();
         if modified.is_none() || modified == last_modified {
+            crate::config_runtime::retry_browser_listener_if_due(&state, &mut browser_retry).await;
             continue;
         }
         last_modified = modified;
 
-        let resolved = match reload_live_config_once(&state).await {
+        let result = reload_live_config_once(&state).await;
+        crate::config_runtime::browser_retry_after_config_apply(&state, &mut browser_retry).await;
+        let resolved = match result {
             Ok(resolved) => resolved,
             Err(error) => {
                 if !supervised {

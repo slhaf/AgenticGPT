@@ -494,7 +494,7 @@ public-origin editor、secret-reference editor 与 JSON array/`null` allow-host 
 | `browser.listenAddr` | Agentic 接受扩展 WebSocket 连接的地址，默认 `127.0.0.1:39421`。 |
 | `browser.pairingToken` | 配对密钥。扩展连接该 Agentic 时提供这个值。配置 API 读取和交互式 Review 会对密钥脱敏。 |
 
-启用 `toolsets.enabled` 中的 `browser` 并配置密钥后，Agentic 监听扩展连接。启用工具集后可以离线使用 `browser.manual`。用 `browser.list` 查看浏览器是否已连接、是否占用。安装和配对见 [Browser 部署指南](browser-self-hosted.zh-CN.md)。
+启用 `toolsets.enabled` 中的 `browser` 并配置密钥后，Agentic 监听扩展连接；监听失败时会按递增间隔重试，最多间隔 60 秒。启用工具集后可以离线使用 `browser.manual`。用 `browser.list` 查看 `listenerReady`（监听是否启动）、`runtimeAvailable`（是否有扩展连接）及浏览器占用。安装和配对见 [Browser 部署指南](browser-self-hosted.zh-CN.md)。
 
 Local/Standalone 的 Unix MCP 路径位于 `~/.agentic_gpt/runtime/agent/<agentId>/`，Standalone supervisor 的运行时目录位于 `~/.agentic_gpt/runtime/tunnel/<agentId>/`。这些是按连接身份分隔的 runtime 路径；事件、Process 和 Skill 私有持久状态仍共享 `~/.agentic_gpt/state/`，不会随 `agentId` 切换。
 

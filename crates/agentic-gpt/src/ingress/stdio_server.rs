@@ -1625,7 +1625,9 @@ impl AgentMcpServer {
 
     async fn dispatch_browser_list(&self, arguments: Value) -> Result<Value> {
         let _: EmptyArgs = from_value(arguments)?;
-        Ok(serde_json::to_value(self.state.browser_runtime.list())?)
+        Ok(serde_json::to_value(
+            self.state.browser_runtime.list().await,
+        )?)
     }
 
     async fn audit_browser(&self, context: BrowserAuditContext) {

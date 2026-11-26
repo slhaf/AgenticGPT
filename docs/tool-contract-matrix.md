@@ -4,7 +4,7 @@
 
 确定性的 Agent 语料集和 `scripts/check_contract_parity.py` 是当前行为的运行时/schema 权威依据。本矩阵仅作说明：`scripts/evaluate_tool_contracts.py` 的形状预测探针不能证明 schema 有效，也不能证明请求会被派发。
 
-工具集启用只表示工具可被发现和调用，不代表依赖运行环境或数据仓库已就绪。Browser 工具集启用后可以离线读手册。扩展尚未连接时，`browser.list` 报告 `runtimeAvailable: false`，选择离线浏览器申请租约会返回 `browser_not_connected`。Room 仓库暂不可初始化时，已启用的 Room 工具仍保留；根目录存在且可读时，读取仍可能成功，只有所需资源不可用时才报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时用现有状态字段报告就绪情况，路径不合法时返回错误。
+工具集启用只表示工具可被发现和调用，不代表依赖运行环境或数据仓库已就绪。Browser 工具集启用后可以离线读手册。`browser.list` 的 `listenerReady` 表示扩展 WebSocket 监听已启动，`runtimeAvailable` 表示至少有一个扩展连接；监听已就绪但尚无浏览器连接时前者为 `true`、后者为 `false`。选择离线浏览器申请租约会返回 `browser_not_connected`。Room 仓库暂不可初始化时，已启用的 Room 工具仍保留；根目录存在且可读时，读取仍可能成功，只有所需资源不可用时才报告相应问题。`room.maintenance.status` 仅在仓库路径合法且可检查时用现有状态字段报告就绪情况，路径不合法时返回错误。
 
 当前远程 Room 调用方应协调配对的 Hub 和 Agent 工件，并从 [`../openapi/hub.yaml`](../openapi/hub.yaml) 刷新导入的 schema。当前九项 Room 文档／维护操作使用现有语义 Agent DTO 和 camelCase JSON 请求体：`room.diary.active`/`room.diary.read`、`room.notebook.recent`/`room.notebook.search`/`room.notebook.read`、`room.state.list`/`room.state.read`，以及 `room.maintenance.status`/`room.maintenance.submit`。空请求使用 `{}`；远程 Room 操作均不接受 `agentId`。`room.notebook.recent` 和 `room.notebook.search` 现在返回当前 Markdown 预览/结果，不再返回已退役的 passage 型 JSONL 格式。
 
@@ -40,7 +40,7 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `browser.repl` | 在此前取得的租约中运行一段 JavaScript。 | `name`、非空 `code`；可选 `timeoutMs`、`title`。 | 代码限制 256 KiB UTF-8 字节。执行超时范围 1–120,000 ms，默认 20,000 ms。标题最多 128 个 Unicode 标量值。 | 返回文本、图像或结构化结果。超时和断线后根据实际页面状态继续。 | Normal + Room。 |
 | `browser.reset` | 重建某个租约的 JavaScript 上下文。 | `name`。 | 保留已绑定的浏览器和执行租约。 | 上下文变量在重置后需要重新初始化。 | Normal + Room。 |
 | `browser.release` | 回收 JavaScript 上下文和浏览器执行租约。 | `name`。 | 名称不存在时返回 `released: false`。 | 扩展收尾当前动作后允许另一个租约。 | Normal + Room。 |
-| `browser.list` | 查看已发现浏览器的连接和占用状态，以及本地租约。 | 无字段。 | 按浏览器 ID 选择 `acquire` 的目标。 | 连接状态不改变工具集的启用状态。 | Normal + Room。 |
+| `browser.list` | 查看扩展监听状态、已发现浏览器连接和占用状态，以及本地租约。 | 无字段。 | `listenerReady` 表示监听已启动；`runtimeAvailable` 表示至少有一个浏览器连接。按浏览器 ID 选择 `acquire` 的目标。 | 连接状态不改变工具集的启用状态。 | Normal + Room。 |
 | `file.read` | 读取 UTF-8 文本、受支持的栅格图像及可选元数据；不运行 shell 或搜索进程，也不写入。 | 扁平 `path` 形式，或按序排列且形状相同的 `requests`（1–32 项），两种形式互斥；可选 `metadata`；文本可指定含首尾行的 `startLine`/`endLine`。 | 文本行为和范围不变。PNG/JPEG/WebP/GIF 图像以顶层 MCP image Content blocks 和 JSON `structuredContent` 元数据返回（不重复 base64）。静态 `image` 元数据包含检测到的 MIME 和尺寸；GIF 元数据包含画布尺寸，以及按序排列、带源时间戳的 PNG `frames`。批量 `results` 保持输入顺序，并带从 0 开始的 `index`；顶层 content 按项目顺序排列，随后按帧顺序排列。每张图像/帧的解码上限为 16 Mi 像素；GIF 遍历累计上限为 64 Mi 像素；每次 `tools/call` 序列化图像负载上限为 8 MiB。GIF 最多返回 8 个按时长均匀抽取的样本（包括播放端点），并以毫秒为单位保留源播放帧起始时间戳。 | 路径/UTF-8/大小/超长行及图像解码/范围错误均为类型化错误；批处理按序保留部分错误语义；可安全重试、非破坏性。 | Normal + Room；两个接入路径使用相同文件 schema。 |
 | `file.search` | 在进程内执行字面量/正则搜索；不调用 shell 或外部搜索回退。 | 扁平 `path`/`query` 形式，或按序排列且形状相同的 `requests`（1–32 项），两种形式互斥；可选模式/glob/上下文/范围。 | 正常成功时只返回匹配项；是否提供裁剪/截断/跳过文件证据取决于具体情况。每次搜索范围之外还受 20k 文件/128 MiB 聚合扫描和约 1 MiB 响应上限约束。 | 无效正则/glob/路径或类型化参数错误；只读且有界。 | Normal + Room；两个接入路径使用相同搜索 schema。 |
 | `file.edit` | 对 UTF-8 文件应用完整的 Codex apply-patch 补丁；不接受模型提供的 revision guard。 | `patch`，以及可选的 `acquireConfirmation`；补丁可跨多个文件执行 Add/Delete/Update/Move。 | 解析补丁及目标路径后统一判定策略、按需确认；获准后读取源内容、应用补丁、确定性加锁并暂存验证，提交前复核源文件快照，使用临时文件提交。Add File 只能在现有路径策略范围内创建缺失父目录；Move 语义不变。 | 在提交前，路径/上下文/UTF-8/大小/竞态失败或策略要求的确认未获准都不会写入文件内容；预检拒绝或确认失败时会清理 Add 创建的空父目录。物理提交开始后，部分失败会按顺序报告，不跨文件回滚；审计保留内部 revision，但不会在响应中暴露。 | Normal + Room；仅 Standalone。 |

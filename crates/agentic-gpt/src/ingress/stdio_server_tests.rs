@@ -353,7 +353,7 @@ async fn browser_offline_dispatch_preserves_audit_without_script_body() -> anyho
     let source = "console.log('browser-audit-secret')";
     assert_eq!(
         server.dispatch("browser.list", json!({})).await?,
-        json!({"runtimeAvailable":false,"browsers":[],"leases":[]})
+        json!({"listenerReady":false,"runtimeAvailable":false,"browsers":[],"leases":[]})
     );
     let value = server
         .dispatch(

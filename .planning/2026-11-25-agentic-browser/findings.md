@@ -28,3 +28,9 @@ Agentic 的 browser.acquire 要求 browserId、name 和 idleTimeoutSeconds。bro
 ## SDK v1 目标
 
 注入全局 browser 和 nodeRepl。以 globalThis 存放跨调用状态，支持顶层 await。browser.tabs.list/get/new 和 Tab 的 id、goto/url/title/close、domSnapshot、locator(selector)/ref(refId) 的 click/fill/press、screenshot。截图返回 {mimeType,data}，用 nodeRepl.emitImage 输出。nodeRepl.write 输出文本或 JSON。优先复用 fork 的快照和操作脚本。实施后以真实代码和验证收敛手册。
+
+## 重启故障复核
+
+Room 于 06:00:13 记录 Browser 绑定失败，Tailscale 在 09:07:09 才就绪。此后地址可绑定，Laptop 到现有监听地址仍收到 ECONNREFUSED。当前 watcher 在配置 mtime 未变化时跳过，启动绑定错误没有重试。Neko 重启后持久扩展目录仍在，运行中的 Chromium 没有加载扩展。相同配对地址会创建多个 socket，同 browserId 在服务端互相替换。
+
+构建机的隔离 Chrome 和 Agentic 已确认 PNG 截图及两条原生 MCP 图片结果，正常 Chrome 重启会清空旧租约。本轮需在实际 Room 连接器复验图片。

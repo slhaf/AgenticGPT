@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use agentic_gpt_protocol::ConfigApplyStatus;
@@ -17,6 +17,42 @@ use crate::{
     config::{Config, HttpMcpConfig},
     state::AppState,
 };
+
+const BROWSER_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(2);
+const BROWSER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+pub(crate) struct BrowserRetryState {
+    delay: Duration,
+    next_attempt: Option<Instant>,
+}
+
+impl BrowserRetryState {
+    fn failed(&mut self) {
+        self.delay = (self.delay * 2).clamp(BROWSER_RETRY_INITIAL_DELAY, BROWSER_RETRY_MAX_DELAY);
+        self.next_attempt = Some(Instant::now() + self.delay);
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+pub(crate) async fn browser_retry_after_config_apply(
+    state: &AppState,
+    retry: &mut BrowserRetryState,
+) {
+    retry.reset();
+    if state
+        .config_runtime
+        .errors
+        .read()
+        .await
+        .contains_key("browser")
+    {
+        retry.failed();
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct ConfigRuntime {
@@ -174,7 +210,7 @@ pub(crate) async fn apply_locked(state: &AppState, desired: Config) -> Result<()
                 errors.remove("browser");
             }
             Err(error) => {
-                crate::utils::log_warn(format!("browser listener failed: {error}"));
+                crate::utils::log_warn(format!("browser listener failed: {error:#}"));
                 next.browser = old.browser.clone();
                 errors.insert("browser".into(), "browser_listener_failed".into());
             }
@@ -296,13 +332,61 @@ pub(crate) async fn start_browser_listener(state: &AppState) {
     let _apply = state.config_runtime.apply_lock.lock().await;
     let config = state.config.read().await.clone();
     if let Err(error) = configure_browser(state, &config).await {
-        crate::utils::log_warn(format!("browser listener failed: {error}"));
+        crate::utils::log_warn(format!("browser listener failed: {error:#}"));
         state
             .config_runtime
             .errors
             .write()
             .await
             .insert("browser".into(), "browser_listener_failed".into());
+    }
+}
+
+pub(crate) async fn retry_browser_listener_if_due(state: &AppState, retry: &mut BrowserRetryState) {
+    if !state
+        .config_runtime
+        .errors
+        .read()
+        .await
+        .contains_key("browser")
+    {
+        retry.reset();
+        return;
+    }
+    if retry.next_attempt.is_some_and(|time| time > Instant::now()) {
+        return;
+    }
+
+    let _serial = state.config_runtime.apply_lock.lock().await;
+    if !state
+        .config_runtime
+        .errors
+        .read()
+        .await
+        .contains_key("browser")
+    {
+        retry.reset();
+        return;
+    }
+
+    let result = async {
+        let desired = Config::load(&state.config_path)?;
+        crate::config_apply::validate(&desired)?;
+        configure_browser(state, &desired).await?;
+        Ok::<_, anyhow::Error>(desired)
+    }
+    .await;
+    match result {
+        Ok(desired) => {
+            state.config.write().await.browser = desired.browser;
+            state.config_runtime.errors.write().await.remove("browser");
+            retry.reset();
+            crate::utils::log_info("browser listener is ready".into());
+        }
+        Err(error) => {
+            crate::utils::log_warn(format!("browser listener retry failed: {error:#}"));
+            retry.failed();
+        }
     }
 }
 

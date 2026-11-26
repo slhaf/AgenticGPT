@@ -40,7 +40,7 @@ Normal 并不等于 Room：Normal 运行时需显式启用相应 `room.*` 子工
 
 配置保存与运行态应用分别报告：只有 `mode/profile/agentId/workspaceRoot` 及 Tunnel 身份、凭据与 client 启动参数保留显式重启边界，待重启字段不阻止其他设置应用。Hub、HTTP、Browser、邮件账户、Secret 后端、Room 根目录和 Skills 安装并发由具体所有者局部协调，保留进程注册表与持久任务。新 policy（含 `policy.bubblewrap`）只用于之后接纳的请求；已准入操作保留各自快照，不自动重放副作用。完整边界见[配置生效说明](configuration.zh-CN.md#热加载与重启边界)。
 
-Tmux 工具集决定是否准备 tmux 会话。Browser 工具集控制扩展监听和 Browser 工具。启用后可通过 `browser.manual` 离线查阅 SDK，`browser.list` 报告当前连接及占用。浏览器连接关闭后，其租约失效。
+Tmux 工具集决定是否准备 tmux 会话。Browser 工具集控制扩展监听和 Browser 工具。启用后可通过 `browser.manual` 离线查阅 SDK，`browser.list` 以 `listenerReady` 报告扩展监听是否启动，以 `runtimeAvailable` 报告是否至少有一个扩展连接，并列出连接及占用。浏览器连接关闭后，其租约失效。
 
 `agentic-gpt local` 是 Unix MCP 客户端，使用常规 MCP 操作准入门并记录 `local:` 来源。
 
