@@ -209,7 +209,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 json!({
                     "type": "string",
                     "enum": ["read", "search"],
-                    "description": "read 读取；search 搜索 runtime 附带文档；按 action 传字段。",
+                    "description": "read 按路径读取内置手册，search 在手册中查找关键词。",
                 }),
             );
             add(
@@ -217,7 +217,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 json!({
                     "type": "string",
                     "minLength": 1,
-                    "description": "文档相对路径；read 拒绝绝对或越界路径。",
+                    "description": "read 使用的手册相对路径。quickstart.md 提供完整目录。",
                 }),
             );
             add(
@@ -1100,7 +1100,7 @@ fn tool_description(name: &str) -> String {
         "config.get" => "按paths路径段数组读取当前Agent的配置项及显式/有效状态，敏感值脱敏；包含点的事件类型或MCP服务器ID使用一个完整路径段。只读；先用config.manual查可用字段，不返回凭据原文。".to_owned(),
         "config.update" => "按序把set/unset/add/remove意图作用于最新持久配置，整批最终校验后保存一次。set替换目标，unset恢复缺省或删除条目；支持的集合add/remove幂等，有序列表整体set。dryRun=true只预览，实写重新基于届时最新配置；按修改前config.updatePolicy确认，拒绝/取消/不可用不写盘。保存成功与运行态生效分别报告；组件应用失败保留最后可用运行态，applyStatus=restart_required时不自动重启。敏感值不进入预览或公共上报。".to_owned(),
         "agent.info" => "查看本地 Agent 的身份、工作区、策略规则数量、进程/MCP 容量、确认通道、连接、配置和健康状态。返回事件提醒时会记录展示次数，不将事件标记为已处理。".to_string(),
-        "browser.manual" => "离线查阅 Agentic Browser JavaScript SDK 手册。使用 read 查看 quickstart.md 或 api.md，使用 search 搜索关键词。".to_string(),
+        "browser.manual" => "离线查阅 Agentic Browser 手册。使用 read 读取 quickstart.md 查看目录，或使用 search 按关键词查找 SDK 和操作指南。".to_string(),
         "browser.acquire" => "用 browser.list 返回的 browserId 申请一个命名租约。浏览器同一时间只接受一个租约，同名可续用同一浏览器并更新空闲时限。".to_string(),
         "browser.repl" => "在指定浏览器租约的持续会话中执行 JavaScript。先用 browser.manual 查阅 SDK。脚本可以读取和操作网页。执行超时后，已经发生的网页动作仍然有效。".to_string(),
         "browser.reset" => "清空指定租约的 JavaScript 会话和页面引用。重置后可继续使用同名租约。".to_string(),

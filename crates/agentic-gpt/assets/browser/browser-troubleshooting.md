@@ -1,0 +1,5 @@
+# Browser Interaction Troubleshooting
+- Do not inspect browser-use source code or switch to an unrelated control mechanism before using the selected browser's documented API.
+- A stale or missing tab, an empty `browser.tabs.list()` result, or an unavailable Playwright injected helper is not evidence that the selected browser disconnected. Empty tab lists are normal after tab cleanup. Keep the existing browser binding, obtain or create a fresh tab in that browser, and use its documented non-Playwright alternatives. Do not reselect the browser or reread its documentation for these errors.
+- If an error explicitly reports that the browser disconnected or the lease expired, check `browser.list`. Once that profile is online and available, use `browser.acquire` with its `browserId` and the same lease name. Inspect `browser.tabs.list()` for a handoff. To continue in an existing user tab, select it from a fresh `browser.user.openTabs()` listing and claim it.
+- If a documented API is unavailable on the selected browser, use the alternatives that its effective API and capabilities expose rather than guessing hidden methods.

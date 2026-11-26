@@ -5,12 +5,27 @@ const MAX_READ_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_SEARCH_OUTPUT_BYTES: usize = 256 * 1024;
 const DEFAULT_RESULTS: usize = 50;
 const DEFAULT_CONTEXT_LINES: usize = 2;
-const DOCUMENTS: [(&str, &str); 2] = [
-    ("api.md", include_str!("../../assets/browser/api.md")),
-    (
-        "quickstart.md",
-        include_str!("../../assets/browser/quickstart.md"),
-    ),
+macro_rules! page {
+    ($path:literal) => {
+        ($path, include_str!(concat!("../../assets/browser/", $path)))
+    };
+}
+
+const DOCUMENTS: &[(&str, &str)] = &[
+    page!("quickstart.md"),
+    page!("session-naming.md"),
+    page!("api-use-behavior.md"),
+    page!("accessibility.md"),
+    page!("tab-claiming-chrome.md"),
+    page!("tab-cleanup-chrome.md"),
+    page!("browser-safety.md"),
+    page!("confirmations.md"),
+    page!("local-web-development.md"),
+    page!("screenshots.md"),
+    page!("connection-troubleshooting.md"),
+    page!("browser-troubleshooting.md"),
+    page!("browser-control-interruption.md"),
+    page!("api.md"),
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -112,7 +127,7 @@ pub(crate) fn search(request: SearchRequest) -> Result<SearchResult> {
         truncated: false,
     };
     let mut output_bytes = 2;
-    for (path, document) in DOCUMENTS {
+    for &(path, document) in DOCUMENTS {
         result.scanned_files += 1;
         result.scanned_bytes += document.len() as u64;
         let lines: Vec<_> = document.lines().map(str::to_owned).collect();
